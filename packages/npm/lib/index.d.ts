@@ -14,6 +14,21 @@ export interface MessageAction extends MessageDraft {
   request_id: string;
   preview_digest?: string;
 }
+export interface MessengerOperationPreview {
+  account: string;
+  operation: string;
+  chat_id?: string;
+  message_id?: string;
+  /** Exact archived message revision; required by the selected message action. */
+  expected_revision?: number;
+  /** Strict allowlisted parameters from listMessengerOperations, never a raw RPC payload. */
+  parameters?: Arguments;
+}
+export interface MessengerOperationAction extends MessengerOperationPreview {
+  request_id: string;
+  /** Required for mutations; binds payload but never proves owner approval. */
+  preview_digest?: string;
+}
 export declare const tools: readonly string[];
 export declare class AnyMsgError extends Error {
   readonly code: string;
@@ -47,4 +62,12 @@ export declare class AnyMsgClient {
   /** Rich content requires the reviewed preview digest and exact owner confirmation. */
   sendMessage(args: MessageAction): Promise<Record<string,unknown>>;
   getSendStatus(args: {send_id:string}): Promise<Record<string,unknown>>;
+  /** Passive catalog and scoped permission read, with no provider request. */
+  listMessengerOperations(args: {account:string}): Promise<Record<string,unknown>>;
+  /** Passive validation; show exact targets, effects and warnings before owner confirmation. */
+  previewMessengerOperation(args: MessengerOperationPreview): Promise<Record<string,unknown>>;
+  /** Separate live-operation permissions and account opt-in; never retries submitted/unknown effects. */
+  executeMessengerOperation(args: MessengerOperationAction): Promise<Record<string,unknown>>;
+  /** Read a scoped receipt without another provider request. */
+  getMessengerOperation(args: {operation_id:string}): Promise<Record<string,unknown>>;
 }

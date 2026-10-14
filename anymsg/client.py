@@ -23,7 +23,38 @@ SAFE_ERROR_CODES = frozenset({
     'invalid_message_format','unsafe_message_markup','invalid_message_entities',
     'formatting_too_complex','unsupported_message_formatting',
     'lossy_formatting_requires_confirmation','message_too_long','preview_required','preview_mismatch',
+    'unsupported_operation','invalid_operation_parameters','operation_disabled','operation_not_ready',
+    'operation_target_changed','operation_access_changed','operation_result_unknown',
+    'operation_expired','operation_rejected','invalid_operation_result',
 })
+
+
+_MESSENGER_FIELDS = {
+    'list_messenger_operations': ({'account'}, {'account'}),
+    'preview_messenger_operation': ({'account', 'operation'},
+        {'account', 'operation', 'chat_id', 'message_id', 'expected_revision', 'parameters'}),
+    'execute_messenger_operation': ({'account', 'operation', 'request_id'},
+        {'account', 'operation', 'chat_id', 'message_id', 'expected_revision', 'parameters',
+         'request_id', 'preview_digest'}),
+    'get_messenger_operation': ({'operation_id'}, {'operation_id'}),
+}
+_OMITTED = object()
+
+
+def _messenger_parameters(operation, parameters):
+    """Reject malformed/unknown envelopes before transport; backend checks the catalog."""
+    required, allowed = _MESSENGER_FIELDS[operation]
+    if not isinstance(parameters, dict) or not required <= parameters.keys() or parameters.keys() - allowed:
+        raise ValueError('invalid_parameters')
+    for name, value in parameters.items():
+        if name == 'expected_revision':
+            if type(value) is not int or value < 0: raise ValueError('invalid_parameters')
+        elif name == 'parameters':
+            if not isinstance(value, dict) or any(type(key) is not str for key in value):
+                raise ValueError('invalid_parameters')
+        elif type(value) is not str:
+            raise ValueError('invalid_parameters')
+    return parameters
 
 
 class AnyMsgError(RuntimeError):
@@ -95,6 +126,8 @@ class Client:
         parameters = {} if parameters is None else parameters
         if not isinstance(parameters,dict) or "token" in parameters or any(not isinstance(k,str) for k in parameters):
             raise ValueError("invalid_parameters")
+        if operation in _MESSENGER_FIELDS:
+            _messenger_parameters(operation, parameters)
         try:
             body=json.dumps(parameters,ensure_ascii=False,allow_nan=False,separators=(",",":")).encode("utf-8")
         except (ValueError,TypeError,RecursionError):
@@ -163,3 +196,31 @@ class Client:
 
     def get_send_status(self,send_id):
         return self.call('get_send_status',{'send_id':send_id})
+
+    def list_messenger_operations(self, *, account):
+        """Read this account's allowlisted operations and your independently scoped grants."""
+        return self.call('list_messenger_operations', {'account': account})
+
+    def preview_messenger_operation(self, *, account, operation, chat_id='', message_id='',
+                                   expected_revision=0, parameters=_OMITTED):
+        """Passively validate intent. A preview digest is not human approval."""
+        return self.call('preview_messenger_operation', dict(account=account, operation=operation,
+            chat_id=chat_id, message_id=message_id, expected_revision=expected_revision,
+            parameters={} if parameters is _OMITTED else parameters))
+
+    def execute_messenger_operation(self, *, account, operation, request_id, chat_id='',
+                                   message_id='', expected_revision=0, parameters=_OMITTED,
+                                   preview_digest=''):
+        """Queue exact confirmed intent; poll the receipt and never retry ambiguous effects.
+
+        Named live-read permissions are separate. For every mutation, the acting
+        agent obtains exact owner confirmation; the digest only binds the payload.
+        """
+        return self.call('execute_messenger_operation', dict(account=account, operation=operation,
+            chat_id=chat_id, message_id=message_id, expected_revision=expected_revision,
+            parameters={} if parameters is _OMITTED else parameters,
+            request_id=request_id, preview_digest=preview_digest))
+
+    def get_messenger_operation(self, *, operation_id):
+        """Read this key's scoped operation receipt without invoking the provider again."""
+        return self.call('get_messenger_operation', {'operation_id': operation_id})

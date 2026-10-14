@@ -1,6 +1,7 @@
 import {recoverNavigation} from './navigation.mjs';
 // Private child process. No TCP listener, HTTP API or agent credentials.
 import {sendText} from './outgoing.mjs';
+import {executeOperation,OPERATION_ERRORS} from './operations.mjs';
 import fs from 'node:fs';
 import {runLane,sendingSocket} from './ipc.mjs';
 import {DiskCapture,event,asId,chatId,allows,cursor,compare,readPolicy} from './capture.mjs';
@@ -134,7 +135,7 @@ async function metadata(chat,id,descriptor) {
     throw new Error('media_reference_changed');
   return result.metadata;
 }
-const SAFE=new Set([...CONNECTION_ERRORS,'media_unavailable','media_timeout','media_network_error',
+const SAFE=new Set([...CONNECTION_ERRORS,...OPERATION_ERRORS,'media_unavailable','media_timeout','media_network_error',
   'media_metadata_unavailable','media_reference_changed','unsupported_media_type','media_hash_mismatch',
   'media_size_mismatch','media_size_limit','invalid_media_path','chat_excluded','provider_response_too_large',
   'provider_page_stalled','send_expired','sending_disabled','send_target_invalid','send_receipt_mismatch']);
@@ -150,6 +151,7 @@ async function handle(request,emit) {
       capture(receipt.message);
       result={provider_message_id:receipt.provider_message_id};
     }
+    else if(method==='messenger_operation')result=await executeOperation(client,params,currentPolicy);
     else if(method==='media'){
       const meta=await metadata(params.chat,params.message,params.descriptor);
       for await(const chunk of download(meta,cfg.max_media_bytes))await emit({id:request.id,chunk:chunk.toString('base64')});
@@ -166,6 +168,6 @@ sending.on('end',()=>void stop(0));
 try {
   await Promise.all([
     runLane(process.stdin,process.stdout,{methods:['start','policy','dialogs','page','media'],handle,safe:SAFE,onError}),
-    runLane(sending,sending,{methods:['send_text'],handle,safe:SAFE,onError}),
+    runLane(sending,sending,{methods:['send_text','messenger_operation'],handle,safe:SAFE,onError}),
   ]);
 }catch{failed('provider_disconnected');await stop(1);}

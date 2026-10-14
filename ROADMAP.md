@@ -1,6 +1,10 @@
 # Roadmap
 
 This library stays focused on messenger collection and an agent interface.
+Version 0.9.15 adds an allowlisted live messenger-operation interface, independent
+key ceilings and account opt-in. See [MESSENGER_OPERATIONS.md](MESSENGER_OPERATIONS.md)
+and the [provider coverage audit](MESSENGER_CAPABILITY_AUDIT.md). This is an expanded
+first catalog, not full parity with every upstream method.
 Task/project management is outside the archive. Version 0.9.14 adds passive formatting previews, reviewed rich-text sends and
 versioned incoming formatting evidence ([FORMATTING.md](FORMATTING.md)).
 Version 0.9.13 adds passive

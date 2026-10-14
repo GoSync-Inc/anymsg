@@ -28,6 +28,10 @@ GRANT SELECT ON whatsapp_identity_observations TO messaging_gateway;
 GRANT SELECT ON account_policies TO messaging_gateway;
 GRANT SELECT ON outgoing_messages TO messaging_gateway;
 GRANT SELECT(epoch) ON collector_leases TO messaging_gateway;
-GRANT INSERT(principal,key_id,scope_version,request_id,request_hash,account,chat,
+GRANT INSERT(principal,key_id,scope_version,key_permission_version,request_id,request_hash,account,chat,
     provider_chat,body,reply_provider_id,source_text,source_format,render_artifact,render_policy,preview_digest) ON outgoing_messages TO messaging_gateway;
 GRANT SELECT ON message_receipts,receipt_event_jobs,receipt_event_publications TO messaging_gateway;
+GRANT SELECT ON messenger_commands TO messaging_gateway;
+GRANT INSERT(principal,key_id,scope_version,key_permission_version,request_id,request_hash,
+    account,chat,message,expected_revision,operation,permission,mutation,payload,preview_digest)
+    ON messenger_commands TO messaging_gateway;

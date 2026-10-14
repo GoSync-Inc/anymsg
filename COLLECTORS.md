@@ -148,8 +148,11 @@ Owner onboarding, after backup/migration and host sandbox acceptance:
    does not start the collector.
 4. Enable/start **one** matching service, verify live texts/files/reconnect and
    archive identities, then repeat separately for the second account. Keep old
-   clients disabled until a verified rollback. There are no send RPCs in this
-   collector; drafts/outbox are a separate planned boundary.
+   clients disabled until a verified rollback. Confirmed text sends and allowlisted
+   [messenger operations](MESSENGER_OPERATIONS.md) run through this existing
+   collector's priority lane under fresh key/account/scope checks. Passive archive
+   reads do not invoke this lane or mark provider chats read. Do not start a second
+   client against the same profile for agent actions.
 
 Never fix a failing browser sandbox check by adding `--no-sandbox`, privileged
 mode or an unconfined container. Resolve the smallest host/container policy

@@ -6,13 +6,15 @@ from pathlib import Path
 
 from .store import Store
 from .policy import PERMISSIONS, UNSET
+from .messenger_operations import OPERATIONS
 
 
 def main():
     parser=argparse.ArgumentParser()
     parser.add_argument('command',choices=['serve','init','migrate','issue-key','revoke-key',
         'replay','snapshot','verify-restore','quarantine-restore','register-account',
-        'set-access','list-keys','audit-tail','set-sending'])
+        'set-access','list-keys','audit-tail','set-sending','set-key-permissions',
+        'set-messenger-operations'])
     parser.add_argument('--principal')
     parser.add_argument('--accounts',nargs='+')
     parser.add_argument('--key-file',type=Path)
@@ -21,6 +23,10 @@ def main():
     group.add_argument('--chats',nargs='*',default=UNSET)
     group.add_argument('--all-chats',action='store_true')
     parser.add_argument('--permissions',nargs='*',default=UNSET,choices=sorted(PERMISSIONS))
+    parser.add_argument('--key-permissions',nargs='*',default=UNSET,choices=sorted(PERMISSIONS),
+        help='issue-key: independently narrow this key within the principal permission ceiling')
+    parser.add_argument('--operations',nargs='*',default=UNSET,choices=sorted(OPERATIONS),
+        help='set-messenger-operations: explicit account opt-in; an empty list disables all')
     state=parser.add_mutually_exclusive_group()
     state.add_argument('--enable',action='store_true')
     state.add_argument('--disable',action='store_true')
@@ -64,6 +70,11 @@ def main():
             from .archive import Archive
             Archive(store).set_sending(args.account,args.enable)
             print(json.dumps({'account':args.account,'send_enabled':args.enable}))
+        elif args.command=='set-messenger-operations':
+            if not args.account or args.operations is UNSET:
+                parser.error('set-messenger-operations requires --account and explicit --operations')
+            store.set_messenger_operations(args.account,args.operations)
+            print(json.dumps({'account':args.account,'operations_enabled':args.operations}))
         elif args.command=='replay':
             if not args.input or not args.spool: parser.error('replay requires --input and --spool')
             from .archive import Archive
@@ -99,7 +110,8 @@ def main():
             fd=os.open(args.key_file,os.O_CREAT|os.O_EXCL|os.O_WRONLY,0o600)
             with os.fdopen(fd,'w') as out:
                 out.write(store.issue_key(args.principal,args.accounts,args.days,
-                    chats=None if args.all_chats else args.chats,permissions=args.permissions)+'\n')
+                    chats=None if args.all_chats else args.chats,permissions=args.permissions,
+                    key_permissions=args.key_permissions)+'\n')
             print(json.dumps({'issued':True,'principal':args.principal,'key_file':str(args.key_file)}))
         elif args.command=='revoke-key':
             if bool(args.key_file)==bool(args.key_id):parser.error('revoke-key requires exactly one of --key-file or --key-id')
@@ -111,6 +123,10 @@ def main():
                 chats=None if args.all_chats else args.chats,permissions=args.permissions,
                 enabled=True if args.enable else (False if args.disable else UNSET))
             print(json.dumps(result))
+        elif args.command=='set-key-permissions':
+            if not args.key_id or args.permissions is UNSET:
+                parser.error('set-key-permissions requires --key-id and explicit --permissions')
+            print(json.dumps(store.set_key_permissions(args.key_id,args.permissions)))
         elif args.command=='list-keys':
             if not args.principal:parser.error('list-keys requires --principal')
             print(json.dumps(store.list_keys(args.principal)))

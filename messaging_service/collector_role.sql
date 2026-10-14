@@ -19,7 +19,7 @@ GRANT SELECT,INSERT,UPDATE ON whatsapp_identity_observations TO messaging_collec
 GRANT SELECT,INSERT,UPDATE,DELETE ON media_reservations TO messaging_collector;
 -- Outbound dispatch rechecks only policy and public key metadata, never token hashes.
 GRANT SELECT(id,accounts,chat_ids,permissions,enabled,scope_version) ON principals TO messaging_collector;
-GRANT SELECT(id,principal,revoked,expires_at) ON api_keys TO messaging_collector;
+GRANT SELECT(id,principal,revoked,expires_at,permissions,permission_version) ON api_keys TO messaging_collector;
 -- Rich payloads are immutable to the collector; it dispatches stored output only.
 GRANT SELECT ON outgoing_messages TO messaging_collector;
 GRANT UPDATE(status,started_at,finished_at,lease_epoch,provider_message_id,error_code)
@@ -29,3 +29,6 @@ GRANT INSERT(principal,key_id,operation,outcome,error_code,resource_ids,actor) O
 GRANT SELECT,INSERT ON message_receipts,receipt_event_jobs,receipt_event_publications TO messaging_collector;
 GRANT UPDATE(cursor_id,complete) ON receipt_event_jobs TO messaging_collector;
 GRANT UPDATE(receipt,state,published_at) ON receipt_event_publications TO messaging_collector;
+GRANT SELECT ON messenger_commands TO messaging_collector;
+GRANT UPDATE(status,started_at,finished_at,lease_epoch,result,error_code)
+    ON messenger_commands TO messaging_collector;

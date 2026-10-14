@@ -10,7 +10,7 @@ import re
 from psycopg.types.json import Jsonb
 
 from .envelope import canonical, stable_id
-from .policy import audit, lock_principal, targets
+from .policy import audit, effective_permissions, lock_principal, targets
 from .store import APIError, serial
 
 
@@ -213,10 +213,10 @@ def enqueue(c,p,account,chat_id,text,request_id,reply_to='',format='plain',
     count=c.execute("SELECT count(*) AS n FROM outgoing_messages WHERE account=%s AND created_at>clock_timestamp()-interval '1 minute'",
         (account,)).fetchone()['n']
     if count>=60:raise APIError('rate_limited',429)
-    row=c.execute('''INSERT INTO outgoing_messages(principal,key_id,scope_version,request_id,request_hash,
+    row=c.execute('''INSERT INTO outgoing_messages(principal,key_id,scope_version,key_permission_version,request_id,request_hash,
         account,chat,provider_chat,body,reply_provider_id,source_text,source_format,render_artifact,render_policy,
-        preview_digest) VALUES(%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s) RETURNING *''',
-        (p['id'],p['key_id'],p['scope_version'],request_id,request_hash,account,chat_id,chat['provider_chat'],
+        preview_digest) VALUES(%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s) RETURNING *''',
+        (p['id'],p['key_id'],p['scope_version'],p['key_permission_version'],request_id,request_hash,account,chat_id,chat['provider_chat'],
          artifact['provider_text'],reply_id,text,format,Jsonb(artifact),Jsonb(draft['render_policy']),preview_digest or None)).fetchone()
     targets(p,[chat_id,row['id']])
     return result(row,c)
@@ -253,7 +253,8 @@ class OutgoingWorker:
                 ORDER BY created_at,id LIMIT 1 FOR UPDATE SKIP LOCKED""",(st.account,)).fetchone()
             if not row:return None
             lock_principal(c,row['principal'],shared=True)
-            access=c.execute('''SELECT p.*,k.revoked,k.expires_at AS key_expires,clock_timestamp() AS observed
+            access=c.execute('''SELECT p.*,k.revoked,k.expires_at AS key_expires,
+                k.permissions AS key_permissions,k.permission_version AS key_permission_version,clock_timestamp() AS observed
                 FROM principals p JOIN api_keys k ON k.principal=p.id WHERE p.id=%s AND k.id=%s''',
                 (row['principal'],row['key_id'])).fetchone()
             policy=c.execute('SELECT * FROM account_policies WHERE account=%s',(st.account,)).fetchone()
@@ -262,7 +263,9 @@ class OutgoingWorker:
             observed=c.execute('SELECT clock_timestamp() AS now').fetchone()['now']
             if row['expires_at']<=observed:reason='send_expired'
             elif (not access or not access['enabled'] or access['revoked'] or
-                    access['key_expires']<=access['observed'] or 'send' not in access['permissions'] or
+                    access['key_expires']<=access['observed'] or
+                    'send' not in effective_permissions(access['permissions'],access['key_permissions']) or
+                    row['key_permission_version']!=access['key_permission_version'] or
                     row['scope_version']!=access['scope_version'] or not permitted(access,st.account,row['chat'])):
                 reason='send_access_changed'
             elif not policy or not policy['enabled'] or not policy['send_enabled'] or not CollectorState.allows(policy,row['provider_chat']):
@@ -277,6 +280,38 @@ class OutgoingWorker:
             audit(c,{'id':row['principal'],'key_id':row['key_id'],'_audit_targets':[row['id'],row['chat']]},'send_dispatch','ok')
             row['expires_at']=row['expires_at'].timestamp()
             return row
+
+    def preflight(self,job):
+        """Recheck the dispatch after waiting for a provider's rate gate."""
+        st=self.state
+        with st.archive.store.pool.connection() as c:
+            st.archive.fence(c,st.account,st.lease)
+            lock_principal(c,job['principal'],shared=True)
+            row=c.execute('SELECT status,lease_epoch,expires_at FROM outgoing_messages WHERE id=%s',
+                (job['id'],)).fetchone()
+            access=c.execute('''SELECT p.*,k.revoked,k.expires_at AS key_expires,
+                k.permissions AS key_permissions,k.permission_version AS key_permission_version,
+                clock_timestamp() AS observed FROM principals p JOIN api_keys k ON k.principal=p.id
+                WHERE p.id=%s AND k.id=%s''',(job['principal'],job['key_id'])).fetchone()
+            if not row or row['status']!='dispatching' or row['lease_epoch']!=st.lease[1]:
+                raise SendRejected('send_access_changed')
+            if access and row['expires_at']<=access['observed']:
+                raise SendRejected('send_expired')
+            if (not access or not access['enabled'] or access['revoked'] or
+                access['key_expires']<=access['observed'] or
+                'send' not in effective_permissions(access['permissions'],access['key_permissions']) or
+                job['scope_version']!=access['scope_version'] or
+                job['key_permission_version']!=access['key_permission_version'] or
+                not permitted(access,st.account,job['chat'])):
+                raise SendRejected('send_access_changed')
+            policy=c.execute('SELECT * FROM account_policies WHERE account=%s',(st.account,)).fetchone()
+            from .collector_state import CollectorState
+            if not policy or not policy['enabled'] or not policy['send_enabled'] or not CollectorState.allows(policy,job['provider_chat']):
+                raise SendRejected('sending_disabled')
+            if job.get('reply_provider_id') and not c.execute('''SELECT 1 FROM messages WHERE account=%s
+                AND chat=%s AND provider_id=%s AND NOT deleted''',
+                (st.account,job['chat'],job['reply_provider_id'])).fetchone():
+                raise SendRejected('send_target_invalid')
 
     def finish(self,job,status,provider_id=None,code=None):
         st=self.state
@@ -299,13 +334,17 @@ class OutgoingWorker:
         if not job:return False
         if job.get('cancelled'):return True
         try:
+            await asyncio.to_thread(self.preflight,job)
+            async def preflight():await asyncio.to_thread(self.preflight,job)
+            job['_preflight']=preflight
             receipt=await asyncio.wait_for(self.send(job),30)
             provider_id=receipt.get('provider_message_id') if isinstance(receipt,dict) else None
             if not isinstance(provider_id,str) or not 1<=len(provider_id)<=256:
                 raise RuntimeError('send_receipt_missing')
         except SendRejected as exc:
-            code=str(exc) if str(exc) in ('send_expired','sending_disabled','send_target_invalid') else 'send_rejected'
-            await asyncio.to_thread(self.finish,job,'expired' if code=='send_expired' else 'failed',None,code)
+            code=str(exc) if str(exc) in ('send_expired','sending_disabled','send_target_invalid','send_access_changed') else 'send_rejected'
+            terminal='expired' if code=='send_expired' else 'cancelled' if code=='send_access_changed' else 'failed'
+            await asyncio.to_thread(self.finish,job,terminal,None,code)
         except Exception:
             await asyncio.to_thread(self.finish,job,'unknown',None,'send_result_unknown')
         else:

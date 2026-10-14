@@ -6,7 +6,11 @@ Collect messages and attachments once, then let agents search and read them thro
 MCP or HTTP with separate credentials and account/chat permissions. Original files
 use SHA-256 deduplication; references to every source message stay separate.
 
-Development version: **0.9.14 — experimental**, PostgreSQL schema 24.
+Development version: **0.9.15 — experimental**, PostgreSQL schema 25.
+
+The expanded live-operation catalog covers messages, registered attachments,
+reactions, groups, contacts and profile fields. Access requires explicit per-key
+grants and account opt-in; see [MESSENGER_OPERATIONS.md](MESSENGER_OPERATIONS.md).
 Published npm/PyPI release: **0.9.9**; sending and independent WhatsApp IPC lanes
 require the development source until the next package release.
 

@@ -240,7 +240,7 @@ def test_policy_refresh_never_waits_for_media_rpc_lock(tmp_path):
             policy={'discover_chats':True,'include_chats':[],'exclude_chats':['123@c.us']}
             async with p.lock:await asyncio.wait_for(p.set_policy(policy),.5)
             saved=json.loads((tmp_path/'events'/'.policy').read_text())
-            assert saved['policy']=={**policy,'enabled':True,'send_enabled':False} and saved['expires_at']>datetime.now(timezone.utc).timestamp()
+        assert saved['policy']=={**policy,'enabled':True,'send_enabled':False,'operations_enabled':[]} and saved['expires_at']>datetime.now(timezone.utc).timestamp()
             assert (tmp_path/'events'/'.policy').stat().st_mode&0o077==0
     asyncio.run(run())
 

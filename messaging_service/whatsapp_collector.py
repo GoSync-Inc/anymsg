@@ -211,6 +211,11 @@ class NodeProvider:
         if not isinstance(result,dict) or result.get('id')!=request: raise RuntimeError('provider_protocol_error')
         if 'error' in result:
             code=result['error']
+            if isinstance(code,str) and code in ('operation_invalid_parameters','operation_disabled','operation_expired',
+                'operation_target_invalid','operation_target_unavailable','operation_unsupported',
+                'operation_query_failed','operation_result_too_large','registered_file_invalid'):
+                from .commands import CommandRejected
+                raise CommandRejected(code)
             if code in ('send_expired','sending_disabled','send_target_invalid'):
                 from .outgoing import SendRejected
                 raise SendRejected(code)
@@ -223,7 +228,7 @@ class NodeProvider:
     def send_gate(self): return self.send_lock
 
     async def call(self,method,params):
-        if method=='send_text':raise RuntimeError('send_gate_required')
+        if method in ('send_text','messenger_operation'):raise RuntimeError('send_gate_required')
         async with self.lock:
             return await self._call_unlocked(method,params)
 
@@ -237,7 +242,8 @@ class NodeProvider:
             raise # Complete error frame; pipe is still synchronized.
         except Exception as exc:
             from .outgoing import SendRejected
-            if isinstance(exc,SendRejected):raise
+            from .commands import CommandRejected
+            if isinstance(exc,(SendRejected,CommandRejected)):raise
             await self.disconnect(); raise
         except BaseException:
             # After cancellation/partial response, never reuse a desynchronized pipe.
@@ -245,6 +251,7 @@ class NodeProvider:
     async def set_policy(self,policy):
         self.policy={k:policy[k] for k in ('discover_chats','include_chats','exclude_chats')}
         self.policy.update(enabled=policy.get('enabled',True),send_enabled=policy.get('send_enabled',False))
+        self.policy['operations_enabled']=policy.get('operations_enabled',[])
         # Separate control file: a long media response must not delay exclusions
         # or lease liveness. Node fails closed when this short-lived policy expires.
         def save():
@@ -264,9 +271,19 @@ class NodeProvider:
         if not self.send_lock.locked():raise RuntimeError('send_gate_required')
         from .outgoing import dispatch_payload
         payload=dispatch_payload(job,'whatsapp')
+        if job.get('_preflight') is not None:await job['_preflight']()
         return await self._call_unlocked('send_text',{'chat':job['provider_chat'],'text':payload['text'],
             'link_preview':payload['link_preview'],
             'reply_provider_id':job.get('reply_provider_id'),'expires_at':job['expires_at']},sending=True)
+    async def execute_operation(self,job):
+        if not self.send_lock.locked():raise RuntimeError('send_gate_required')
+        if job.get('_preflight') is not None:await job['_preflight']()
+        # Internal callable/DB metadata never enters the subprocess protocol.
+        payload={key:value for key,value in job.items() if key in (
+            'operation','parameters','provider_chat','provider_message_id','expires_at',
+            'source_provider_chat','source_provider_message','registered_file_path','trusted_blob_directory',
+            'file_digest','file_bytes','file_mime','file_name')}
+        return await self._call_unlocked('messenger_operation',payload,sending=True)
     async def chunks(self,source,descriptor):
         complete=False
         async with self.lock:

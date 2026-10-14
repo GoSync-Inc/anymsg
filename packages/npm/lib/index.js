@@ -4,6 +4,7 @@ const METHODS = Object.freeze([
   'get_attachment', 'get_file_text', 'get_file_segments', 'get_file_occurrences',
   'get_updates', 'ack_updates', 'get_reviews', 'record_review',
   'preview_message','send_message','get_send_status',
+  'list_messenger_operations','preview_messenger_operation','execute_messenger_operation','get_messenger_operation',
 ]);
 export const tools = METHODS;
 const SAFE_ERRORS = new Set([
@@ -19,7 +20,55 @@ const SAFE_ERRORS = new Set([
   'invalid_message_format','unsafe_message_markup','invalid_message_entities',
   'formatting_too_complex','unsupported_message_formatting',
   'lossy_formatting_requires_confirmation','message_too_long','preview_required','preview_mismatch',
+  'unsupported_operation','invalid_operation_parameters','operation_disabled','operation_not_ready',
+  'operation_target_changed','operation_access_changed','operation_result_unknown',
+  'operation_expired','operation_rejected','invalid_operation_result',
 ]);
+
+const MESSENGER_FIELDS = Object.freeze({
+  list_messenger_operations: [['account'],['account']],
+  preview_messenger_operation: [['account','operation'],
+    ['account','operation','chat_id','message_id','expected_revision','parameters']],
+  execute_messenger_operation: [['account','operation','request_id'],
+    ['account','operation','chat_id','message_id','expected_revision','parameters','request_id','preview_digest']],
+  get_messenger_operation: [['operation_id'],['operation_id']],
+});
+function plainObject(value) {
+  return value !== null && typeof value === 'object' &&
+    [Object.prototype,null].includes(Object.getPrototypeOf(value));
+}
+function operationJson(value,ancestors=new Set(),depth=0) {
+  if (depth>32) return false;
+  if (value===null || typeof value==='string' || typeof value==='boolean') return true;
+  if (typeof value==='number') return Number.isFinite(value);
+  if (!Array.isArray(value) && !plainObject(value) || ancestors.has(value)) return false;
+  ancestors.add(value);
+  let valid;
+  if (Array.isArray(value)) valid=value.every(item=>operationJson(item,ancestors,depth+1));
+  else valid=Reflect.ownKeys(value).every(key=> {
+    const descriptor=Object.getOwnPropertyDescriptor(value,key);
+    return typeof key==='string' && descriptor && 'value' in descriptor &&
+      operationJson(descriptor.value,ancestors,depth+1);
+  });
+  ancestors.delete(value);
+  return valid;
+}
+function messengerArguments(method,args) {
+  const [required,allowed] = MESSENGER_FIELDS[method];
+  if (!plainObject(args) || required.some(key=>!Object.hasOwn(args,key)) ||
+      Reflect.ownKeys(args).some(key=>!allowed.includes(key) ||
+        !('value' in Object.getOwnPropertyDescriptor(args,key))))
+    throw new TypeError('Invalid messenger operation arguments');
+  for (const [key,value] of Object.entries(args)) {
+    if (key === 'expected_revision') {
+      if (!Number.isSafeInteger(value) || value < 0) throw new TypeError('Invalid operation revision');
+    } else if (key === 'parameters') {
+      if (!plainObject(value) || !operationJson(value))
+        throw new TypeError('Operation parameters must be an object with string keys');
+    } else if (typeof value !== 'string') throw new TypeError('Operation fields must be strings');
+  }
+  return args;
+}
 
 export class AnyMsgError extends Error {
   constructor(code, {status = 0, requestId = null, retryable = false} = {}) {
@@ -107,6 +156,7 @@ export class AnyMsgClient {
     if (!METHODS.includes(method)) throw new TypeError('Unknown AnyMsg operation');
     if (!arguments_ || typeof arguments_ !== 'object' || Array.isArray(arguments_) || 'token' in arguments_)
       throw new TypeError('Arguments must be an object without a token field');
+    if (Object.hasOwn(MESSENGER_FIELDS,method)) messengerArguments(method,arguments_);
     let body;
     try { body = JSON.stringify(arguments_); } catch { throw new TypeError('Arguments must be JSON serializable'); }
     if (!body || Buffer.byteLength(body) > 16384) throw new TypeError('Request exceeds 16384 bytes');
@@ -157,4 +207,16 @@ export class AnyMsgClient {
   previewMessage(args) { return this.call('preview_message',args); }
   sendMessage(args) { return this.call('send_message',args); }
   getSendStatus(args) { return this.call('get_send_status',args); }
+  listMessengerOperations(args) {
+    return this.call('list_messenger_operations',messengerArguments('list_messenger_operations',args));
+  }
+  previewMessengerOperation(args) {
+    return this.call('preview_messenger_operation',messengerArguments('preview_messenger_operation',args));
+  }
+  executeMessengerOperation(args) {
+    return this.call('execute_messenger_operation',messengerArguments('execute_messenger_operation',args));
+  }
+  getMessengerOperation(args) {
+    return this.call('get_messenger_operation',messengerArguments('get_messenger_operation',args));
+  }
 }

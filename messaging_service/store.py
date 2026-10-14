@@ -1,7 +1,7 @@
 """PostgreSQL archive: one policy layer for HTTP and MCP.
 
 No provider sessions, network fetch, arbitrary SQL or server approval gate is
-exposed to agents. Opt-in sends are dispatched by existing operator collectors.
+exposed to agents. Reviewed opt-in operations use the existing fenced collectors.
 """
 from __future__ import annotations
 
@@ -23,7 +23,8 @@ from psycopg_pool import ConnectionPool
 from . import __version__
 from .policy import (DEFAULT_PERMISSIONS, OPERATION_PERMISSIONS, UNSET, audit,
                      key_id, lock_principal, normalize_policy, principal_id,
-                     scope_filter, targets)
+                     scope_filter, targets, effective_permissions, PERMISSIONS, normalize_list,
+                     LEGACY_PERMISSIONS)
 
 
 class APIError(Exception):
@@ -95,7 +96,8 @@ class Store:
         lock_principal(c, known['principal'], shared=True)
         # READ COMMITTED rechecks after a concurrent operator changed access.
         # clock_timestamp also rejects credentials that expired while waiting.
-        row = c.execute('''SELECT p.*, k.digest AS key_digest,k.id AS key_id FROM api_keys k
+        row = c.execute('''SELECT p.*, k.digest AS key_digest,k.id AS key_id,
+            k.permissions AS key_permissions,k.permission_version AS key_permission_version FROM api_keys k
             JOIN principals p ON p.id=k.principal
             WHERE k.digest=%s AND NOT k.revoked AND k.expires_at>clock_timestamp() AND p.enabled''',
             (key_digest,)).fetchone()
@@ -103,6 +105,8 @@ class Store:
             error = APIError(missing, status)
             error.audit_identity = {'id': known['principal'], 'key_id': known['id']}
             raise error
+        row['principal_permissions'] = row['permissions']
+        row['permissions'] = effective_permissions(row['permissions'], row['key_permissions'])
         return row
 
     @contextmanager
@@ -191,17 +195,26 @@ class Store:
 
     def capabilities(self, token):
         with self.authorized(token,'capabilities') as (c, p):
+            from .messenger_operations import CATALOG_VERSION,OPERATIONS,operation_manifest
             dataset=self.dataset(c,p)
             accounts = c.execute('SELECT id,platform,label,synthetic FROM accounts WHERE id=ANY(%s) ORDER BY id',
                                  ([r['id'] for r in dataset['sources']],)).fetchall()
             features={'read':['search','history','context','updates','reviews','search_people','search_files','get_file_text','get_file_occurrences','get_sync_status','get_file_segments','resolve_reference','preview_message'], 'download':['attachment'], 'cursor-write':['ack'], 'send':['send_message','get_send_status']}
             if 'read' in p['permissions']:features['review-write']=['record_review']
+            available=[feature for permission,names in features.items() if permission in p['permissions'] for feature in names]
+            operation_tools=['list_messenger_operations','preview_messenger_operation',
+                             'execute_messenger_operation','get_messenger_operation']
+            if any(spec['permission'] in p['permissions'] for spec in OPERATIONS.values()):
+                available.extend(operation_tools)
+            else:available.append('list_messenger_operations')
             return {'service': 'anymsg', 'version': __version__, **dataset,
                 'tool_manifest':{'version':__version__,'names':sorted(OPERATION_PERMISSIONS.keys()-{'download'}),
                     'discovery_action':'refresh_connection_if_tools_list_differs',
                     'rest_fallback':'POST /v1/{tool_name} with the same bearer and JSON parameters'},
                 'principal': p['id'], 'scope_version': p['scope_version'], 'accounts': accounts,
                 'credential_id':str(p['key_id']), 'permissions':p['permissions'],
+                'key_permission_ceiling':p['key_permissions'] if p['key_permissions'] is not None else sorted(LEGACY_PERMISSIONS),
+                'key_permission_version':p['key_permission_version'],
                 'chat_scope':{'all_in_permitted_accounts':p['chat_ids'] is None,'chat_ids':p['chat_ids']},
                 'auth_mode': 'managed_bearer_keys',
                 'search_options':{'filters':['accounts','chats','senders','from_time','to_time','direction'],
@@ -227,9 +240,10 @@ class Store:
                     'file_caption_provenance':'current_parent_message_revision_only',
                     'chat_coverage':True,'provider_id_lookup':'resolve_reference',
                     'empty_result_diagnostics':True,'message_conflicts':'scoped_active_and_historical'},
-                'available': [feature for permission,names in features.items() if permission in p['permissions'] for feature in names],
+                'available':available,
                 'sending':{'implemented':True,'approval_mode':'acting_agent_obtains_exact_owner_confirmation',
-                    'server_approval_gate':False,'text_only':True,'request_id_required':True,
+                    'server_approval_gate':False,'text_only':False,'legacy_send_message_text_only':True,
+                    'request_id_required':True,
                     'formatting':{'formats':['plain','markdown','html'],
                         'preview_tool':'preview_message','preview_permission':'read',
                         'preview_contacts_provider':False,'plain_default':True,
@@ -245,6 +259,17 @@ class Store:
                         'provider_timestamps_available':False,'historical_coverage_guaranteed':False,
                         'event_kind':'message.status','changes_provider_read_state':False},
                     'read_permission_does_not_allow_send':True},
+                'messenger_operations':{'implemented':True,'catalog_version':CATALOG_VERSION,
+                    'operation_count':len(OPERATIONS),'tools':operation_tools,
+                    'supported_count_by_platform':{platform:sum(item['supported'] for item in operation_manifest(platform))
+                                                   for platform in ('telegram','whatsapp')},
+                    'availability_tool':'list_messenger_operations','account_opt_in_required':True,
+                    'independent_key_permissions':True,'new_permissions_inherited_by_existing_keys':False,
+                    'administration':['groups','contacts','account_profile'],
+                    'archive_read_remains_passive':True,'provider_session_owner':'existing_fenced_collector',
+                    'mutation_preview_digest_required':True,'preview_digest_proves_owner_approval':False,
+                    'ambiguous_mutations':'unknown_no_automatic_retry','registered_file_limit_bytes':32*1024**2,
+                    'read_state_requires_explicit_permission':True},
                 'unavailable': ['guaranteed_full_history', 'drafts',
                                 'owner_approval', 'project_memory', 'schedules', 'oauth'],
                 'limits': {'page_size': 100, 'query_chars': 200,
@@ -270,6 +295,43 @@ class Store:
         from .outgoing import status
         with self.authorized(token,'get_send_status') as (c,p):
             return status(c,p,send_id)
+
+    def list_messenger_operations(self,token,account):
+        from .commands import manifest
+        with self.authorized(token,'list_messenger_operations') as (c,p):
+            return manifest(c,p,account)
+
+    def preview_messenger_operation(self,token,account,operation,chat_id='',message_id='',
+                                   expected_revision=0,parameters=None):
+        from .commands import preview
+        with self.authorized(token,'preview_messenger_operation') as (c,p):
+            return preview(self,c,p,account,operation,chat_id,message_id,expected_revision,parameters)
+
+    def execute_messenger_operation(self,token,account,operation,chat_id='',message_id='',
+                                   expected_revision=0,parameters=None,request_id='',preview_digest=''):
+        from .commands import enqueue
+        with self.authorized(token,'execute_messenger_operation') as (c,p):
+            return enqueue(self,c,p,account,operation,chat_id,message_id,expected_revision,
+                           parameters,request_id,preview_digest)
+
+    def get_messenger_operation(self,token,operation_id):
+        from .commands import status
+        with self.authorized(token,'get_messenger_operation') as (c,p):
+            return status(self,c,p,operation_id)
+
+    def set_messenger_operations(self,account,operations):
+        """Owner-only account opt-in; this method is not exposed through MCP."""
+        from .messenger_operations import operation_manifest
+        values=normalize_list(operations,maximum=100)
+        with self.pool.connection() as c:
+            row=c.execute('SELECT platform FROM accounts WHERE id=%s',(account,)).fetchone()
+            if not row:raise ValueError('unknown_account')
+            supported={entry['operation'] for entry in operation_manifest(row['platform']) if entry['supported']}
+            if set(values)-supported:raise ValueError('unsupported_operation')
+            changed=c.execute('UPDATE account_policies SET operations_enabled=%s WHERE account=%s',
+                              (values,account)).rowcount
+            if not changed:raise ValueError('unknown_account')
+            audit(c,None,'set_operations','ok')
 
     def list_chats(self, token, after='', limit=100, *, accounts=None,query='',chat_types=None,
                    order='id',exclude_channels=False,awaiting_reply=False,from_time='',to_time='',
@@ -547,8 +609,8 @@ class Store:
             c.execute("SET LOCAL statement_timeout='180s'")
             c.execute(Path(__file__).with_name('schema.sql').read_text())
             version=int(c.execute("SELECT value FROM probe_metadata WHERE name='schema_version'").fetchone()['value'])
-            if version>24: raise RuntimeError('database_newer_than_runtime')
-            for target,name in [(2,'002_archive.sql'),(3,'003_collectors.sql'),(4,'004_whatsapp.sql'),(5,'005_access.sql'),(6,'006_reviews.sql'),(7,'007_search_indexes.sql'),(8,'008_people.sql'),(9,'009_file_index.sql'),(10,'010_search_audit.sql'),(11,'011_telegram_window.sql'),(12,'012_search.sql'),(13,'013_file_search.sql'),(14,'014_collector_health.sql'),(15,'015_enrichment.sql'),(16,'016_file_content.sql'),(17,'017_chat_evidence.sql'),(18,'018_collector_operations.sql'),(19,'019_whatsapp_identities.sql'),(20,'020_processing_admission.sql'),(21,'021_media_storage.sql'),(22,'022_outgoing.sql'),(23,'023_receipts.sql'),(24,'024_formatting.sql')]:
+            if version>25: raise RuntimeError('database_newer_than_runtime')
+            for target,name in [(2,'002_archive.sql'),(3,'003_collectors.sql'),(4,'004_whatsapp.sql'),(5,'005_access.sql'),(6,'006_reviews.sql'),(7,'007_search_indexes.sql'),(8,'008_people.sql'),(9,'009_file_index.sql'),(10,'010_search_audit.sql'),(11,'011_telegram_window.sql'),(12,'012_search.sql'),(13,'013_file_search.sql'),(14,'014_collector_health.sql'),(15,'015_enrichment.sql'),(16,'016_file_content.sql'),(17,'017_chat_evidence.sql'),(18,'018_collector_operations.sql'),(19,'019_whatsapp_identities.sql'),(20,'020_processing_admission.sql'),(21,'021_media_storage.sql'),(22,'022_outgoing.sql'),(23,'023_receipts.sql'),(24,'024_formatting.sql'),(25,'025_operations.sql')]:
                 migration=Path(__file__).with_name('migrations')/name
                 sha=hashlib.sha256(migration.read_bytes()).hexdigest()
                 if version<target:
@@ -562,7 +624,8 @@ class Store:
                     applied=c.execute('SELECT sha256 FROM archive_migrations WHERE version=%s',(target,)).fetchone()
                     if not applied or applied['sha256']!=sha: raise RuntimeError('migration_checksum_mismatch')
 
-    def issue_key(self, principal, accounts, days=7, *, chats=UNSET, permissions=UNSET):
+    def issue_key(self, principal, accounts, days=7, *, chats=UNSET, permissions=UNSET,
+                  key_permissions=UNSET):
         principal_id(principal)
         if type(days) is not int or not 1<=days<=30:
             raise ValueError('invalid_key_lifetime')
@@ -573,11 +636,34 @@ class Store:
             if chats is UNSET:chats=old['chat_ids'] if old else None
             if permissions is UNSET:permissions=old['permissions'] if old else DEFAULT_PERMISSIONS
             accounts,chats,permissions=normalize_policy(c,accounts,chats,permissions)
+            implicit_ceiling=key_permissions is UNSET
+            if implicit_ceiling:key_permissions=sorted(LEGACY_PERMISSIONS|set(permissions))
+            key_permissions=normalize_list(key_permissions,maximum=len(PERMISSIONS))
+            if set(key_permissions)-(set(permissions)|(LEGACY_PERMISSIONS if implicit_ceiling else set())):
+                raise ValueError('invalid_key_permissions')
             self._write_policy(c,principal,old,accounts,chats,permissions,old['enabled'] if old else True)
-            issued=c.execute('INSERT INTO api_keys(digest,principal,expires_at) VALUES(%s,%s,%s) RETURNING id',
-                (digest(token),principal,datetime.now(timezone.utc)+timedelta(days=days))).fetchone()
+            issued=c.execute('INSERT INTO api_keys(digest,principal,expires_at,permissions) VALUES(%s,%s,%s,%s) RETURNING id',
+                (digest(token),principal,datetime.now(timezone.utc)+timedelta(days=days),key_permissions)).fetchone()
             audit(c,{'id':principal,'key_id':issued['id']},'issue_key','ok')
         return token
+
+    def set_key_permissions(self,credential_id,permissions):
+        credential_id=key_id(credential_id)
+        permissions=normalize_list(permissions,maximum=len(PERMISSIONS))
+        if set(permissions)-PERMISSIONS:raise ValueError('invalid_scope')
+        with self.pool.connection() as c:
+            known=c.execute('SELECT principal FROM api_keys WHERE id=%s',(credential_id,)).fetchone()
+            if not known:raise ValueError('unknown_key')
+            lock_principal(c,known['principal'])
+            principal=c.execute('SELECT permissions FROM principals WHERE id=%s',
+                                (known['principal'],)).fetchone()
+            if set(permissions)-set(principal['permissions']):raise ValueError('invalid_key_permissions')
+            row=c.execute('''UPDATE api_keys SET permissions=%s,
+                permission_version=permission_version+1 WHERE id=%s
+                RETURNING id,principal,permissions,permission_version''',
+                (permissions,credential_id)).fetchone()
+            audit(c,{'id':known['principal'],'key_id':credential_id},'set_key_permissions','ok')
+            return serial(row)
 
     @staticmethod
     def _write_policy(c,principal,old,accounts,chats,permissions,enabled):
@@ -624,7 +710,7 @@ class Store:
     def list_keys(self,principal):
         principal_id(principal)
         with self.pool.connection() as c:
-            return serial(c.execute('SELECT id,principal,expires_at,revoked FROM api_keys WHERE principal=%s ORDER BY expires_at,id',
+            return serial(c.execute('SELECT id,principal,expires_at,revoked,permissions,permission_version FROM api_keys WHERE principal=%s ORDER BY expires_at,id',
                                     (principal,)).fetchall())
 
     def audit_tail(self,principal='',limit=50):

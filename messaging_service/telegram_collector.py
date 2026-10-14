@@ -96,7 +96,7 @@ class TelethonProvider:
         redact_library_logs()
         logger=logging.getLogger('personal_os.telegram.transport')
         self.client=TelegramClient(cfg['session_file'],auth['api_id'],auth['api_hash'],
-            request_retries=2,connection_retries=3,auto_reconnect=True,
+            request_retries=0,connection_retries=3,auto_reconnect=True,
             flood_sleep_threshold=0,raise_last_call_error=True,base_logger=logger,
             catch_up=False,receive_updates=receive_updates)
         self.expected_user_id=auth['expected_user_id']
@@ -157,11 +157,16 @@ class TelethonProvider:
             # Recheck after waiting for the shared rate/cooldown gate.
             if datetime.now(timezone.utc).timestamp()>=job['expires_at']:
                 raise SendRejected('send_expired')
+            if job.get('_preflight') is not None:await job['_preflight']()
             message=await self.client.send_message(int(job['provider_chat']),payload['text'],**options)
             if not message or str(message.chat_id)!=job['provider_chat']:
                 raise RuntimeError('send_receipt_mismatch')
             return {'provider_message_id':str(message.id),'message':message}
         return await self.rpc(send,'provider_send')
+
+    async def execute_operation(self,job):
+        from .telegram_operations import execute
+        return await execute(self.client,job,verified_self=self.verified_self,governor=self.governor)
 
     async def dialogs(self,limit):
         result=[]
@@ -548,10 +553,19 @@ class TelegramCollector:
 
     async def outgoing_loop(self):
         from .outgoing import OutgoingWorker
+        from .commands import CommandWorker
         worker=OutgoingWorker(self.state,self.send_outgoing,getattr(self.provider,'send_gate',None))
+        commands=CommandWorker(self.state,self.execute_operation,getattr(self.provider,'send_gate',None))
         while True:
             active=await worker.once()
+            # Text sends get the first opportunity; only one foreground job is
+            # dispatched on the existing account session at a time.
+            active=await commands.once() or active
             await asyncio.sleep(.25 if active else 1)
+
+    async def execute_operation(self,job):
+        job['_policy']=await asyncio.to_thread(self.state.policy)
+        return await self.provider.execute_operation(job)
 
     async def send_outgoing(self,job):
         receipt=await self.provider.send_text(job)
