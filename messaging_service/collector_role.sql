@@ -24,3 +24,7 @@ GRANT SELECT ON outgoing_messages TO messaging_collector;
 GRANT UPDATE(status,started_at,finished_at,lease_epoch,provider_message_id,error_code)
     ON outgoing_messages TO messaging_collector;
 GRANT INSERT(principal,key_id,operation,outcome,error_code,resource_ids,actor) ON audit_log TO messaging_collector;
+-- Provider proofs are immutable; only bounded publication cursors may advance.
+GRANT SELECT,INSERT ON message_receipts,receipt_event_jobs,receipt_event_publications TO messaging_collector;
+GRANT UPDATE(cursor_id,complete) ON receipt_event_jobs TO messaging_collector;
+GRANT UPDATE(receipt,state,published_at) ON receipt_event_publications TO messaging_collector;

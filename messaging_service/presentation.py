@@ -2,7 +2,7 @@
 MESSAGE_FIELDS = ('id','message','account','chat','sender','sent_at','revision','direction',
     'provider_message_id','kind','origin','historical','is_backfill','event_sequence','sender_name','username',
     'chat_title','chat_type','reply_to_provider_id','mentions_owner','reply_to_owner','forwarded','media_kind','body_truncated',
-    'sender_identity_basis','agent_send')
+    'sender_identity_basis','agent_send','delivery_receipt')
 FILE_FIELDS = ('attachment_id','id','message_id','account','chat','revision','sha256','mime',
     'bytes','display_name','download_status','extraction_status','enrichment_status',
     'truncated','error_code','title','document_type','snippet','match_type',

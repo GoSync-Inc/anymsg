@@ -29,7 +29,7 @@ from .presentation import options, render
 Detail = Literal['compact','full']
 QueryMode = Literal['all','phrase','web','exact']
 SearchLanguage = Literal['auto','simple','russian','english','indonesian']
-EventKind = Literal['message.created','message.edited','message.deleted','attachment.ready']
+EventKind = Literal['message.created','message.edited','message.deleted','message.status','attachment.ready']
 EventOrigin = Literal['live','backfill','reconcile','fixture']
 
 
@@ -226,7 +226,10 @@ def create_app(store: Store, allowed_hosts: list[str]):
 
     @mcp.tool(structured_output=True,annotations=read)
     def get_send_status(ctx: Context,send_id: StrictStr) -> dict[str,Any]:
-        """Read your own scoped send receipt; never sends or retries a message."""
+        """Read your own scoped send result and separate delivery_receipt observations.
+        Provider acceptance is not recipient delivery/read. Missing receipts are unknown;
+        exact provider times remain null. Never sends, retries or marks a chat read.
+        """
         return call(ctx,'get_send_status',send_id=send_id)
 
     @mcp.tool(structured_output=True, annotations=read)
@@ -394,7 +397,8 @@ def create_app(store: Store, allowed_hosts: list[str]):
                     exclude_channels: bool=False, order: Literal['event','sent_at']='event',
                     reset_filters: bool=False, expected_ack_version: StrictInt | None=None) -> dict[str, Any]:
         """Read changes without advancing ACK. Consumer belongs to this principal.
-        origins=['live'] excludes backfill. order=sent_at sorts the delivered batch only;
+        origins=['live'] excludes backfill. kinds=['message.status'] selects passive receipt
+        updates, without marking provider chats read. order=sent_at sorts the delivered batch only;
         ACK/pagination stay ingestion ordered. To replace this consumer's filters explicitly,
         use reset_filters=true with its current expected_ack_version and cursor-write permission.
         Reset preserves acknowledged position and invalidates outstanding receipts; it does not replay old history.

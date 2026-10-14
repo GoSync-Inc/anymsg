@@ -30,3 +30,4 @@ GRANT SELECT ON outgoing_messages TO messaging_gateway;
 GRANT SELECT(epoch) ON collector_leases TO messaging_gateway;
 GRANT INSERT(principal,key_id,scope_version,request_id,request_hash,account,chat,
     provider_chat,body,reply_provider_id) ON outgoing_messages TO messaging_gateway;
+GRANT SELECT ON message_receipts,receipt_event_jobs,receipt_event_publications TO messaging_gateway;

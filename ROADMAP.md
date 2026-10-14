@@ -1,9 +1,13 @@
 # Roadmap
 
 This library stays focused on messenger collection and an agent interface.
-Task/project management is outside the archive. Version 0.9.12 completes missing
+Task/project management is outside the archive. Version 0.9.13 adds passive
+delivery/read observations and bounded status updates ([RECEIPTS.md](RECEIPTS.md)).
+Version 0.9.12 completes missing
 Telegram private-send identities and exposes confirmed agent-send provenance.
-[MESSAGE_ACTIONS.md](MESSAGE_ACTIONS.md) tracks receipt/reaction/action follow-up.
+[MESSAGE_ACTIONS.md](MESSAGE_ACTIONS.md) tracks receipt/reaction/action follow-up,
+including discovery compatibility. [FORMATTING.md](FORMATTING.md) adds the planned
+rich-text preview/rendering contract; formatted sends are not yet available.
 Version 0.9.11 separates the
 WhatsApp sending lane from background history/media in the same authenticated
 collector. Version 0.9.10 adds opt-in text
@@ -39,8 +43,10 @@ Next work, in order:
    and file descriptions. Measure SQL, REST/MCP and client-connector latency
    separately; improve only demonstrated bottlenecks.
 6. **Sending:** opt-in text/reply outbox with idempotency is implemented (SENDING.md).
-   Next: attachments and a scoped server draft/approval path after the owner
-   defines approval requirements. Ambiguous sends must never be blindly retried.
+   Next: previewed formatting and reaction reads,
+   then attachments/edit/delete/reaction/read actions. A scoped server draft/approval
+   path is optional and follows explicit owner configuration. Ambiguous sends
+   must never be blindly retried; formatted text must not be silently split.
 
 Every stage needs regression tests, resource/coverage diagnostics and explicit
 release notes. Separate owners should use separate deployments; true tenancy is

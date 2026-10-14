@@ -33,7 +33,7 @@ def get_updates(store,c,p,consumer,limit=20,*,accounts=None,chats=None,senders=N
     for name,values in [('accounts',accounts),('chats',chats),('senders',senders),('origins',origins),('kinds',kinds)]:
         values=filter_values(values)
         allowed={'origins':{'live','backfill','reconcile','fixture'},
-            'kinds':{'message.created','message.edited','message.deleted','attachment.ready'}}
+            'kinds':{'message.created','message.edited','message.deleted','message.status','attachment.ready'}}
         if values is not None and name in allowed and set(values)-allowed[name]:raise APIError('invalid_filter')
         if values is not None:filters[name]=values
     if exclude_channels:filters['exclude_channels']=True
@@ -84,8 +84,9 @@ def get_updates(store,c,p,consumer,limit=20,*,accounts=None,chats=None,senders=N
     for event,named in zip(public_events,names):
         for field in ('sender_name','username','chat_title','chat_type'):
             event[field]=named.get(field)
-    from .result_evidence import send_provenance
+    from .result_evidence import send_provenance,delivery_evidence
     send_provenance(c,public_events)
+    delivery_evidence(c,public_events)
     shape_messages(public_events,compact=compact,body_chars=cap)
     if order=='sent_at':public_events.sort(key=lambda e:(date_bound(e['sent_at']),e['event_sequence']))
     targets(p,[e['message'] for e in public_events])

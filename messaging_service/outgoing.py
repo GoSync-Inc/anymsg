@@ -28,7 +28,10 @@ def permitted(p, account, chat):
     return account in p['accounts'] and (p['chat_ids'] is None or chat in p['chat_ids'])
 
 
-def result(row):
+def result(row,c=None):
+    from .receipts import for_reference,unknown_evidence
+    receipt=for_reference(c,row['account'],row['provider_chat'],row['provider_message_id']) \
+        if c is not None and row['status']=='sent' and row['provider_message_id'] else unknown_evidence()
     return serial({
         'send_id':row['id'],'status':row['status'],'account':row['account'],
         'chat_id':row['chat'],'provider_chat_id':row['provider_chat'],
@@ -40,7 +43,9 @@ def result(row):
         'agent_send':{'principal':row['principal'],'credential_id':row['key_id'],
             'request_id':row['request_id'],'approval_mode':'acting_agent',
             'owner_approval_verified_by_server':False},
-        'recipient_delivery_confirmed':False,'automatic_retry':False,
+        'delivery_receipt':receipt,
+        'recipient_delivery_confirmed':receipt['recipient_delivery_confirmed'],'automatic_retry':False,
+        'delivered_at':receipt['delivered_at'],'read_at':receipt['read_at'],'played_at':receipt['played_at'],
         'next_action':'get_send_status' if row['status'] in ('queued','dispatching') else
             'verify_history_before_any_new_send' if row['status']=='unknown' else 'none',
     })
@@ -68,7 +73,7 @@ def enqueue(c, p, account, chat_id, text, request_id, reply_to):
     targets(p,[chat_id])
     if existing:
         if existing['request_hash']!=request_hash:raise APIError('idempotency_conflict',409)
-        return result(existing)
+        return result(existing,c)
     policy=c.execute('SELECT * FROM account_policies WHERE account=%s',(account,)).fetchone()
     if not policy or not policy['enabled'] or not policy['send_enabled']:
         raise APIError('sending_disabled',409)
@@ -87,7 +92,7 @@ def enqueue(c, p, account, chat_id, text, request_id, reply_to):
         account,chat,provider_chat,body,reply_provider_id) VALUES(%s,%s,%s,%s,%s,%s,%s,%s,%s,%s) RETURNING *''',
         (p['id'],p['key_id'],p['scope_version'],request_id,request_hash,account,chat_id,chat['provider_chat'],text,reply_id)).fetchone()
     targets(p,[chat_id,row['id']])
-    return result(row)
+    return result(row,c)
 
 
 def status(c,p,send_id):
@@ -103,7 +108,7 @@ def status(c,p,send_id):
         if not lease or lease['epoch']!=row['lease_epoch'] or lease['expires_at']<=observed:
             row={**row,'status':'unknown','error_code':'sender_interrupted'}
     targets(p,[row['chat'],row['id']])
-    return result(row)
+    return result(row,c)
 
 
 class OutgoingWorker:

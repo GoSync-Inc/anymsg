@@ -33,7 +33,7 @@ Refresh MCP discovery after upgrading; the manifest contains 19 tools.
 | --- | --- | --- |
 | `queued` | Durable request, no provider send has begun | Poll status |
 | `dispatching` | The collector started one provider attempt | Poll status |
-| `sent` | Provider returned a matching outgoing message ID | Recipient delivery/read is not confirmed |
+| `sent` | Provider returned a matching outgoing message ID | Inspect the separate `delivery_receipt` evidence |
 | `cancelled` | Access or account policy changed before dispatch | Review permissions and obtain approval for a new action |
 | `expired` | The ten-minute pending window elapsed | Review and obtain approval for a new action |
 | `failed` | Locally rejected before invoking send | Inspect safe error code |
@@ -61,7 +61,9 @@ An edited body can differ from the original text; ambiguous duplicate provider
 receipts do not guess an actor. The originating principal's `get_send_status`
 also includes its credential ID, request ID and acting-agent approval mode.
 Credential/request IDs are not exposed in message provenance to other readers.
-No provider read receipts are collected yet: `sent` still means provider acceptance.
+Since 0.9.13, passive provider receipts are exposed separately as
+`delivery_receipt`; `sent` still means provider acceptance. Unknown provider
+times remain null. See [RECEIPTS.md](RECEIPTS.md) for coverage and group semantics.
 See [MESSAGE_ACTIONS.md](MESSAGE_ACTIONS.md) for the remaining stages.
 
 ## Operator setup
@@ -75,7 +77,7 @@ anymsg set-sending --account account-personal --enable
 anymsg set-access --principal assistant-personal --permissions read download cursor-write send
 ```
 
-Apply `gateway_role.sql` and `collector_role.sql` as owner after migration22.
+Apply `gateway_role.sql` and `collector_role.sql` as owner after migration23.
 Gateway can enqueue/read receipts but cannot set their state or invoke providers.
 Collector can update delivery state and read public key/policy metadata needed
 for a fresh authorization check; it cannot read token hashes or change ACL.

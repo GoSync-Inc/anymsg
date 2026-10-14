@@ -10,6 +10,7 @@ import {readPage} from './history.mjs';
 import {createPageBounds,PageEvaluationStalled} from './bounds.mjs';
 import {CONNECTION_ERRORS,connectClient,writeFailure} from './transport-state.mjs';
 import {IdentityCache,cachedIdentityObservations} from './identity.mjs';
+import {bindReceiptCapture} from './receipts.mjs';
 
 process.umask(0o077);
 // Libraries must not mix sensitive diagnostics into the bounded private protocol.
@@ -81,6 +82,9 @@ async function start(initialPolicy) {
   client.on('message_create',msg=>capture(msg));
   client.on('message_edit',(msg,body)=>capture(msg,'edit',body));
   client.on('message_revoke_everyone',deleted);
+  bindReceiptCapture(client,{account:cfg.account,currentPolicy,spool,
+    isVerified:()=>verified,isStopping:()=>stopping,
+    onFailure:error=>{failed(CONNECTION_ERRORS.has(error.message)?error.message:'durable_capture_failed');void stop(1);}});
   // Local deletion is deliberately not a global tombstone (linked-device history differs).
   try{await connected;}catch(error){failed(error.message);throw error;}
   return {ready:true};

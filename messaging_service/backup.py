@@ -40,6 +40,7 @@ V20_TABLES={'processing_budget':'day,account,kind,profile_hash',
            'processing_control':'account,kind,profile_hash','processing_resource_leases':'resource'}
 V21_TABLES={'media_reservations':'job'}
 V22_TABLES={'outgoing_messages':'id'}
+V23_TABLES={'message_receipts':'id','receipt_event_jobs':'receipt','receipt_event_publications':'message'}
 V17_TABLES={'message_conflicts':'receipt_digest'}
 V15_TABLES={'message_metadata':'message','attachment_enrichment':'attachment','enrichment_budget':'day'}
 
@@ -47,13 +48,14 @@ V15_TABLES={'message_metadata':'message','attachment_enrichment':'attachment','e
 def database_manifest(c):
     tables={}
     version=int(c.execute("SELECT value FROM probe_metadata WHERE name='schema_version'").fetchone()['value'])
-    if version not in range(2,23): raise ValueError('unsupported_backup_schema')
+    if version not in range(2,24): raise ValueError('unsupported_backup_schema')
     for name,order in {**TABLES,**(V3_TABLES if version>=3 else {}),**(V4_TABLES if version>=4 else {}),
                        **(V5_TABLES if version>=5 else {}),**(V6_TABLES if version>=6 else {}),
                        **(V8_TABLES if version>=8 else {}),**(V9_TABLES if version>=9 else {}),
                        **(V14_TABLES if version>=14 else {}),**(V15_TABLES if version>=15 else {}),**(V16_TABLES if version>=16 else {}),**(V17_TABLES if version>=17 else {}),**(V18_TABLES if version>=18 else {}),
                        **(V19_TABLES if version>=19 else {}),**(V20_TABLES if version>=20 else {}),
-                       **(V21_TABLES if version>=21 else {}),**(V22_TABLES if version>=22 else {})}.items():
+                       **(V21_TABLES if version>=21 else {}),**(V22_TABLES if version>=22 else {}),
+                       **(V23_TABLES if version>=23 else {})}.items():
         query=sql.SQL('SELECT row_to_json(t) AS record FROM {} t ORDER BY {}').format(
             sql.Identifier(name),sql.SQL(',').join(sql.Identifier(part) for part in order.split(',')))
         sha=hashlib.sha256(); count=0
@@ -129,7 +131,7 @@ def create_snapshot(store,destination,dump_command,recovery_config=None,*,captur
 def verify_bundle(directory,*,blob_root=None):
     from .recovery_state import read_manifest,verify_recovery
     directory=Path(directory); manifest=read_manifest(directory)
-    if manifest.get('format') not in (1,2) or manifest.get('schema_version') not in range(2,23): raise ValueError('unsupported_backup')
+    if manifest.get('format') not in (1,2) or manifest.get('schema_version') not in range(2,24): raise ValueError('unsupported_backup')
     verify_recovery(directory,manifest)
     if (directory/'database.dump').is_symlink(): raise ValueError('invalid_backup_file')
     with (directory/'database.dump').open('rb') as dump:

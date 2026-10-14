@@ -25,6 +25,15 @@ def send_provenance(c,rows):
                 'owner_approval_verified_by_server':False}
 
 
+def delivery_evidence(c,rows):
+    """Decorate authorized rows, preserving receipt events' frozen evidence."""
+    from .receipts import for_rows,unknown_evidence
+    missing=[r for r in rows if r.get('direction')=='outgoing' and 'delivery_receipt' not in r]
+    proofs=for_rows(c,missing)
+    for row in missing:
+        row['delivery_receipt']=proofs.get(row.get('id') or row.get('message'),unknown_evidence())
+
+
 def decorate(c,rows):
     if not rows:return rows
     ids=list({r['id'] for r in rows})
@@ -71,6 +80,7 @@ def decorate(c,rows):
         WHERE message=ANY(%s) GROUP BY message''',(ids,))}
     current={r['id']:r['revision'] for r in c.execute('SELECT id,revision FROM messages WHERE id=ANY(%s)',(ids,))}
     send_provenance(c,rows)
+    delivery_evidence(c,rows)
     for row in rows:
         row['attachments']=grouped.get(row['id'],[])
         conflict=conflicts.get(row['id'],{'active_conflicts':0,'historical_conflicts':0,'last_conflict_at':None})

@@ -29,7 +29,9 @@ Acceptance: real Telethon message shapes, synthetic PostgreSQL fixtures,
 immutable-revision and denied-scope checks, no provider sends. Production checks
 must separately report which legacy records were repaired.
 
-## Next: delivery and read observations
+## Delivery and read observations (implemented in 0.9.13)
+
+The implemented contract and coverage limits are in [RECEIPTS.md](RECEIPTS.md).
 
 Keep provider acceptance (`sent`) separate from delivery/read/played observations.
 Receipt capture must not mark provider chats read or acknowledge archive updates.
@@ -57,6 +59,13 @@ Receipt capture must not mark provider chats read or acknowledge archive updates
 
 ## Then: reactions and expanded sends
 
+Formatting is a new requirement from the subsequent feedback. Its staged
+contract is in [FORMATTING.md](FORMATTING.md): maintained parser evaluation,
+passive preview, native rendering, payload-bound outbox persistence, then incoming
+format evidence. It is not implemented in 0.9.13. Plan it after receipt capture
+and before expanded sends; it needs no new provider session. Long messages stay
+single actions until an explicit multipart protocol exists.
+
 | Stage | Scope | Acceptance boundary |
 | --- | --- | --- |
 | Read reactions | Emoji, actor/time only when supplied; changes/removals | Unknown/anonymous actors explicit; account isolation |
@@ -69,9 +78,41 @@ Text reply targeting already exists and needs regression/live verification.
 Typing indicators are lower priority. A future server approval flow must be
 explicitly configured: the report does not change acting-agent approval mode.
 
+## Client discovery
+
+The current manifest has 19 tools. A different client count alone does not prove
+caching: compare actual names, the authenticated server's `tools/list`,
+`capabilities.tool_manifest` and any host filtering/configuration first. Check
+the caller's effective permissions separately; discovery never grants sending
+access. The existing REST fallback uses the same ACL and is useful for diagnosis
+but does not refresh a client's tool cache.
+
+The current stateless JSON POST transport explicitly rejects a notification
+GET stream with 405. That is permitted by the
+[MCP transport specification](https://modelcontextprotocol.io/specification/2025-11-25/basic/transports).
+Do not advertise `tools.listChanged: true` without implementing notification
+delivery. The [tools specification](https://modelcontextprotocol.io/specification/2025-11-25/server/tools)
+ties that capability to list-change notifications; it does not guarantee that
+every client discards its persistent cache.
+
+Implement discovery notifications as a separate compatibility stage: bind streams
+to authenticated principals, recheck revoked/expired keys, isolate clients,
+bound queues/reconnect resources and announce only manifest changes. Test server
+restart/deployment recovery and fresh `tools/list` in representative clients.
+Avoid adding a GET stream that never emits data merely to hide the old timeout.
+Until then, refresh/recreate the connector when stale discovery is established,
+and keep unresolved host filtering/cache behavior explicit.
+
 ## Older report sections
 
 Strict arguments, compact responses, filtered subscriptions, source diagnostics
 and Ogg/Opus input already exist. They do not prove live extraction, full history
 or zero client cache problems. History waves, exhausted media recovery, storage
 capacity, file analysis and MCP notification transport remain outstanding.
+
+`connected` is not proof of complete history: distinguish live capture from
+catch-up gaps, archive conflicts and media download failures. Storage-paused
+originals need capacity/lifecycle work, not a lower safety floor or a blind
+collector restart. Classify conflicting observations with evidence; never clear
+them in bulk to make an account summary look healthy. The retrieval roadmap and
+action roadmap remain separate work streams, with neither declared complete.
