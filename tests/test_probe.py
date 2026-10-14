@@ -209,7 +209,9 @@ def test_legacy_mcp_wire_protocol_and_scopes(seeded):
         assert init.status_code==200
         assert init.json()['result']['serverInfo']['version']==s.capabilities(b)['version']
         tools=rpc('tools/list').json()['result']['tools']
-        assert len(tools)==17 and not any('send' in t['name'] for t in tools)
+        assert len(tools)==19
+        send=next(t for t in tools if t['name']=='send_message')
+        assert send['annotations']['readOnlyHint'] is False and send['annotations']['openWorldHint'] is True
         value=rpc('tools/call',{'name':'search','arguments':{'query':'Atlas'}}).json()['result']
         assert not value.get('isError')
         assert value['structuredContent']['items']==[]

@@ -445,7 +445,10 @@ def test_restricted_collector_role_ingests_but_cannot_read_keys_or_change_policy
         restricted.renew_media(job)
         blob=w.writer.write([b'data']); restricted.finish_media(job,blob,w.writer)
         state.status('receiving','telegram_history_partial')
-        for query in ['SELECT * FROM api_keys','SELECT * FROM principals',
+        with restricted.store.pool.connection() as c:
+            c.execute('SELECT id,permissions FROM principals')
+            c.execute('SELECT id,revoked,expires_at FROM api_keys')
+        for query in ['SELECT * FROM api_keys','SELECT digest FROM api_keys',
                       'UPDATE account_policies SET enabled=false','CREATE TABLE forbidden_test(id int)']:
             with pytest.raises(psycopg.errors.InsufficientPrivilege):
                 with restricted.store.pool.connection() as c: c.execute(query)
@@ -496,7 +499,7 @@ def test_backup_covers_collector_positions_and_pending_deletions(worker,tmp_path
     directory=tmp_path/'snapshot'
     create_snapshot(s,directory,[sys.executable,'-c','print("unit-dump-stub")'])
     manifest=json.loads((directory/'manifest.json').read_text())
-    assert manifest['schema_version']==21
+    assert manifest['schema_version']==22
     assert manifest['tables']['collector_chats']['rows']==1
     assert manifest['tables']['provider_tombstones']['rows']==1
     assert verify_snapshot(s,directory)['status']=='verified'

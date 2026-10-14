@@ -6,7 +6,7 @@ Collect messages and attachments once, then let agents search and read them thro
 MCP or HTTP with separate credentials and account/chat permissions. Original files
 use SHA-256 deduplication; references to every source message stay separate.
 
-Current version: **0.9.9 — experimental**, PostgreSQL schema 21.
+Current version: **0.9.10 — experimental**, PostgreSQL schema 22.
 
 ## What works
 
@@ -20,7 +20,9 @@ Current version: **0.9.9 — experimental**, PostgreSQL schema 21.
 - Durable collection queues, storage admission, processing budgets and a shared heavy-job lock.
 - Encrypted streaming backup with integrity checks and quarantine restore tools.
 
-Message sending is **not implemented** in this release. Reads do not mark messages
+Text sending through existing collectors is available with separate `send` rights
+and explicit account opt-in. The acting agent obtains exact owner confirmation;
+there is no server approval gate yet. See [SENDING.md](SENDING.md). Reads do not mark messages
 as read in Telegram or WhatsApp. Empty search results do not prove complete history.
 Durable history-wave execution, cold-file eviction/rehydration and independent
 AI artifact reuse are planned. Optional cloud processing is off until explicitly configured.
@@ -45,8 +47,8 @@ uv run anymsg --help
 Registry installation (Python 3.13):
 
 ```sh
-pip install anymsg==0.9.9
-npm install anymsg@0.9.9
+pip install anymsg==0.9.10
+npm install anymsg@0.9.10
 ```
 
 Python installs the server/operator CLI and HTTP client; npm installs only the

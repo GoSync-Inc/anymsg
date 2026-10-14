@@ -1,7 +1,7 @@
 """PostgreSQL archive: one policy layer for HTTP and MCP.
 
-No provider sessions, network fetch, arbitrary SQL, owner approval or outgoing
-message path is exposed to agents. Collection uses separate operator workers.
+No provider sessions, network fetch, arbitrary SQL or server approval gate is
+exposed to agents. Opt-in sends are dispatched by existing operator collectors.
 """
 from __future__ import annotations
 
@@ -194,7 +194,7 @@ class Store:
             dataset=self.dataset(c,p)
             accounts = c.execute('SELECT id,platform,label,synthetic FROM accounts WHERE id=ANY(%s) ORDER BY id',
                                  ([r['id'] for r in dataset['sources']],)).fetchall()
-            features={'read':['search','history','context','updates','reviews','search_people','search_files','get_file_text','get_file_occurrences','get_sync_status','get_file_segments','resolve_reference'], 'download':['attachment'], 'cursor-write':['ack']}
+            features={'read':['search','history','context','updates','reviews','search_people','search_files','get_file_text','get_file_occurrences','get_sync_status','get_file_segments','resolve_reference'], 'download':['attachment'], 'cursor-write':['ack'], 'send':['send_message','get_send_status']}
             if 'read' in p['permissions']:features['review-write']=['record_review']
             return {'service': 'anymsg', 'version': __version__, **dataset,
                 'tool_manifest':{'version':__version__,'names':sorted(OPERATION_PERMISSIONS.keys()-{'download'}),
@@ -228,11 +228,26 @@ class Store:
                     'chat_coverage':True,'provider_id_lookup':'resolve_reference',
                     'empty_result_diagnostics':True,'message_conflicts':'scoped_active_and_historical'},
                 'available': [feature for permission,names in features.items() if permission in p['permissions'] for feature in names],
-                'unavailable': ['guaranteed_full_history', 'drafts', 'send',
+                'sending':{'implemented':True,'approval_mode':'acting_agent_obtains_exact_owner_confirmation',
+                    'server_approval_gate':False,'text_only':True,'request_id_required':True,
+                    'ambiguous_result_policy':'unknown_no_automatic_retry',
+                    'read_permission_does_not_allow_send':True},
+                'unavailable': ['guaranteed_full_history', 'drafts',
                                 'owner_approval', 'project_memory', 'schedules', 'oauth'],
                 'limits': {'page_size': 100, 'query_chars': 200,
                            'download_grant_seconds': 120, 'delivery_seconds': 900,
-                           'review_sources':20, 'context_reviews':5}}
+                           'review_sources':20, 'context_reviews':5,'send_text_utf16_units':4000,
+                           'send_queue_ttl_seconds':600,'send_per_account_per_minute':60}}
+
+    def send_message(self,token,account,chat_id,text,request_id,reply_to=''):
+        from .outgoing import enqueue
+        with self.authorized(token,'send_message') as (c,p):
+            return enqueue(c,p,account,chat_id,text,request_id,reply_to)
+
+    def get_send_status(self,token,send_id):
+        from .outgoing import status
+        with self.authorized(token,'get_send_status') as (c,p):
+            return status(c,p,send_id)
 
     def list_chats(self, token, after='', limit=100, *, accounts=None,query='',chat_types=None,
                    order='id',exclude_channels=False,awaiting_reply=False,from_time='',to_time='',
@@ -510,8 +525,8 @@ class Store:
             c.execute("SET LOCAL statement_timeout='180s'")
             c.execute(Path(__file__).with_name('schema.sql').read_text())
             version=int(c.execute("SELECT value FROM probe_metadata WHERE name='schema_version'").fetchone()['value'])
-            if version>21: raise RuntimeError('database_newer_than_runtime')
-            for target,name in [(2,'002_archive.sql'),(3,'003_collectors.sql'),(4,'004_whatsapp.sql'),(5,'005_access.sql'),(6,'006_reviews.sql'),(7,'007_search_indexes.sql'),(8,'008_people.sql'),(9,'009_file_index.sql'),(10,'010_search_audit.sql'),(11,'011_telegram_window.sql'),(12,'012_search.sql'),(13,'013_file_search.sql'),(14,'014_collector_health.sql'),(15,'015_enrichment.sql'),(16,'016_file_content.sql'),(17,'017_chat_evidence.sql'),(18,'018_collector_operations.sql'),(19,'019_whatsapp_identities.sql'),(20,'020_processing_admission.sql'),(21,'021_media_storage.sql')]:
+            if version>22: raise RuntimeError('database_newer_than_runtime')
+            for target,name in [(2,'002_archive.sql'),(3,'003_collectors.sql'),(4,'004_whatsapp.sql'),(5,'005_access.sql'),(6,'006_reviews.sql'),(7,'007_search_indexes.sql'),(8,'008_people.sql'),(9,'009_file_index.sql'),(10,'010_search_audit.sql'),(11,'011_telegram_window.sql'),(12,'012_search.sql'),(13,'013_file_search.sql'),(14,'014_collector_health.sql'),(15,'015_enrichment.sql'),(16,'016_file_content.sql'),(17,'017_chat_evidence.sql'),(18,'018_collector_operations.sql'),(19,'019_whatsapp_identities.sql'),(20,'020_processing_admission.sql'),(21,'021_media_storage.sql'),(22,'022_outgoing.sql')]:
                 migration=Path(__file__).with_name('migrations')/name
                 sha=hashlib.sha256(migration.read_bytes()).hexdigest()
                 if version<target:

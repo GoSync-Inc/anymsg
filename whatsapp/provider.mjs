@@ -1,5 +1,6 @@
 import {recoverNavigation} from './navigation.mjs';
-// Private child process. No TCP listener, HTTP API, sends or agent credentials.
+// Private child process. No TCP listener, HTTP API or agent credentials.
+import {sendText} from './outgoing.mjs';
 import fs from 'node:fs';
 import readline from 'node:readline';
 import {once} from 'node:events';
@@ -138,7 +139,7 @@ async function metadata(chat,id,descriptor) {
 const SAFE=new Set([...CONNECTION_ERRORS,'media_unavailable','media_timeout','media_network_error',
   'media_metadata_unavailable','media_reference_changed','unsupported_media_type','media_hash_mismatch',
   'media_size_mismatch','media_size_limit','invalid_media_path','chat_excluded','provider_response_too_large',
-  'provider_page_stalled']);
+  'provider_page_stalled','send_expired','sending_disabled','send_target_invalid','send_receipt_mismatch']);
 const lines=readline.createInterface({input:process.stdin,crlfDelay:Infinity});
 // Python sends one request at a time. Bound malformed input before readline buffering.
 let buffered=0;process.stdin.on('data',b=>{for(const byte of b){buffered=byte===10?0:buffered+1;if(buffered>1024*1024)void stop(1);}});
@@ -153,6 +154,11 @@ for await(const line of lines) {
     else if(method==='policy'){policy=params.policy;result={updated:true};}
     else if(method==='dialogs')result=await dialogs(Math.min(10000,params.limit));
     else if(method==='page')result=await page(params.chat,Math.min(100,params.limit),params.before);
+    else if(method==='send_text'){
+      const receipt=await sendText(client,params,currentPolicy);
+      capture(receipt.message);
+      result={provider_message_id:receipt.provider_message_id};
+    }
     else if(method==='media'){
       const meta=await metadata(params.chat,params.message,params.descriptor);
       for await(const chunk of download(meta,cfg.max_media_bytes))await emit({id:request.id,chunk:chunk.toString('base64')});

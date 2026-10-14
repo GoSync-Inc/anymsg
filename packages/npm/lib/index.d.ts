@@ -28,4 +28,6 @@ export declare class AnyMsgClient {
   ackUpdates(args: Arguments): Promise<Record<string, unknown>>;
   getReviews(args: Arguments): Promise<Record<string, unknown>>;
   recordReview(args: Arguments): Promise<Record<string, unknown>>;
+  sendMessage(args: {account:string;chat_id:string;text:string;request_id:string;reply_to?:string}): Promise<Record<string,unknown>>;
+  getSendStatus(args: {send_id:string}): Promise<Record<string,unknown>>;
 }

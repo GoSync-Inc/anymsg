@@ -8,6 +8,15 @@ import {AnyMsgClient, AnyMsgError} from '../lib/index.js';
 const token = 'synthetic-secret-token';
 const options = {baseUrl: 'https://archive.example/base', token};
 const response = (body, status = 200) => Response.json(body, {status});
+test('send helper preserves exact action and never retries a transport error', async()=>{
+  let calls=[];
+  const action={account:'fixture',chat_id:'fixture-chat',text:'Approved synthetic',request_id:'synthetic-request-0001'};
+  const client=new AnyMsgClient({...options,fetch:async(url,request)=>{
+    calls.push([String(url),JSON.parse(request.body)]);throw new Error('synthetic diagnostic');
+  }});
+  await assert.rejects(client.sendMessage(action),{code:'transport_error'});
+  assert.deepEqual(calls,[['https://archive.example/base/v1/send_message',action]]);
+});
 test('prefix, auth and JSON contract; token is not enumerable', async () => {
   const client = new AnyMsgClient({...options, fetch: async (url, request) => {
     assert.equal(String(url), 'https://archive.example/base/v1/search');

@@ -12,7 +12,7 @@ def main():
     parser=argparse.ArgumentParser()
     parser.add_argument('command',choices=['serve','init','migrate','issue-key','revoke-key',
         'replay','snapshot','verify-restore','quarantine-restore','register-account',
-        'set-access','list-keys','audit-tail'])
+        'set-access','list-keys','audit-tail','set-sending'])
     parser.add_argument('--principal')
     parser.add_argument('--accounts',nargs='+')
     parser.add_argument('--key-file',type=Path)
@@ -58,6 +58,12 @@ def main():
             Archive(store).register(args.account,args.platform,args.label,synthetic=args.synthetic,
                 include_chats=args.include_chats,exclude_chats=args.exclude_chats,discover=args.discover_chats)
             print(json.dumps({'registered':True,'account':args.account,'provider_connected':False}))
+        elif args.command=='set-sending':
+            if not args.account or not (args.enable or args.disable):
+                parser.error('set-sending requires --account and --enable or --disable')
+            from .archive import Archive
+            Archive(store).set_sending(args.account,args.enable)
+            print(json.dumps({'account':args.account,'send_enabled':args.enable}))
         elif args.command=='replay':
             if not args.input or not args.spool: parser.error('replay requires --input and --spool')
             from .archive import Archive

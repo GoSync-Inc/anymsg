@@ -3,7 +3,7 @@ import re
 from uuid import UUID
 
 DEFAULT_PERMISSIONS = ('cursor-write', 'download', 'read')
-PERMISSIONS = frozenset((*DEFAULT_PERMISSIONS, 'review-write'))
+PERMISSIONS = frozenset((*DEFAULT_PERMISSIONS, 'review-write', 'send'))
 OPERATION_PERMISSIONS = {
     'capabilities': None,
     'list_chats': 'read', 'search': 'read', 'get_messages': 'read',
@@ -14,9 +14,10 @@ OPERATION_PERMISSIONS = {
     'search_people': 'read', 'search_files': 'read', 'get_file_text': 'read',
     'get_file_occurrences':'read', 'get_file_segments':'read', 'get_sync_status':'read',
     'resolve_reference':'read',
+    'send_message':'send','get_send_status':'send',
 }
 AUDIT_OPERATIONS = frozenset(OPERATION_PERMISSIONS) | {
-    'issue_key', 'revoke_key', 'set_access', 'http_boundary',
+    'issue_key', 'revoke_key', 'set_access', 'http_boundary', 'send_dispatch', 'set_sending',
 }
 AUDIT_CODES = frozenset({
     'unauthorized', 'forbidden', 'not_found', 'invalid_limit', 'invalid_query',
@@ -27,6 +28,8 @@ AUDIT_CODES = frozenset({
     'invalid_parameters', 'temporarily_unavailable', 'operation_failed',
     'invalid_review', 'revision_not_found', 'review_conflict',
     'query_timeout','service_busy','service_unavailable','chat_required','ambiguous_reference',
+    'invalid_message_text','invalid_request_id','idempotency_conflict','sending_disabled',
+    'sender_not_ready','send_access_changed','send_expired','send_result_unknown',
 })
 UNSET = object()
 
@@ -99,9 +102,12 @@ def audit(c, p, operation, outcome, code=None):
     p = p or {}
     values = (p.get('id'), p.get('key_id'), operation, outcome, safe_code,
               p.get('_audit_targets', []) if outcome == 'ok' else [])
-    if operation in ('issue_key','revoke_key','set_access'):
+    if operation in ('issue_key','revoke_key','set_access','set_sending'):
         c.execute('''INSERT INTO audit_log(principal,key_id,operation,outcome,error_code,resource_ids,actor)
             VALUES(%s,%s,%s,%s,%s,%s,'operator')''', values)
+    elif operation=='send_dispatch':
+        c.execute('''INSERT INTO audit_log(principal,key_id,operation,outcome,error_code,resource_ids,actor)
+            VALUES(%s,%s,%s,%s,%s,%s,'collector')''', values)
     else:
         c.execute('''INSERT INTO audit_log(principal,key_id,operation,outcome,error_code,resource_ids)
             VALUES(%s,%s,%s,%s,%s,%s)''', values)

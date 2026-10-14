@@ -3,6 +3,7 @@ const METHODS = Object.freeze([
   'get_messages', 'get_context', 'get_sync_status', 'resolve_reference',
   'get_attachment', 'get_file_text', 'get_file_segments', 'get_file_occurrences',
   'get_updates', 'ack_updates', 'get_reviews', 'record_review',
+  'send_message','get_send_status',
 ]);
 export const tools = METHODS;
 const SAFE_ERRORS = new Set([
@@ -14,6 +15,7 @@ const SAFE_ERRORS = new Set([
   'invalid_receipt', 'invalid_utc_date', 'invalid_version', 'not_found',
   'query_timeout', 'rate_limited', 'service_busy', 'service_unavailable',
   'stale_ack', 'temporarily_unavailable', 'unauthorized', 'version_conflict',
+  'invalid_message_text','invalid_request_id','idempotency_conflict','sending_disabled','sender_not_ready',
 ]);
 
 export class AnyMsgError extends Error {
@@ -149,4 +151,6 @@ export class AnyMsgClient {
   ackUpdates(args) { return this.call('ack_updates', args); }
   getReviews(args) { return this.call('get_reviews', args); }
   recordReview(args) { return this.call('record_review', args); }
+  sendMessage(args) { return this.call('send_message',args); }
+  getSendStatus(args) { return this.call('get_send_status',args); }
 }

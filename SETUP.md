@@ -12,7 +12,7 @@ that already holds an archive. Clone the tagged release, then enter `deploy/`.
 PostgreSQL has no public port; the API binds to loopback on port 18940.
 
 ```sh
-git clone --branch v0.9.9 https://github.com/GoSync-Inc/anymsg.git
+git clone --branch v0.9.10 https://github.com/GoSync-Inc/anymsg.git
 cd anymsg/deploy
 cp .env.example .env
 ```
@@ -94,9 +94,9 @@ Optional images are built locally from this checkout; there are no prepublished
 AnyMsg container images in this release:
 
 ```sh
-docker build --target indexer -t anymsg-indexer:0.9.9 ..
-docker build --target whatsapp -t anymsg-whatsapp:0.9.9 ..
-docker build --target backup -t anymsg-backup:0.9.9 ..
+docker build --target indexer -t anymsg-indexer:0.9.10 ..
+docker build --target whatsapp -t anymsg-whatsapp:0.9.10 ..
+docker build --target backup -t anymsg-backup:0.9.10 ..
 ```
 
 Native OCR, transcription, Chromium sandboxing, quotas and encrypted backups need
@@ -120,7 +120,7 @@ must accept the explicit 405 response. Each agent should have a separate princip
 
 ```sh
 python3.13 -m venv .venv
-.venv/bin/pip install anymsg==0.9.9
+.venv/bin/pip install anymsg==0.9.10
 .venv/bin/anymsg --help
 ```
 

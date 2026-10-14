@@ -25,3 +25,8 @@ GRANT SELECT ON message_conflicts TO messaging_gateway;
 GRANT SELECT ON processing_profiles TO messaging_gateway;
 GRANT SELECT(account,expires_at) ON collector_leases TO messaging_gateway;
 GRANT SELECT ON whatsapp_identity_observations TO messaging_gateway;
+GRANT SELECT ON account_policies TO messaging_gateway;
+GRANT SELECT ON outgoing_messages TO messaging_gateway;
+GRANT SELECT(epoch) ON collector_leases TO messaging_gateway;
+GRANT INSERT(principal,key_id,scope_version,request_id,request_hash,account,chat,
+    provider_chat,body,reply_provider_id) ON outgoing_messages TO messaging_gateway;

@@ -50,5 +50,6 @@ Live deployment and provider acceptance must be recorded separately from these t
 5. Versioned file titles/summaries/detailed analysis and measured local/API profiles,
    followed by connector and hybrid-retrieval experiments in ROADMAP.md.
 
-Sending remains paused. A Telegram approval bot is not a prerequisite for reading
-or searching. Task extraction and project management remain outside this module.
+Confirmed text sending is now implemented as an opt-in outbox: [SENDING.md](SENDING.md).
+The acting agent obtains exact owner approval; a server approval workflow is future
+work. Task extraction and project management remain outside this module.

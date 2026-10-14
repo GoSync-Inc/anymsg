@@ -127,6 +127,21 @@ class TelethonProvider:
 
     async def wait_disconnected(self): await self.client.disconnected
 
+    async def send_text(self,job):
+        from .outgoing import SendRejected
+        async def send():
+            # Recheck after waiting for the shared rate/cooldown gate.
+            if datetime.now(timezone.utc).timestamp()>=job['expires_at']:
+                raise SendRejected('send_expired')
+            message=await self.client.send_message(int(job['provider_chat']),job['body'],
+                parse_mode=None,link_preview=False,
+                reply_to=int(job['reply_provider_id']) if job.get('reply_provider_id') else None,
+                clear_draft=False)
+            if not message or str(message.chat_id)!=job['provider_chat']:
+                raise RuntimeError('send_receipt_mismatch')
+            return {'provider_message_id':str(message.id),'message':message}
+        return await self.rpc(send,'provider_send')
+
     async def dialogs(self,limit):
         result=[]
         async for batch in self.dialog_batches(limit): result.extend(batch)
@@ -459,7 +474,7 @@ class TelegramCollector:
             if connecting not in done: raise RuntimeError('collector_lease_lost')
             tasks.remove(connecting)
             tasks.extend(asyncio.create_task(coro) for coro in
-                [self.drain_loop(),self.reconcile_loop(),self.media_loop(),
+                [self.drain_loop(),self.reconcile_loop(),self.media_loop(),self.outgoing_loop(),
                  self.provider.wait_disconnected(),self.failed.wait()])
             done,_=await asyncio.wait(tasks,return_when=asyncio.FIRST_COMPLETED)
             for task in done: task.result()
@@ -482,6 +497,24 @@ class TelegramCollector:
                         await asyncio.to_thread(self.state.phase,'live_capture','stopped','collector_shutdown')
             with suppress(Exception): await asyncio.to_thread(self.state.status,'stopped','requires_reconciliation')
             with suppress(Exception): await asyncio.to_thread(self.archive.release,self.account,self.owner,epoch)
+
+    async def outgoing_loop(self):
+        from .outgoing import OutgoingWorker
+        worker=OutgoingWorker(self.state,self.send_outgoing,getattr(self.provider,'send_gate',None))
+        while True:
+            active=await worker.once()
+            await asyncio.sleep(.25 if active else 1)
+
+    async def send_outgoing(self,job):
+        receipt=await self.provider.send_text(job)
+        # Send receipt is independent of archive commit. A capture failure must
+        # never cause another send; reconciliation can recover the observation.
+        try:
+            from types import SimpleNamespace
+            await self.capture(SimpleNamespace(message=receipt['message']))
+        except Exception:
+            self.fail('durable_capture_failed')
+        return receipt
 
     async def connect_provider(self):
         # A persisted provider pause is not a hung connection: honor it outside

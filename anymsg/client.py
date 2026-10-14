@@ -19,6 +19,7 @@ SAFE_ERROR_CODES = frozenset({
     'invalid_receipt','invalid_utc_date','invalid_version','not_found',
     'query_timeout','rate_limited','service_busy','service_unavailable',
     'stale_ack','temporarily_unavailable','unauthorized','version_conflict',
+    'invalid_message_text','invalid_request_id','idempotency_conflict','sending_disabled','sender_not_ready',
 })
 
 
@@ -59,9 +60,9 @@ class Client:
     """Call an AnyMsg REST root, e.g. https://archive.example/anymsg.
 
     The token is sent only in Authorization. Configure the REST root, not /mcp
-    or /v1; each call appends /v1/<operation>. Calls never mark source messages
-    read or send messages. ACK/review operations change the archive's own state;
-    their ambiguous failures are never retried by this SDK.
+    or /v1; each call appends /v1/<operation>. Reads never mark source messages
+    read. send_message requires exact owner confirmation by the acting agent.
+    Ambiguous writes are never automatically retried by this SDK.
     """
     def __init__(self, base_url, token, *, timeout=20, max_response_bytes=8*1024**2,
                  transport=None):
@@ -129,3 +130,11 @@ class Client:
 
     def search(self, query, **filters):
         return self.call("search",{"query":query,**filters})
+
+    def send_message(self,*,account,chat_id,text,request_id,reply_to=''):
+        """Submit exactly confirmed text; keep request_id until the result is known."""
+        return self.call('send_message',dict(account=account,chat_id=chat_id,text=text,
+            request_id=request_id,reply_to=reply_to))
+
+    def get_send_status(self,send_id):
+        return self.call('get_send_status',{'send_id':send_id})

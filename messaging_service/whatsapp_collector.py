@@ -182,25 +182,39 @@ class NodeProvider:
         if not isinstance(result,dict) or result.get('id')!=request: raise RuntimeError('provider_protocol_error')
         if 'error' in result:
             code=result['error']
+            if code in ('send_expired','sending_disabled','send_target_invalid'):
+                from .outgoing import SendRejected
+                raise SendRejected(code)
             if isinstance(code,str) and code in CONNECTION_ERRORS:raise RuntimeError(code)
             if code in ('media_unavailable','media_reference_changed','unsupported_media_type'): raise ProviderUnavailable(code)
             safe=MEDIA_ERRORS|{'provider_operation_failed','chat_excluded'}
             raise ProviderOperationError(code if isinstance(code,str) and code in safe else 'provider_operation_failed')
         return result
+    @property
+    def send_gate(self): return self.lock
+
     async def call(self,method,params):
         async with self.lock:
-            request=await self.request(method,params)
-            try:
-                reply=await self.reply(request,timeout=300 if method=='start' else 90)
-                if set(reply)!={'id','result'}: raise RuntimeError('provider_protocol_error')
-                return reply['result']
-            except (ProviderUnavailable,ProviderOperationError):
-                raise # Complete error frame; pipe is still synchronized.
-            except BaseException:
-                # After cancellation/partial response, never reuse a desynchronized pipe.
-                await self.disconnect(); raise
+            return await self._call_unlocked(method,params)
+
+    async def _call_unlocked(self,method,params):
+        request=await self.request(method,params)
+        try:
+            reply=await self.reply(request,timeout=300 if method=='start' else 90)
+            if set(reply)!={'id','result'}: raise RuntimeError('provider_protocol_error')
+            return reply['result']
+        except (ProviderUnavailable,ProviderOperationError):
+            raise # Complete error frame; pipe is still synchronized.
+        except Exception as exc:
+            from .outgoing import SendRejected
+            if isinstance(exc,SendRejected):raise
+            await self.disconnect(); raise
+        except BaseException:
+            # After cancellation/partial response, never reuse a desynchronized pipe.
+            await self.disconnect(); raise
     async def set_policy(self,policy):
         self.policy={k:policy[k] for k in ('discover_chats','include_chats','exclude_chats')}
+        self.policy.update(enabled=policy.get('enabled',True),send_enabled=policy.get('send_enabled',False))
         # Separate control file: a long media response must not delay exclusions
         # or lease liveness. Node fails closed when this short-lived policy expires.
         def save():
@@ -215,6 +229,11 @@ class NodeProvider:
         await asyncio.to_thread(save)
     async def dialogs(self,limit): return await self.call('dialogs',{'limit':limit})
     async def page(self,chat,*,limit,before=None): return await self.call('page',{'chat':chat,'limit':limit,'before':before})
+    async def send_text(self,job):
+        # OutgoingWorker holds send_gate before claiming a queued job.
+        if not self.lock.locked():raise RuntimeError('send_gate_required')
+        return await self._call_unlocked('send_text',{'chat':job['provider_chat'],'text':job['body'],
+            'reply_provider_id':job.get('reply_provider_id'),'expires_at':job['expires_at']})
     async def chunks(self,source,descriptor):
         complete=False
         async with self.lock:
@@ -239,6 +258,9 @@ class NodeProvider:
 
 
 class WhatsAppCollector(TelegramCollector):
+    async def send_outgoing(self,job):
+        # Node durable message_create + explicit capture owns this observation.
+        return await self.provider.send_text(job)
     state_class=WhatsAppState
     coverage_code='whatsapp_history_partial'
     connect_timeout=300

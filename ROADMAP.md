@@ -1,8 +1,8 @@
 # Roadmap
 
 This library stays focused on messenger collection and an agent interface.
-Task/project management is outside the archive. Sending is not in 0.9.9 and
-remains a separate, explicitly approved action boundary.
+Task/project management is outside the archive. Version 0.9.10 adds opt-in text
+sending as a separate, explicitly approved action boundary.
 
 The 0.9.9 baseline already includes per-chat evidence, explicit collector errors,
 verified WhatsApp identity observations, file-text indexing, morphology search,
@@ -33,8 +33,9 @@ Next work, in order:
    against the existing PostgreSQL baseline, including Russian queries, people
    and file descriptions. Measure SQL, REST/MCP and client-connector latency
    separately; improve only demonstrated bottlenecks.
-6. **Sending:** design a scoped draft/approval/outbox path with idempotency,
-   retries and audit evidence after the owner defines approval requirements.
+6. **Sending:** opt-in text/reply outbox with idempotency is implemented (SENDING.md).
+   Next: attachments and a scoped server draft/approval path after the owner
+   defines approval requirements. Ambiguous sends must never be blindly retried.
 
 Every stage needs regression tests, resource/coverage diagnostics and explicit
 release notes. Separate owners should use separate deployments; true tenancy is

@@ -5,7 +5,7 @@ on:
       version:
         description: Version matching the selected vX.Y.Z tag
         required: true
-        default: '0.9.9'
+        default: '0.9.10'
 permissions:
   contents: read
 jobs:

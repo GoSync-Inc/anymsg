@@ -13,6 +13,16 @@ from .store import serial
 class Archive:
     def __init__(self,store): self.store=store
 
+    def set_sending(self,account,enabled):
+        """Operator-only opt-in; never changes account discovery or agent scopes."""
+        if type(enabled) is not bool:raise ValueError('invalid_send_policy')
+        from .policy import audit
+        with self.store.pool.connection() as c:
+            changed=c.execute('UPDATE account_policies SET send_enabled=%s WHERE account=%s RETURNING account',
+                (enabled,account)).fetchone()
+            if not changed:raise ValueError('unknown_account')
+            audit(c,None,'set_sending','ok')
+
     def register(self,account,platform,label,*,synthetic=True,include_chats=(),exclude_chats=(),discover=False):
         if not re.fullmatch(r'[a-zA-Z0-9_.-]{1,64}',account) or platform not in ('telegram','whatsapp'):
             raise ValueError('invalid_account')
