@@ -341,7 +341,7 @@ def test_real_collector_tombstones_clear_formatted_proof_and_replay_safely(seede
 def test_compact_unknown_formatting_is_small_and_explicit():
     from messaging_service.incoming_formatting import unknown
     value=message_summary({'body':'hello','formatting':unknown()})
-    assert value['formatting']=={'version':1,'state':'unknown'}
+    assert value['formatting']=={'state':'unknown'}
 
 
 def test_full_truncated_reads_explain_offsets_for_every_query(archive):

@@ -47,11 +47,17 @@ entities are reported without manufacturing mentions/custom-emoji identities.
 WhatsApp records `wire_observed` and a SHA-256 of captured wire text; it does not
 claim that guessed markup yields complete native entities. Absent capture is
 unknown, distinct from observed empty entities. Compact unknown evidence carries
-only its version and state; full evidence retains the diagnostic fields. First known evidence appends a
+only its state; full evidence retains its version and diagnostic fields. First known evidence appends a
 revision; equal-time contradictory known evidence remains a conflict, and later
 unknown captures cannot erase known evidence. Existing snapshots stay immutable.
 Offsets always reference the full provider body in UTF-16 units, including
 compact or truncated responses; `offsets_reference` states this explicitly.
+
+When only formatting changes, completed OCR/transcription/model results remain
+available for unchanged originals. Reuse requires the same proven message input,
+current file digest and previous source revision; passage indexes are rebound
+without extracting or indexing the same text again. Changed content, deletion,
+stale evidence or interrupted leases still invalidate the old result.
 
 ## Input dialect
 

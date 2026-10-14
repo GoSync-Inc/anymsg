@@ -146,7 +146,7 @@ def known(value):
 
 def summary(value):
     """Keep compact output bounded; spans cannot be applied to its snippet."""
-    if value.get('state')=='unknown':return {'version':value['version'],'state':'unknown'}
+    if value.get('state')=='unknown':return {'state':'unknown'}
     result=deepcopy(value)
     result['offsets_reference']='full_provider_body_utf16'
     for key,count_key in [('entities','entity_count'),('unsupported_entities','unsupported_entity_count')]:

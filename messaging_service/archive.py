@@ -163,7 +163,10 @@ class Archive:
                         THEN 'queued' ELSE media_jobs.state END''',(jid,aid,mid,Jsonb(descriptor)))
                 c.execute("UPDATE media_jobs SET state='superseded',lease_until=NULL WHERE message=%s AND NOT(id=ANY(%s))",
                           (mid,media_ids))
-                c.execute('UPDATE attachments SET active=(id=ANY(%s)) WHERE message=%s',(media_ids,mid))
+                # A formatting-only revision retains the same originals. Avoid
+                # no-op active updates which otherwise enqueue extraction again.
+                c.execute('''UPDATE attachments SET active=(id=ANY(%s)) WHERE message=%s
+                    AND active IS DISTINCT FROM (id=ANY(%s))''',(media_ids,mid,media_ids))
                 self.store.append_event(c,aid,mid,'message.'+outcome,e['origin'],receipt)
             elif outcome=='unchanged':
                 c.execute('UPDATE messages SET provider_updated_at=greatest(provider_updated_at,%s) WHERE id=%s',(updated,mid))
