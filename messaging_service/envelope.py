@@ -63,15 +63,17 @@ def validate(data):
         result['sender_profile']['username']=result['sender_profile']['username'].lstrip('@')
     if 'metadata' in data:
         metadata=data['metadata']
-        if not isinstance(metadata,dict) or set(metadata)-{'reply_to_provider_id','forwarded','media_kind','mentions_owner','reply_to_owner'}:
+        if not isinstance(metadata,dict) or set(metadata)-{'reply_to_provider_id','forwarded','media_kind','mentions_owner','reply_to_owner','sender_is_bot','chat_type'}:
             raise ValueError('invalid_metadata')
         result['metadata']={}
         for key,value in metadata.items():
-            if key in ('forwarded','mentions_owner','reply_to_owner'):
+            if key in ('forwarded','mentions_owner','reply_to_owner','sender_is_bot'):
                 if value is not None and type(value) is not bool:raise ValueError('invalid_metadata')
             elif value is not None:
                 text(value,256 if key=='reply_to_provider_id' else 32,key)
                 if key=='media_kind' and value not in ('photo','video','audio','voice','document','sticker','animation','other'):
+                    raise ValueError('invalid_metadata')
+                if key=='chat_type' and value not in ('private','group','channel','unknown'):
                     raise ValueError('invalid_metadata')
             result['metadata'][key]=value
     seen=set()

@@ -59,7 +59,30 @@ def message_summary(row):
 
 def render(method, result, detail):
     if detail=='full' or method not in ('list_chats','search','get_messages','get_updates',
-        'get_context','search_files','get_file_text','get_file_segments'):return result
+        'get_context','search_files','get_file_text','get_file_segments','get_sync_status'):return result
+    if method=='get_sync_status':
+        # Keep one-chat diagnostics intact. Only the account overview is reduced;
+        # the cached evidence remains unchanged and full detail is always available.
+        if 'sources' not in result:return result
+        compact=dict(result)
+        compact['sources']=[]
+        for source in result['sources']:
+            row={k:source[k] for k in ('account','platform','status','detail_code',
+                'archive_detail_code','oldest_message_at','newest_message_at','last_ingest_at','alerts') if k in source}
+            row['freshness']={k:v for k,v in source.get('freshness',{}).items()
+                if k in ('state','last_successful_scan_at','scan_age_seconds','basis')}
+            row['history']={k:v for k,v in source.get('history',{}).items()
+                if k in ('observed_chats','unknown_chats','full_history_verified','gap_chats',
+                    'catchup_pending_chats','configured_window','last_scan_at')}
+            row['operations']={name:{k:v for k,v in operation.items()
+                if k in ('state','reason_code','pending_events','collector_running','retry_at','next_action')}
+                for name,operation in source.get('operations',{}).items()}
+            row['files']={k:v for k,v in source.get('files',{}).items()
+                if k in ('download','download_errors','extraction','enrichment')}
+            compact['sources'].append(row)
+        compact['detail']='compact'
+        compact['next_action']='get_sync_status_detail_full_or_chat_id_for_diagnostics'
+        return compact
     result=dict(result)
     result.pop('sources',None)
     if method in ('search','get_messages','get_updates'):
@@ -89,6 +112,8 @@ def render(method, result, detail):
         if result.get('awaiting_reply_scope') is None:
             result.pop('awaiting_reply_scope',None)
             result.pop('awaiting_reply_total',None)
+            result.pop('awaiting_reply_days',None)
+            result.pop('bot_filter_coverage',None)
             result.pop('group_attention_coverage',None)
     elif method=='search_files':
         result['items']=[file_summary(row) for row in result['items']]

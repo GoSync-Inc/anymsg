@@ -205,13 +205,20 @@ def create_app(store: Store, allowed_hosts: list[str]):
 
     @mcp.tool(structured_output=True, annotations=read)
     def list_chats(ctx: Context, after: str='', limit: int=100, accounts: list[StrictStr] | None=None,
-                   query: str='', chat_types: list[Literal['private','group','channel','unknown']] | None=None, order: Literal['id','activity']='id',
+                   query: str='', chat_types: list[Literal['private','group','channel','unknown']] | None=None, order: Literal['id','activity','last_activity_desc']='activity',
                    exclude_channels: bool=False, awaiting_reply: bool=False,
-                   from_time: str='', to_time: str='', include_coverage: bool | None=None, detail: Detail='compact') -> dict[str, Any]:
-        """List permitted chats. awaiting_reply: private incoming or group owner mention/reply; heuristic. Group evidence persists through others' chatter, clears after owner writes."""
+                   from_time: str='', to_time: str='', include_coverage: bool | None=None, detail: Detail='compact',
+                   awaiting_reply_days: StrictInt=14) -> dict[str, Any]:
+        """List permitted chats. order: activity (default) or last_activity_desc = recent first;
+        id = stable catalogue traversal. awaiting_reply: private incoming, excluding known bots,
+        or explicit group owner mention/reply; heuristic, not obligation. Attention expires after
+        awaiting_reply_days (default 14; 0 = no age limit), based on the attention message time.
+        Group evidence survives others' chatter and clears after owner writes. No provider read changes.
+        """
         return call(ctx,'list_chats',detail=detail,after=after,limit=limit,accounts=accounts,query=query,chat_types=chat_types,
                     order=order,exclude_channels=exclude_channels,awaiting_reply=awaiting_reply,
-                    from_time=from_time,to_time=to_time,include_coverage=include_coverage)
+                    from_time=from_time,to_time=to_time,include_coverage=include_coverage,
+                    awaiting_reply_days=awaiting_reply_days)
 
     @mcp.tool(structured_output=True, annotations=read)
     def search_people(ctx: Context, query: str='', accounts: list[StrictStr] | None=None,
@@ -303,13 +310,15 @@ def create_app(store: Store, allowed_hosts: list[str]):
         return call(ctx,'get_file_segments',detail=detail,attachment_id=attachment_id,offset=offset,limit=limit)
 
     @mcp.tool(structured_output=True, annotations=read)
-    def get_sync_status(ctx: Context,chat_id: str='',from_time: str='',to_time: str='',refresh: bool=False) -> dict[str, Any]:
+    def get_sync_status(ctx: Context,chat_id: str='',from_time: str='',to_time: str='',refresh: bool=False,
+                        detail: Detail='compact') -> dict[str, Any]:
         """Account summary, or one chat's history traversal, scan times, gaps and file states.
         Optional UTC [from_time,to_time) tests traversal of a finite range, not full provider history.
         Account summaries cache for at most 10s with observed_at/cache age; refresh=true bypasses.
+        detail=compact is the default overview; full includes complete account diagnostics.
         Chat status is uncached. No provider requests; scans do not verify older edits/deletions.
         """
-        return call(ctx,'get_sync_status',chat_id=chat_id,from_time=from_time,to_time=to_time,refresh=refresh)
+        return call(ctx,'get_sync_status',detail=detail,chat_id=chat_id,from_time=from_time,to_time=to_time,refresh=refresh)
 
     @mcp.tool(structured_output=True, annotations=read)
     def resolve_reference(ctx: Context,account: str,provider_chat_id: str,

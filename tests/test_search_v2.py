@@ -135,7 +135,7 @@ def test_activity_order_filters_unknown_provider_state_and_heuristic(seeded):
     second=s.list_chats(a,order='activity',after=first['next_cursor'],limit=1)
     assert second['items'][0]['id']=='telegram-demo-chat'
     assert second['items'][0]['provider_unread'] is None and second['items'][0]['muted'] is None
-    assert [r['id'] for r in s.list_chats(a,awaiting_reply=True)['items']]==['telegram-demo-chat']
+    assert [r['id'] for r in s.list_chats(a,awaiting_reply=True,awaiting_reply_days=0)['items']]==['telegram-demo-chat']
     assert s.list_chats(b,accounts=['whatsapp-demo-1'])['items']==[]
     with pytest.raises(APIError):s.list_chats(a,order='activity',query='changed',after=first['next_cursor'])
 

@@ -87,11 +87,16 @@ class Archive:
                    'updated_at':max(tombstone,datetime.fromisoformat(e['updated_at'])).isoformat()}
             previous=c.execute('SELECT outcome FROM ingest_receipts WHERE digest=%s',(receipt,)).fetchone()
             if previous: return {'outcome':'duplicate','message':mid}
-            c.execute('''INSERT INTO chats(id,account,title,provider_chat) VALUES(%s,%s,%s,%s)
-                ON CONFLICT(id) DO UPDATE SET title=excluded.title,provider_chat=excluded.provider_chat
+            chat_type=e.get('metadata',{}).get('chat_type')
+            if chat_type=='unknown':chat_type=None
+            c.execute('''INSERT INTO chats(id,account,title,provider_chat,chat_type) VALUES(%s,%s,%s,%s,%s)
+                ON CONFLICT(id) DO UPDATE SET
+                title=CASE WHEN excluded.title<>%s AND excluded.title<>'' THEN excluded.title ELSE chats.title END,
+                provider_chat=excluded.provider_chat,chat_type=coalesce(excluded.chat_type,chats.chat_type)
                 WHERE (excluded.title<>%s AND excluded.title<>'' AND chats.title<>excluded.title)
-                    OR chats.provider_chat IS DISTINCT FROM excluded.provider_chat''',
-                      (cid,aid,e['chat_title'],e['chat'],e['chat']))
+                    OR chats.provider_chat IS DISTINCT FROM excluded.provider_chat
+                    OR (excluded.chat_type IS NOT NULL AND chats.chat_type IS DISTINCT FROM excluded.chat_type)''',
+                      (cid,aid,e['chat_title'],e['chat'],chat_type,e['chat'],e['chat']))
             old=c.execute('SELECT * FROM messages WHERE id=%s FOR UPDATE',(mid,)).fetchone()
             content=fingerprint(e); updated=datetime.fromisoformat(e['updated_at']); outcome='created'
             if old:

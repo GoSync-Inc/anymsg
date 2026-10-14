@@ -208,7 +208,10 @@ class Store:
                     'query_modes':['all','phrase','web','exact'],'orders':['asc','desc','relevance'],
                     'languages':['auto','simple','russian','english','indonesian'],
                     'fuzzy':'explicit_bounded_fallback','compact':True,'optional_coverage':True,
-                    'context':'independent_before_and_after_counts','chat_orders':['id','activity'],
+                    'context':'independent_before_and_after_counts','chat_orders':['id','activity','last_activity_desc'],
+                    'chat_order_default':'activity','awaiting_reply_default_days':14,
+                    'awaiting_reply_bots':'exclude_observed_bot_senders_not_name_guesses',
+                    'sync_status_details':['compact','full'],
                     'updates':'version_checked_filter_reset_preserves_ack_position',
                     'update_orders':['event','sent_at_within_delivered_batch'],
                     'updates_exclude_channels':True,'is_backfill':True,
@@ -233,12 +236,13 @@ class Store:
 
     def list_chats(self, token, after='', limit=100, *, accounts=None,query='',chat_types=None,
                    order='id',exclude_channels=False,awaiting_reply=False,from_time='',to_time='',
-                   include_coverage=True):
+                   include_coverage=True,awaiting_reply_days=14):
         from .chat_queries import list_chats
         with self.authorized(token,'list_chats') as (c,p):
             return list_chats(self,c,p,after,limit,accounts=accounts,query=query,chat_types=chat_types,
                 order=order,exclude_channels=exclude_channels,awaiting_reply=awaiting_reply,
-                from_time=from_time,to_time=to_time,include_coverage=include_coverage)
+                from_time=from_time,to_time=to_time,include_coverage=include_coverage,
+                awaiting_reply_days=awaiting_reply_days)
 
     def search_people(self,token,query='',*,accounts=None,chats=None,after='',limit=20,
                       transliterate=False,group_by_sender=False):

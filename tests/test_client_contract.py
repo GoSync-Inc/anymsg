@@ -71,7 +71,7 @@ def test_awaiting_reply_is_conservative_and_uses_activity_order(seeded):
     with s.pool.connection() as c:
         c.execute("UPDATE chats SET chat_type='private' WHERE id='telegram-demo-chat'")
         c.execute("UPDATE chats SET chat_type='group' WHERE id='whatsapp-demo-1-chat'")
-    result=s.list_chats(key,awaiting_reply=True)
+    result=s.list_chats(key,awaiting_reply=True,awaiting_reply_days=0)
     assert result['order']=='activity'
     assert result['awaiting_reply_total']==1
     assert result['items'][0]['last_message_snippet']

@@ -71,15 +71,23 @@ direction, and known reply/forward/media fields. Unknown metadata remains null.
 Older messages acquire provider metadata as they are observed again; this does
 not invent a new content revision.
 
-`list_chats` defaults to stable ID order for old clients; `order: activity`
-returns recently active chats first. Account/type/date filters and
+MCP/REST `list_chats` defaults to recent activity order. `order: activity` and
+`order: last_activity_desc` are aliases; `order: id` retains stable catalogue
+traversal. Direct Store calls retain the legacy ID default. Restart pagination
+when changing orders; activity pages use an opaque cursor, not a bare chat ID.
+Account/type/date filters and
 `exclude_channels` are supported. `awaiting_reply` is only a heuristic from the
 last known incoming message in a private chat, plus explicit attention in groups:
 the provider marks an owner mention, the cached quoted participant is the owner,
 or the quoted message is an archived outgoing message in the same account/chat.
 Group size is irrelevant to an explicit mention/reply. Ordinary group chatter and
 channels are excluded. Later messages by others do not clear the hint; a later
-owner message does, heuristically. This does not prove a request was fulfilled.
+owner message does, heuristically. The default `awaiting_reply_days: 14` excludes
+old attention based on the incoming/mention/reply message's own time; unrelated
+group chatter cannot revive it. `0` removes the age limit; values through 365 are
+supported. Known provider bot senders are excluded from private reply hints;
+names and username suffixes are not used to guess bot identity. Missing bot
+metadata is explicitly outside the filter's coverage. This does not prove a request was fulfilled.
 The result supplies `awaiting_reply_message_id`, `awaiting_reply_basis` and a
 snippet of the specific group message; last chat activity remains separate.
 Old messages without captured mention metadata are not assumed to have none.
@@ -88,6 +96,13 @@ later reconciliation can acquire missing provider metadata. Reading the queue
 does not alter provider unread state or mark a request completed.
 Unread/muted/archived values remain unknown when the provider has not supplied
 reliable evidence.
+
+`get_sync_status` defaults to `detail: compact` for an account overview: coverage,
+last message/ingest/scan timestamps, alerts, separate operation states and file
+queue/error counts. `detail: full` retains complete account diagnostics. A
+specific `chat_id` always retains its detailed history/coverage evidence. Cached
+summaries include observation time and cache age; compact rendering never mutates
+the full cache or implies complete history.
 
 `get_updates` supports filters by accounts, chats, senders, origins, kinds,
 direction and dates. A consumer name binds its initial filter permanently.
