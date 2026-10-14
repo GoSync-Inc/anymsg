@@ -8,6 +8,12 @@ on:
       source_ref:
         type: string
         default: ''
+      tiden_branch:
+        type: string
+        default: ''
+    secrets:
+      TIDEN_API_TOKEN:
+        required: false
 permissions:
   contents: read
 jobs:
@@ -28,6 +34,15 @@ jobs:
         with:
           persist-credentials: false
           ref: ${{ inputs.source_ref }}
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
+        with:
+          persist-credentials: false
+          ref: ${{ github.sha }}
+          path: ci-tools
+      - name: Start evidence record
+        run: |
+          mkdir -p "$RUNNER_TEMP/ci-evidence"
+          git rev-parse HEAD > "$RUNNER_TEMP/ci-evidence/source-sha"
       - uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1 # v6
         with: {python-version: '3.13'}
       - uses: actions/setup-node@249970729cb0ef3589644e2896645e5dc5ba9c38 # v6
@@ -52,6 +67,7 @@ jobs:
           cd packages/npm
           npm pack --pack-destination ../../dist --ignore-scripts
       - name: Validate release inventory and metadata
+        id: release
         env:
           EXPECTED_VERSION: ${{ inputs.version }}
         run: |
@@ -62,6 +78,7 @@ jobs:
           fi
           uvx --from twine twine check dist/*.whl dist/*.tar.gz
       - name: Python/PostgreSQL tests
+        id: python
         env:
           PROBE_TEST_DSN_FILE: ${{ runner.temp }}/anymsg-test.dsn
           ANYMSG_TEST_WHEEL: ${{ github.workspace }}/dist/anymsg-${{ steps.build.outputs.version }}-py3-none-any.whl
@@ -74,14 +91,21 @@ jobs:
           p.write_text('postgresql://probe_owner:synthetic-ci-password@127.0.0.1:5432/messaging_probe_test')
           p.chmod(0o600)
           PY
-          uv run pytest --tb=short tests
-      - name: Node collector and HTTP client tests
-        run: |
-          node --test whatsapp/tests/*.test.mjs
-          npm test --prefix packages/npm
+          uv run pytest --tb=short -o junit_family=xunit1 --junitxml="$RUNNER_TEMP/ci-evidence/python.xml" tests
+      - name: Node collector tests
+        id: collector
+        if: ${{ !cancelled() && steps.build.outcome == 'success' }}
+        run: node --test --test-reporter=junit whatsapp/tests/*.test.mjs > "$RUNNER_TEMP/ci-evidence/collector.xml"
+      - name: Node HTTP client tests
+        id: npm
+        if: ${{ !cancelled() && steps.build.outcome == 'success' }}
+        working-directory: packages/npm
+        run: node --test --test-reporter=junit test/*.test.js > "$RUNNER_TEMP/ci-evidence/npm.xml"
       - name: Real synthetic MCP and HTTP with restricted gateway role
+        id: smoke
         run: uv run python scripts/smoke.py --dsn-file "$RUNNER_TEMP/anymsg-test.dsn"
       - name: Installed distributions outside checkout
+        id: distributions
         run: |
           uv venv "$RUNNER_TEMP/anymsg-wheel-env" --python 3.13
           uv pip install --python "$RUNNER_TEMP/anymsg-wheel-env/bin/python" dist/*.whl
@@ -95,6 +119,32 @@ jobs:
           npm install --ignore-scripts --no-audit --no-fund "$GITHUB_WORKSPACE"/dist/*.tgz
           ./node_modules/.bin/anymsg --version
           node --input-type=module -e "import {AnyMsgClient} from 'anymsg'; if(typeof AnyMsgClient !== 'function')process.exit(1)"
+      - name: Prepare honest CI evidence
+        if: ${{ always() }}
+        env:
+          CHECK_OUTCOMES: >-
+            {"build":"${{ steps.build.outcome }}","release":"${{ steps.release.outcome }}","python":"${{ steps.python.outcome }}","collector":"${{ steps.collector.outcome }}","npm":"${{ steps.npm.outcome }}","smoke":"${{ steps.smoke.outcome }}","distributions":"${{ steps.distributions.outcome }}"}
+          SOURCE_BRANCH: ${{ github.head_ref || github.ref_name }}
+          TIDEN_BRANCH_OVERRIDE: ${{ inputs.tiden_branch }}
+        run: |
+          python - <<'PY'
+          import json, os
+          from pathlib import Path
+          p=Path(os.environ['RUNNER_TEMP'])/'ci-evidence'
+          metadata={'sha': (p/'source-sha').read_text().strip(), 'git_branch': os.environ['SOURCE_BRANCH'],
+                    'tiden_branch': os.environ['TIDEN_BRANCH_OVERRIDE'], 'checks': json.loads(os.environ['CHECK_OUTCOMES']),
+                    'ci_url': f"https://github.com/{os.environ['GITHUB_REPOSITORY']}/actions/runs/{os.environ['GITHUB_RUN_ID']}/attempts/{os.environ['GITHUB_RUN_ATTEMPT']}"}
+          (p/'metadata.json').write_text(json.dumps(metadata))
+          PY
+          python ci-tools/scripts/tiden_ci.py prepare --directory "$RUNNER_TEMP/ci-evidence"
+      - name: Retain test evidence even when a check fails
+        if: ${{ always() }}
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: ci-evidence
+          path: ${{ runner.temp }}/ci-evidence
+          if-no-files-found: error
+          retention-days: 14
       - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
         with:
           name: python-dist
@@ -109,3 +159,60 @@ jobs:
           path: dist/*.tgz
           if-no-files-found: error
           retention-days: 7
+  tiden:
+    needs: verify
+    # PRs from forks never receive credentials. Internal PRs retain their actual
+    # tested merge SHA, not the head SHA or the last successful main revision.
+    if: ${{ always() && !cancelled() && (github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository) }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 6
+    steps:
+      - name: Check optional Tiden configuration
+        id: config
+        env:
+          TIDEN_API_TOKEN: ${{ secrets.TIDEN_API_TOKEN }}
+          TIDEN_PRODUCT_ID: ${{ vars.TIDEN_PRODUCT_ID }}
+          TIDEN_WORKSPACE_ID: ${{ vars.TIDEN_WORKSPACE_ID }}
+        run: |
+          if [ -z "$TIDEN_API_TOKEN" ]; then
+            echo 'enabled=false' >> "$GITHUB_OUTPUT"
+            echo 'Tiden reporting is not configured; see TIDEN-CI.md.' >> "$GITHUB_STEP_SUMMARY"
+          else
+            test -n "$TIDEN_PRODUCT_ID" && test -n "$TIDEN_WORKSPACE_ID"
+            echo 'enabled=true' >> "$GITHUB_OUTPUT"
+          fi
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
+        if: steps.config.outputs.enabled == 'true'
+        with:
+          persist-credentials: false
+          ref: ${{ github.sha }}
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
+        if: steps.config.outputs.enabled == 'true'
+        with:
+          name: ci-evidence
+          path: ${{ runner.temp }}/ci-evidence
+      - name: Install pinned Tiden CLI with integrity check
+        if: steps.config.outputs.enabled == 'true'
+        run: |
+          curl --fail --silent --show-error --location https://github.com/qase-tms/homebrew-tap/releases/download/v0.33.0/tiden_linux_amd64.tar.gz -o "$RUNNER_TEMP/tiden.tar.gz"
+          echo "3f6b650c4cabd58ce4149d9106325cbd36d1472cccc9c63ca03137668b80e4a6  $RUNNER_TEMP/tiden.tar.gz" | sha256sum --check
+          mkdir "$RUNNER_TEMP/tiden-bin"
+          tar -xzf "$RUNNER_TEMP/tiden.tar.gz" -C "$RUNNER_TEMP/tiden-bin"
+          echo "$RUNNER_TEMP/tiden-bin" >> "$GITHUB_PATH"
+      - name: Publish and verify branch association
+        if: steps.config.outputs.enabled == 'true'
+        env:
+          TIDEN_API_TOKEN: ${{ secrets.TIDEN_API_TOKEN }}
+          TIDEN_PRODUCT_ID: ${{ vars.TIDEN_PRODUCT_ID }}
+          TIDEN_WORKSPACE_ID: ${{ vars.TIDEN_WORKSPACE_ID }}
+          TIDEN_BASE_URL: https://app.tiden.ai
+          TIDEN_BRANCH_MAP: ${{ vars.TIDEN_BRANCH_MAP }}
+        run: python scripts/tiden_ci.py publish --directory "$RUNNER_TEMP/ci-evidence"
+      - name: Retain Tiden association and verdict receipt
+        if: ${{ always() && steps.config.outputs.enabled == 'true' }}
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: tiden-receipt
+          path: ${{ runner.temp }}/ci-evidence/tiden-*.json
+          if-no-files-found: warn
+          retention-days: 14
