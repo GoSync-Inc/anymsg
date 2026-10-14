@@ -5,12 +5,13 @@ or expansion errors never become an empty calendar. Datetimes retain wall time.
 """
 
 from copy import deepcopy
-from datetime import date, datetime, timezone
+from datetime import date, datetime, timedelta, timezone
 import hashlib
 import json
 from itertools import islice
 
 from dateutil.rrule import rruleset, rrulestr
+from dateutil.tz import gettz
 from icalendar import Calendar, Event, Timezone
 
 from family_calendar.errors import CalendarError
@@ -18,6 +19,8 @@ from family_calendar.errors import CalendarError
 MAX_ICS_BYTES = 1_048_576
 MAX_OCCURRENCES = 10_000
 VOLATILE = {"DTSTAMP", "LAST-MODIFIED", "CREATED", "SEQUENCE"}
+TIMEZONE_LOWER = datetime(2020, 1, 1)
+TIMEZONE_UPPER = datetime(2035, 1, 1)
 
 
 def parse(data: bytes) -> Calendar:
@@ -80,8 +83,14 @@ def create_event(uid, start, end, summary, *, rrule=None):
     if rrule:
         event.add("RRULE", rrule)
     if isinstance(start, datetime) and getattr(start.tzinfo, "key", None):
+        # The generator scans local wall time. ZoneInfo maps nonexistent spring
+        # times to the pre-transition offset, making its onset one hour late.
+        # dateutil resolves the gap to the new offset and emits RFC onsets.
         cal.add_component(
-            Timezone.from_tzinfo(start.tzinfo, first_date=date(2020, 1, 1), last_date=date(2035, 1, 1))
+            Timezone.from_tzinfo(
+                gettz(start.tzinfo.key), tzid=start.tzinfo.key,
+                first_date=date(2020, 1, 1), last_date=date(2035, 1, 1)
+            )
         )
     cal.add_component(event)
     return cal.to_ical()
@@ -105,8 +114,79 @@ def _canonical(value):
     return str(value)
 
 
+def _timezone_offsets(component):
+    """Compare the pilot's timezone behavior, not provider history formatting.
+
+    Expand every observance transition exactly in a declared finite interval.
+    Custom zones, extensions, complex rules and excessive expansions retain
+    their full structural comparison instead of receiving a weaker match.
+    """
+    if str(component.get("TZID")) not in {"Asia/Makassar", "Europe/Berlin"}:
+        return None
+    if set(component) - {"TZID", "COMMENT", "X-LIC-LOCATION", "LAST-MODIFIED"}:
+        return None
+    if not 0 < len(component.subcomponents) <= 64:
+        return None
+    transitions = {}
+    try:
+        for observance in component.subcomponents:
+            if observance.name not in {"STANDARD", "DAYLIGHT"} or set(observance) - {
+                "DTSTART", "TZOFFSETFROM", "TZOFFSETTO", "TZNAME", "RRULE", "RDATE"
+            }:
+                return None
+            start = observance.decoded("DTSTART")
+            if not isinstance(start, datetime) or start.tzinfo is not None:
+                return None
+            offset_from = observance.decoded("TZOFFSETFROM")
+            offset_to = observance.decoded("TZOFFSETTO")
+            values = [start, *_dates(observance, "RDATE")]
+            if "RRULE" in observance:
+                rule = deepcopy(observance["RRULE"])
+                if isinstance(rule, list) or rule.get("FREQ") != ["YEARLY"]:
+                    return None
+                if "UNTIL" in rule:
+                    until = rule["UNTIL"][0]
+                    if until.tzinfo is not None:
+                        rule["UNTIL"] = [until.astimezone(timezone.utc).replace(tzinfo=None) + offset_from]
+                for index, value in enumerate(rrulestr(rule.to_ical().decode(), dtstart=start)):
+                    if index >= 1000:
+                        return None
+                    if value > TIMEZONE_UPPER + timedelta(days=1):
+                        break
+                    values.append(value)
+            if len(values) > 10_000:
+                return None
+            for value in values:
+                instant = value - offset_from
+                if instant in transitions and transitions[instant] != offset_to:
+                    return None
+                transitions[instant] = offset_to
+        prior = [instant for instant in transitions if instant <= TIMEZONE_LOWER]
+        if not prior:
+            return None
+        offset = transitions[max(prior)]
+        timeline = [[TIMEZONE_LOWER.isoformat(), int(offset.total_seconds())]]
+        for instant in sorted(transitions):
+            if TIMEZONE_LOWER < instant < TIMEZONE_UPPER and transitions[instant] != offset:
+                offset = transitions[instant]
+                timeline.append([instant.isoformat(), int(offset.total_seconds())])
+        return {
+            "type": "VTIMEZONE",
+            "properties": {"TZID": str(component["TZID"])},
+            "offset_scope": [TIMEZONE_LOWER.date().isoformat(), TIMEZONE_UPPER.date().isoformat()],
+            "offset_timeline": timeline,
+            "components": [],
+        }
+    except (ValueError, TypeError, KeyError, AttributeError, OverflowError):
+        return None
+
+
 def semantic_snapshot(data):
     def component(c):
+        if c.name == "VTIMEZONE":
+            offsets = _timezone_offsets(c)
+            if offsets is not None:
+                return offsets
         props = {}
         for key, value in sorted(c.items()):
             if key in VOLATILE:

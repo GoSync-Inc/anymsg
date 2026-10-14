@@ -190,3 +190,68 @@ def test_saved_synthetic_fixture_preserves_full_semantics_on_roundtrip(name):
 
     data = (Path(__file__).parents[1] / "fixtures" / "ics" / name).read_bytes()
     assert semantic_hash(data) == semantic_hash(Calendar.from_ical(data).to_ical())
+
+
+@pytest.mark.parametrize("zone", ["Asia/Makassar", "Europe/Berlin"])
+def test_equivalent_timezone_history_does_not_make_readback_unknown(zone):
+    from datetime import date
+    from dateutil.tz import gettz
+    from icalendar import Timezone
+    from family_calendar.providers.caldav.codec import semantic_hash
+
+    start = START.astimezone(ZoneInfo(zone))
+    desired = create_event("zone@family.invalid", start, start + timedelta(hours=1), "Synthetic")
+    observed = Calendar.from_ical(desired)
+    observed.subcomponents = [c for c in observed.subcomponents if c.name != "VTIMEZONE"]
+    full = Timezone.from_tzinfo(gettz(zone), tzid=zone, first_date=date(1900, 1, 1), last_date=date(2040, 1, 1))
+    full.pop("COMMENT", None)
+    full.add("X-LIC-LOCATION", zone)
+    observed.add_component(full)
+    assert semantic_hash(desired) == semantic_hash(observed.to_ical())
+
+
+def test_timezone_same_id_with_changed_dst_is_not_equal():
+    from family_calendar.providers.caldav.codec import semantic_hash
+
+    desired = weekly()
+    observed = Calendar.from_ical(desired)
+    daylight = observed.walk("DAYLIGHT")[0]
+    daylight["TZOFFSETTO"].td += timedelta(minutes=30)
+    assert semantic_hash(desired) != semantic_hash(observed.to_ical())
+
+
+def test_event_extension_and_alarm_loss_are_not_timezone_normalization():
+    from family_calendar.providers.caldav.codec import semantic_hash
+
+    desired = weekly().replace(b"END:VEVENT", b"X-PRIVATE:keep\r\nEND:VEVENT")
+    assert semantic_hash(desired) != semantic_hash(weekly())
+
+
+def test_timezone_normalization_has_an_explicit_bounded_scope():
+    from family_calendar.providers.caldav.codec import semantic_snapshot
+
+    snap = semantic_snapshot(weekly())["calendar"]
+    tz = next(c for c in snap["components"] if c["type"] == "VTIMEZONE")
+    assert tz["offset_scope"] == ["2020-01-01", "2035-01-01"]
+
+
+def test_generated_timezone_switches_at_the_actual_utc_dst_boundary():
+    from datetime import timezone
+
+    tz = Calendar.from_ical(weekly()).walk("VTIMEZONE")[0].to_tz(lookup_tzid=False)
+    for instant, offset in [
+        (datetime(2026, 3, 29, 0, 30, tzinfo=timezone.utc), 1),
+        (datetime(2026, 3, 29, 1, 30, tzinfo=timezone.utc), 2),
+        (datetime(2026, 10, 25, 0, 30, tzinfo=timezone.utc), 2),
+        (datetime(2026, 10, 25, 1, 30, tzinfo=timezone.utc), 1),
+    ]:
+        assert instant.astimezone(tz).utcoffset() == timedelta(hours=offset)
+
+
+def test_unknown_timezone_extension_is_preserved_in_comparison():
+    from family_calendar.providers.caldav.codec import semantic_hash
+
+    desired = weekly()
+    observed = Calendar.from_ical(desired)
+    observed.walk("VTIMEZONE")[0].add("X-OPAQUE-ZONE", "keep")
+    assert semantic_hash(desired) != semantic_hash(observed.to_ical())

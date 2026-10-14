@@ -328,6 +328,7 @@ class Pilot:
                 "future": "simple_weekly_only",
                 "exception_policy": "preserve_absolute",
                 "native_range": "requires_client_visual_verification",
+                "timezone_offset_comparison": "Asia/Makassar and Europe/Berlin, 2020-01-01 to 2035-01-01",
                 "fault_tests": "synthetic_mock_transport",
                 "max_objects": self.manifest["max_objects"],
             },
