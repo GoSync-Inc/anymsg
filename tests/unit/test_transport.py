@@ -1,4 +1,6 @@
 import asyncio
+import gzip
+import zlib
 
 import httpx
 import pytest
@@ -15,6 +17,66 @@ def run(coro):
 def transport(handler, username="a"):
     client = httpx.AsyncClient(transport=httpx.MockTransport(handler))
     return DAVTransport(username, "never-log-me", client=client)
+
+
+@pytest.mark.parametrize("encoding,compress", [("gzip", gzip.compress), ("deflate", zlib.compress)])
+def test_compressed_response_returns_decoded_body(encoding, compress):
+    body = b'<d:multistatus xmlns:d="DAV:"/>'
+    compressed = compress(body)
+
+    def handler(request):
+        return httpx.Response(
+            207,
+            headers={
+                "Content-Encoding": encoding,
+                "Content-Length": str(len(compressed)),
+                "Content-Type": "application/xml",
+                "ETag": '"v1"',
+            },
+            stream=httpx.ByteStream(compressed),
+        )
+
+    async def exercise():
+        t = transport(handler)
+        try:
+            response = await t.request("PROPFIND", "https://caldav.icloud.com/")
+            assert response.content == body
+            assert response.headers["content-type"] == "application/xml"
+            assert response.headers["etag"] == '"v1"'
+            assert int(response.headers["content-length"]) == len(body)
+            assert "content-encoding" not in response.headers
+        finally:
+            await t.close()
+
+    run(exercise())
+
+
+@pytest.mark.parametrize(
+    "method,error_code", [("GET", "provider_response_too_large"), ("PUT", "write_unknown")]
+)
+def test_compressed_response_limit_applies_after_decoding(monkeypatch, method, error_code):
+    monkeypatch.setattr("family_calendar.providers.caldav.transport.MAX_RESPONSE", 128)
+    compressed = gzip.compress(b"x" * 1024)
+    calls = []
+
+    def handler(request):
+        calls.append(request)
+        return httpx.Response(
+            200,
+            headers={"Content-Encoding": "gzip"},
+            stream=httpx.ByteStream(compressed),
+        )
+
+    async def exercise():
+        t = transport(handler)
+        try:
+            with pytest.raises(CalendarError, match=error_code):
+                await t.request(method, "https://caldav.icloud.com/a/c/e.ics")
+        finally:
+            await t.close()
+
+    run(exercise())
+    assert len(calls) == 1
 
 
 def test_redirect_never_sends_credentials_to_other_host():

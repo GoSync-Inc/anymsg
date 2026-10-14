@@ -62,9 +62,14 @@ class DAVTransport:
                             raise CalendarError(
                                 "write_unknown" if mutation else "provider_response_too_large"
                             )
+                    # aiter_bytes() has already decoded Content-Encoding. The
+                    # buffered response must describe those decoded bytes.
+                    response_headers = stream.headers.copy()
+                    for name in ("content-encoding", "content-length", "transfer-encoding"):
+                        response_headers.pop(name, None)
                     response = httpx.Response(
                         stream.status_code,
-                        headers=stream.headers,
+                        headers=response_headers,
                         content=bytes(body),
                         request=stream.request,
                     )
