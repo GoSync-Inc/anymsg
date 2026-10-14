@@ -153,6 +153,10 @@ def agents(repo, action):
             command(["launchctl", "bootstrap", domain, str(target)])
         if action == "stop" and loaded.returncode == 0:
             command(["launchctl", "bootout", label])
+            for _ in range(60):
+                if command(["launchctl", "print", label], check=False).returncode != 0:
+                    break
+                time.sleep(0.25)
         state = command(["launchctl", "print", label], check=False)
         results.append(
             {"role": role, "loaded": state.returncode == 0, "running": "state = running" in state.stdout}
