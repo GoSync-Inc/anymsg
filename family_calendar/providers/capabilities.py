@@ -27,7 +27,7 @@ def capabilities(checks, gate, *, live, native_visual_pass):
         and native_visual_pass
         and checks.get("native_range_probe", {}).get("status") == "server_verified"
         else "unverified",
-        "evidence": "server_readback_and_owner_visual_check",
+        "evidence": "server_readback_and_client_visual_check",
     }
     for name in ("shared_calendar_write", "multiaccount_live", "incremental_sync"):
         result[name] = {"status": "unverified"}

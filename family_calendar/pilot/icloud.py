@@ -11,6 +11,7 @@ from icalendar import Calendar
 
 from family_calendar.errors import CalendarError
 from family_calendar.operations.executor import Executor
+from family_calendar.pilot.visual import visual_verified
 from family_calendar.private_files import read_private, write_private
 from family_calendar.providers.capabilities import capabilities
 from family_calendar.providers.caldav.codec import (
@@ -261,7 +262,11 @@ class Pilot:
             all(checks.get(x, {}).get("status") == "server_verified" for x in future)
             and visual.get("future_result") == "pass"
         )
-        live_accepted = self.environment == "icloud_live" and visual["result"] == "pass"
+        live_accepted = (
+            self.environment == "icloud_live"
+            and visual["result"] == "pass"
+            and visual_verified(self.journal.root, visual)
+        )
         unresolved = [
             s["id"]
             for s in self.journal.steps()
@@ -300,7 +305,7 @@ class Pilot:
             "client_visual_check": visual["result"],
             "future_visual_check": visual.get("future_result", "not-checked"),
             "native_range_visual_check": visual.get("native_range_result", "not-checked"),
-            "visual_evidence_source": "owner_reported",
+            "visual_evidence_source": visual.get("source", "pending"),
             "gate_a": gate,
             "capabilities": capabilities(
                 checks,

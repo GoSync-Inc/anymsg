@@ -14,6 +14,7 @@ from .providers.caldav.adapter import CalDAVAdapter
 from .providers.caldav.transport import DAVTransport
 from .pilot.icloud import Pilot
 from .pilot.journal import Journal
+from .pilot.visual import agent_visual_evidence, visual_verified
 
 
 def parser():
@@ -54,6 +55,12 @@ def parser():
             )
             cmd.add_argument("--checked-all-cases", action="store_true", required=True)
             cmd.add_argument("--client", required=True, help="Apple Calendar/iCloud UI and version")
+            cmd.add_argument(
+                "--source", choices=("owner_reported", "agent_observed"), default="owner_reported"
+            )
+            cmd.add_argument(
+                "--evidence", type=Path, help="Agent observation manifest with image/TXT artifacts in run-dir"
+            )
     return p
 
 
@@ -68,19 +75,21 @@ async def _live(args, registry):
         if args.action == "record-visual-check":
             if report["environment"] != "icloud_live":
                 raise CalendarError("mock_evidence_not_live")
-            write_private(
-                args.run_dir / "visual-check.json",
-                json.dumps(
-                    {
-                        "result": args.result,
-                        "future_result": args.future_result,
-                        "native_range_result": args.native_range_result,
-                        "client": args.client[:200],
-                        "source": "owner_reported",
-                        "checked_at": datetime.now(timezone.utc).isoformat(),
-                    }
-                ).encode(),
-            )
+            visual = {
+                "result": args.result,
+                "future_result": args.future_result,
+                "native_range_result": args.native_range_result,
+                "client": args.client[:200],
+                "source": args.source,
+                "checked_at": datetime.now(timezone.utc).isoformat(),
+            }
+            if args.source == "agent_observed":
+                if args.evidence is None:
+                    raise CalendarError("visual_evidence_required")
+                visual.update(agent_visual_evidence(args.run_dir, args.evidence))
+                if not visual_verified(args.run_dir, visual):
+                    raise CalendarError("invalid_visual_evidence")
+            write_private(args.run_dir / "visual-check.json", json.dumps(visual).encode())
             # Gate is recomputed by run/reconcile; recording a declaration does not invent server evidence.
             output({"result": args.result, "next_action": "reconcile_to_refresh_report"})
         else:

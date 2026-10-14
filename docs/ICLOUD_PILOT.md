@@ -82,7 +82,17 @@ uv run family-calendar pilot icloud reconcile --run-dir outputs/icloud-pilot-01
 uv run python scripts/check_pilot_evidence.py --run-dir outputs/icloud-pilot-01
 ```
 
-`--result` относится к core (single, conditional, single/cancel/series, all-day, properties/TZ); future и native имеют отдельные flags. Вместо `pass` использовать `fail`, если обнаружена ошибка, либо `not-checked` для ещё не проверенного future/native. `--checked-all-cases` подтверждает просмотр всех применимых случаев core. Отметка хранится как `owner_reported`; сервис не утверждает, что автоматически увидел экран. `reconcile` может продолжить ещё не выполненные шаги матрицы в ранее разрешённом календаре. Не считать это командой исключительно чтения.
+`--result` относится к core (single, conditional, single/cancel/series, all-day, properties/TZ); future и native имеют отдельные flags. Вместо `pass` использовать `fail`, если обнаружена ошибка, либо `not-checked` для ещё не проверенного future/native. `--checked-all-cases` подтверждает просмотр всех применимых случаев core. По умолчанию отметка хранится как `owner_reported`.
+
+Если клиент проверил агент через Computer Use, использовать `--source agent_observed --evidence outputs/icloud-pilot-01/observations.json`. Manifest содержит `checks`: для каждого просмотренного сценария — `result` (`pass`/`fail`) и `artifacts` (относительные пути к PNG/JPEG и TXT внутри этого run-dir). Например:
+
+```json
+{"checks":{"all_day":{"result":"pass","artifacts":["client-observed/all-day.png","client-observed/all-day.txt"]}}}
+```
+
+Для полной приёмки нужны все пять core-сценариев, для future — дополнительно три future-сценария; для проверенного native — `native_range_probe`. Пример выше показывает только формат одного сценария. Каждый сценарий требует screenshot и сохранённый текст UI; файлы должны быть owner-only. При записи сохраняются SHA-256 артефактов. Report и evidence checker отклоняют отсутствующие, изменённые или выходящие за run-dir артефакты. Это локальная проверка целостности наблюдений агента, а не независимая подпись Apple или автоматическое распознавание картинки. Источник `agent_observed` не выдаётся за подтверждение владельца.
+
+`reconcile` может продолжить ещё не выполненные шаги матрицы в ранее разрешённом календаре. Не считать это командой исключительно чтения.
 
 `gate_a=accepted_core` разрешает дальнейшую разработку core; `accepted_core_and_future` дополнительно подтверждает simple weekly split. `not_accepted` требует исправления/повторной проверки. Mock environment всегда `not_accepted`. Второй аккаунт и shared calendar остаются `unverified` до отдельного live теста. Неуспех native probe не отключает подтверждённый split; native остаётся unverified и не используется для обычных переносов.
 

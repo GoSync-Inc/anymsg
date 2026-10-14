@@ -8,6 +8,7 @@ import sqlite3
 
 from family_calendar.errors import CalendarError
 from family_calendar.pilot.journal import decode_intent
+from family_calendar.pilot.visual import visual_verified
 from family_calendar.private_files import read_private
 from family_calendar.providers.caldav.codec import semantic_hash
 from family_calendar.providers.caldav.transport import within_collection
@@ -116,7 +117,8 @@ def validate_evidence(root):
             report["environment"] != "icloud_live"
             or report["client_visual_check"] != "pass"
             or visual.get("result") != "pass"
-            or visual.get("source") != "owner_reported"
+            or not visual_verified(root, visual)
+            or report.get("visual_evidence_source") != visual.get("source")
             or not CORE <= complete_checks
             or unresolved
             or (
