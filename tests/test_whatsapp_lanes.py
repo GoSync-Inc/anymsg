@@ -56,6 +56,14 @@ def test_send_receipt_arrives_while_background_media_is_unfinished(lane_provider
                 stream = provider.chunks({'provider_chat':'123@c.us','provider_id':message},{})
                 assert await anext(stream) == b'data'
                 assert provider.lock.locked()  # Background stream intentionally not consumed.
+                if message == 'backpressure':
+                    async def wait_for_full_reader():
+                        # Ensure the background reader has stopped draining the
+                        # pipe before sending; merely starting a large stream
+                        # would leave a race that does not prove backpressure.
+                        while not provider.process.stdout._paused:
+                            await asyncio.sleep(.01)
+                    await asyncio.wait_for(wait_for_full_reader(), 2)
                 async def send():
                     async with provider.send_gate:
                         return await provider.send_text({'provider_chat':'123@c.us','body':'Synthetic',
