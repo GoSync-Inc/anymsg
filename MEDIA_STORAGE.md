@@ -7,6 +7,25 @@ of 10 GiB and the existing capture floor),
 must be at least the capture floor, and can be configured independently. A
 storage pause never changes message coverage into a successful history result.
 
+Telegram can opt into a separate floor for recent small originals with
+`media_live_disk_reserve_bytes`. It is disabled by default (`null`), must remain
+at least the capture floor, and cannot exceed the background media floor.
+`media_live_max_bytes` defaults to the smaller of 32 MiB and `max_media_bytes`;
+`media_live_window_seconds` defaults to 24 hours (allowed: 10 minutes to 7 days).
+Only known-size originals within both limits qualify, based on message time;
+unknown-size, older and larger originals retain the background budget. Future
+timestamps more than five minutes ahead cannot enter this tier. History bounds
+and account/chat exclusions apply to both tiers.
+
+Eligible recent originals are claimed before background history, newest first.
+Both tiers share the same CAS, atomic reservations and lease fences. The chosen
+floor also applies during streaming, rather than only before download. This
+policy keeps small fresh originals available during a background storage pause;
+it does not implement cold-file eviction, guarantee latency during provider
+rate limits or interrupt a transfer already in progress. Under sustained recent
+traffic, history can wait. Extraction/transcription remains a separate queue:
+agents can obtain a downloaded original before its analysis is ready.
+
 Before starting a provider download, live collectors pass their `BlobWriter` to
 `Archive.claim_media`. One PostgreSQL advisory transaction serializes all media
 admissions in the archive DB. Filesystem device keys group aliases/bind mounts;

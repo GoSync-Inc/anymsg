@@ -232,9 +232,17 @@ class Archive:
                       ('version_conflict' if outcome=='conflict' else 'coverage_not_reconciled',aid))
             return {'outcome':outcome,'message':mid}
 
-    def claim_media(self,owner,*,account=None,ttl=120,collector_lease=None,since=None,writer=None):
+    def claim_media(self,owner,*,account=None,ttl=120,collector_lease=None,since=None,writer=None,
+                    live_writer=None,live_window_seconds=86400):
         from .storage_admission import StorageAdmission
         if not re.fullmatch(r'[a-zA-Z0-9_.-]{1,64}',owner) or not 10<=ttl<=600: raise ValueError('invalid_worker')
+        if live_writer is not None and (writer is None or
+                live_writer.root.resolve()!=writer.root.resolve() or
+                not 0<=live_writer.reserve_bytes<=writer.reserve_bytes or
+                not 0<live_writer.max_bytes<=writer.max_bytes or
+                type(live_window_seconds) is not int or not 600<=live_window_seconds<=7*86400):
+            raise ValueError('invalid_live_media_policy')
+        live_max=live_writer.max_bytes if live_writer is not None else None
         with self.store.pool.connection() as c:
             StorageAdmission.lock_and_reap(c)
             if collector_lease is not None:
@@ -243,21 +251,29 @@ class Archive:
             c.execute("""UPDATE media_jobs SET state='failed',error_code='retry_exhausted',lease_until=NULL
                 WHERE state='leased' AND attempts>=5 AND lease_until<clock_timestamp()
                 AND (%s::text IS NULL OR account=%s)""",(account,account))
-            job=c.execute('''SELECT j.* FROM media_jobs j JOIN account_policies p ON p.account=j.account
+            job=c.execute('''SELECT j.*,priority.live_media AS _live_media FROM media_jobs j JOIN account_policies p ON p.account=j.account
                 JOIN messages m ON m.id=j.message AND m.account=j.account
                 JOIN chats ch ON ch.id=m.chat AND ch.account=j.account
+                CROSS JOIN LATERAL (SELECT COALESCE(%s::bigint IS NOT NULL AND
+                    (j.descriptor->>'bytes')::bigint BETWEEN 0 AND %s::bigint AND
+                    m.sent_at>=clock_timestamp()-%s*interval '1 second' AND
+                    m.sent_at<=clock_timestamp()+interval '5 minutes',false) AS live_media) priority
                 WHERE p.enabled AND (%s::text IS NULL OR j.account=%s) AND j.attempts<5 AND
                 NOT m.deleted AND NOT(ch.provider_chat=ANY(p.exclude_chats)) AND
                 (p.discover_chats OR ch.provider_chat=ANY(p.include_chats)) AND
                 (%s::timestamptz IS NULL OR m.sent_at>=%s) AND
                 ((j.state='queued' AND j.next_due<=clock_timestamp()) OR
                  (j.state='leased' AND j.lease_until<clock_timestamp()))
-                ORDER BY j.next_due,j.id FOR UPDATE OF j SKIP LOCKED LIMIT 1''',(account,account,since,since)).fetchone()
+                ORDER BY priority.live_media DESC,
+                    CASE WHEN priority.live_media THEN m.sent_at END DESC,j.next_due,j.id
+                FOR UPDATE OF j SKIP LOCKED LIMIT 1''',
+                (live_max,live_max,live_window_seconds,account,account,since,since)).fetchone()
             if not job: return None
             expires=c.execute("SELECT clock_timestamp()+%s*interval '1 second' AS at",(ttl,)).fetchone()['at']
             reservation=None
             if writer is not None:
-                try:reservation=StorageAdmission(writer).reserve(c,job,expires)
+                selected_writer=live_writer if job['_live_media'] else writer
+                try:reservation=StorageAdmission(selected_writer).reserve(c,job,expires)
                 except ValueError as exc:
                     if str(exc)!='media_size_limit':raise
                     c.execute("UPDATE media_jobs SET state='failed',error_code='size_limit',lease_until=NULL WHERE id=%s",
@@ -270,6 +286,7 @@ class Archive:
             claimed=c.execute('''UPDATE media_jobs SET state='leased',attempts=attempts+1,lease_owner=%s,
                 lease_epoch=lease_epoch+1,lease_until=%s,error_code=NULL
                 WHERE id=%s RETURNING *''',(owner,expires,job['id'])).fetchone()
+            claimed['_live_media']=job['_live_media']
             if reservation is not None:claimed['_storage_reservation']=reservation
             return claimed
 

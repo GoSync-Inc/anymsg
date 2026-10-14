@@ -39,7 +39,8 @@ def configuration(path):
     cfg=private_json(path)
     fields={'enabled','account','credentials_file','session_file','permit_file','spool_directory',
             'batch_size','scan_interval_seconds','max_media_bytes','disk_reserve_bytes',
-            'media_disk_reserve_bytes','max_dialogs','history_since'}
+            'media_disk_reserve_bytes','media_live_disk_reserve_bytes','media_live_max_bytes',
+            'media_live_window_seconds','max_dialogs','history_since'}
     if not isinstance(cfg,dict) or set(cfg)-fields: raise ValueError('invalid_collector_config')
     if cfg.get('enabled') is not True: raise RuntimeError('collector_disabled')
     if not re.fullmatch(r'[a-zA-Z0-9_.-]{1,64}',cfg.get('account','')): raise ValueError('invalid_account')
@@ -54,6 +55,15 @@ def configuration(path):
     value=cfg.setdefault('media_disk_reserve_bytes',max(MEDIA_RESERVE_BYTES,cfg['disk_reserve_bytes']))
     if type(value) is not int or not cfg['disk_reserve_bytes']<=value<=100*1024**3:
         raise ValueError('invalid_media_disk_reserve_bytes')
+    value=cfg.setdefault('media_live_disk_reserve_bytes',None)
+    if value is not None and (type(value) is not int or
+            not cfg['disk_reserve_bytes']<=value<=cfg['media_disk_reserve_bytes']):
+        raise ValueError('invalid_media_live_disk_reserve_bytes')
+    for key,default,lo,hi in [
+            ('media_live_max_bytes',min(32*1024**2,cfg['max_media_bytes']),1,cfg['max_media_bytes']),
+            ('media_live_window_seconds',86400,600,7*86400)]:
+        value=cfg.setdefault(key,default)
+        if type(value) is not int or not lo<=value<=hi: raise ValueError('invalid_'+key)
     maximum=cfg.setdefault('max_dialogs',None)
     if maximum is not None and (type(maximum) is not int or not 1<=maximum<=10000):
         raise ValueError('invalid_max_dialogs')
@@ -253,11 +263,13 @@ class TelegramCollector:
     connect_timeout=60
     retry_connect=False
     def __init__(self,archive,account,provider,spool,*,batch_size=100,interval=60,max_dialogs=None,
-                 writer=None,owner=None,lease_ttl=60,heartbeat_interval=15,history_since=None):
+                 writer=None,owner=None,lease_ttl=60,heartbeat_interval=15,history_since=None,
+                 live_writer=None,live_window_seconds=86400):
         self.archive,self.account,self.provider,self.spool=archive,account,provider,spool
         self.batch_size,self.interval,self.max_dialogs=batch_size,interval,max_dialogs
         self.history_since=history_since
         self.writer=writer or BlobWriter(archive.store.files,reserve_bytes=MEDIA_RESERVE_BYTES)
+        self.live_writer,self.live_window_seconds=live_writer,live_window_seconds
         self.owner=owner or 'telegram-'+secrets.token_hex(12)
         self.lease_ttl,self.heartbeat_interval=lease_ttl,heartbeat_interval
         self.state=None; self.stopping=asyncio.Event(); self.failed=asyncio.Event()
@@ -454,9 +466,12 @@ class TelegramCollector:
     async def media_once(self):
         governor=getattr(self.provider,'governor',None)
         if governor:await governor.wait()
+        priority=({'live_writer':self.live_writer,'live_window_seconds':self.live_window_seconds}
+                  if self.live_writer is not None else {})
         job=await asyncio.to_thread(self.archive.claim_media,self.owner,account=self.account,
-                                    collector_lease=self.state.lease,since=self.history_since,writer=self.writer)
+                                    collector_lease=self.state.lease,since=self.history_since,writer=self.writer,**priority)
         if not job: return False
+        writer=self.live_writer if job.get('_live_media') else self.writer
         async def renew():
             while True:
                 await asyncio.sleep(30)
@@ -465,7 +480,7 @@ class TelegramCollector:
             source=await asyncio.to_thread(self.archive.media_source,job,collector_lease=self.state.lease)
             stream=self.provider.chunks(source,job['descriptor'])
             try:
-                return await self.writer.write_async(stream,expected_bytes=job['descriptor']['bytes'],
+                return await writer.write_async(stream,expected_bytes=job['descriptor']['bytes'],
                     reservation=job.get('_storage_reservation'))
             finally:
                 if hasattr(stream,'aclose'): await stream.aclose()
@@ -475,7 +490,7 @@ class TelegramCollector:
             if not done: raise TimeoutError('media_timeout')
             if renewal in done: renewal.result()
             blob=await download
-            await asyncio.to_thread(self.archive.finish_media,job,blob,self.writer,collector_lease=self.state.lease)
+            await asyncio.to_thread(self.archive.finish_media,job,blob,writer,collector_lease=self.state.lease)
         except (ProviderUnavailable,ProviderRateLimited,OSError,ValueError,RuntimeError,TimeoutError) as exc:
             if str(exc)=='media_lease_lost': return True
             if str(exc)=='collector_lease_lost': raise
@@ -619,9 +634,13 @@ async def run_config(path):
                 row=c.execute('SELECT platform,synthetic FROM accounts WHERE id=%s',(cfg['account'],)).fetchone()
                 if not row or row['platform']!='telegram' or row['synthetic']: raise RuntimeError('live_account_required')
             spool=CaptureSpool(cfg['spool_directory'],reserve_bytes=cfg['disk_reserve_bytes'])
+            live_writer=(BlobWriter(store.files,max_bytes=cfg['media_live_max_bytes'],
+                reserve_bytes=cfg['media_live_disk_reserve_bytes'])
+                if cfg['media_live_disk_reserve_bytes'] is not None else None)
             worker=TelegramCollector(archive,cfg['account'],TelethonProvider(cfg,auth),spool,
                 batch_size=cfg['batch_size'],interval=cfg['scan_interval_seconds'],max_dialogs=cfg['max_dialogs'],
                 history_since=cfg['history_since'],
+                live_writer=live_writer,live_window_seconds=cfg['media_live_window_seconds'],
                 writer=BlobWriter(store.files,max_bytes=cfg['max_media_bytes'],reserve_bytes=cfg['media_disk_reserve_bytes']))
             loop=asyncio.get_running_loop()
             for sig in [signal.SIGTERM,signal.SIGINT]: loop.add_signal_handler(sig,worker.stopping.set)
