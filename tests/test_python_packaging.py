@@ -7,6 +7,7 @@ import zipfile
 
 import pytest
 
+from anymsg import __version__
 from anymsg.assets import ASSET_NAMES,export_whatsapp_assets
 from messaging_service.whatsapp_collector import whatsapp_asset
 
@@ -15,7 +16,7 @@ def test_facade_help_and_version_require_no_database_configuration(capsys,monkey
     from anymsg.cli import main
     monkeypatch.delenv('DATABASE_URL_FILE',raising=False)
     assert main(['--version'])==0
-    assert capsys.readouterr().out.strip()=='anymsg 0.9.8'
+    assert capsys.readouterr().out.strip()==f'anymsg {__version__}'
     with pytest.raises(SystemExit) as result:main(['--help'])
     assert result.value.code==0
     help_text=capsys.readouterr().out
@@ -75,17 +76,17 @@ def test_built_wheel_includes_immutable_sql_and_node_sources():
             key='messaging_service/whatsapp_assets/'+name
             assert key in names and archive.read(key)==(source/'whatsapp'/name).read_bytes()
         assert not any('node_modules/' in name or '/private/' in name or name.endswith(('.dsn','.token','.session','.pyc')) for name in names)
-        metadata=archive.read('anymsg-0.9.8.dist-info/METADATA').decode()
-        assert 'Name: anymsg' in metadata and 'Version: 0.9.8' in metadata
+        metadata=archive.read(f'anymsg-{__version__}.dist-info/METADATA').decode()
+        assert 'Name: anymsg' in metadata and f'Version: {__version__}' in metadata
         assert 'License-Expression: MIT' in metadata
-        assert b'anymsg = anymsg.cli:main' in archive.read('anymsg-0.9.8.dist-info/entry_points.txt')
+        assert b'anymsg = anymsg.cli:main' in archive.read(f'anymsg-{__version__}.dist-info/entry_points.txt')
 
 
 def test_built_sdist_keeps_build_inputs_without_runtime_data():
     _,sdist=_artifacts()
     with tarfile.open(sdist,'r:gz') as archive:
         names=set(archive.getnames())
-        prefix='anymsg-0.9.8/'
+        prefix=f'anymsg-{__version__}/'
         for expected in ['pyproject.toml','README.md','LICENSE','anymsg/client.py',
                 'messaging_service/schema.sql','whatsapp/provider.mjs','whatsapp/package-lock.json']:
             assert prefix+expected in names

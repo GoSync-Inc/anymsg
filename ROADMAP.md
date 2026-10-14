@@ -1,10 +1,10 @@
 # Roadmap
 
 This library stays focused on messenger collection and an agent interface.
-Task/project management is outside the archive. Sending is not in 0.9.8 and
+Task/project management is outside the archive. Sending is not in 0.9.9 and
 remains a separate, explicitly approved action boundary.
 
-The 0.9.8 baseline already includes per-chat evidence, explicit collector errors,
+The 0.9.9 baseline already includes per-chat evidence, explicit collector errors,
 verified WhatsApp identity observations, file-text indexing, morphology search,
 bounded downloads, byte-level deduplication and optional enrichment adapters.
 These capabilities do not imply that every source history or file is available.

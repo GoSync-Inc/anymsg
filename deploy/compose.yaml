@@ -18,7 +18,7 @@ services:
       driver: json-file
       options: {max-size: 5m, max-file: "2"}
   api:
-    image: anymsg-api:${MESSAGING_VERSION:-0.9.8}
+    image: anymsg-api:${MESSAGING_VERSION:-0.9.9}
     build:
       context: ..
       target: runtime

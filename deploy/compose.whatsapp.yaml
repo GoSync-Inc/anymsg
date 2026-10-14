@@ -1,7 +1,7 @@
 # Merge with compose.yaml. All account credentials and volumes are distinct.
 # Browser sandbox smoke must pass on this host before enabling the profile.
 x-whatsapp: &whatsapp
-  image: anymsg-whatsapp:${MESSAGING_VERSION:-0.9.8}
+  image: anymsg-whatsapp:${MESSAGING_VERSION:-0.9.9}
   labels: {org.anymsg.collector: "true"}
   profiles: [whatsapp]
   init: true

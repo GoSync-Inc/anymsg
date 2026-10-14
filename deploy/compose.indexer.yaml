@@ -1,6 +1,6 @@
 services:
   indexer:
-    image: anymsg-indexer:${MESSAGING_VERSION:-0.9.8}
+    image: anymsg-indexer:${MESSAGING_VERSION:-0.9.9}
     init: true
     restart: unless-stopped
     depends_on:

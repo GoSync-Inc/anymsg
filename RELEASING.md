@@ -3,7 +3,7 @@
 The public repository is a fresh source export, not the Personal OS git history.
 Never publish correspondence, operational state, backups, session data or tokens.
 Python and npm distribution versions must match `messaging_service.__version__`.
-This initial version is 0.9.8 (experimental); sending remains unimplemented.
+The current version is 0.9.9 (experimental); sending remains unimplemented.
 
 1. Run CI with synthetic PostgreSQL, Python and Node tests. Build the wheel,
    sdist and npm tarball. Inspect their inventories; install them outside the
@@ -17,6 +17,9 @@ This initial version is 0.9.8 (experimental); sending remains unimplemented.
 5. After that initial npm package exists, configure its Trusted Publisher for
    `GoSync-Inc/anymsg`, workflow `publish-npm.yml`, environment `npm`. Select
    direct publishing permission if using this workflow (not staged-only).
+   A new npm publisher must successfully publish within two days or its
+   configuration expires. Validate it with the next reviewed patch release;
+   an already published version cannot be overwritten.
 6. Verify the public registry versions and hashes, then link them from the
    GitHub prerelease. Never report publishing success based only on a build.
 

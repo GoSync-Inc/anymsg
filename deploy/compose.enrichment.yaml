@@ -29,7 +29,7 @@ services:
   enricher:
     <<: *enrichment-common
     profiles: [enrichment-cloud]
-    image: anymsg-enricher:${MESSAGING_VERSION:-0.9.8}
+    image: anymsg-enricher:${MESSAGING_VERSION:-0.9.9}
     build:
       context: ..
       target: enricher
@@ -60,7 +60,7 @@ services:
   enricher-local:
     <<: *enrichment-common
     profiles: [enrichment-local]
-    image: anymsg-enricher-local:${MESSAGING_VERSION:-0.9.8}
+    image: anymsg-enricher-local:${MESSAGING_VERSION:-0.9.9}
     build:
       context: ..
       target: enricher-local

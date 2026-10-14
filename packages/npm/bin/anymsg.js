@@ -8,7 +8,7 @@ try {
     help: {type: 'boolean', short: 'h'}, version: {type: 'boolean', short: 'v'},
     url: {type: 'string'}, 'token-file': {type: 'string'}, json: {type: 'string'},
   }});
-  if (values.version) console.log('0.9.8');
+  if (values.version) console.log(JSON.parse(readFileSync(new URL('../package.json', import.meta.url), 'utf8')).version);
   else if (values.help || !positionals.length) console.log(
     'AnyMsg HTTP client (an existing server is required)\n' +
     'Usage: anymsg <operation> --url https://host/base --token-file /private/key --json \'{}\'\n' +

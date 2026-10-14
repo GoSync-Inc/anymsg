@@ -1,5 +1,6 @@
 import {test} from 'node:test';
 import assert from 'node:assert/strict';
+import {readFileSync} from 'node:fs';
 import {inspect} from 'node:util';
 import {execFileSync} from 'node:child_process';
 import {AnyMsgClient, AnyMsgError} from '../lib/index.js';
@@ -73,5 +74,5 @@ test('timeout covers response consumption and does not leak transport strings', 
 test('CLI help and version need neither server nor credentials', () => {
   const path = new URL('../bin/anymsg.js', import.meta.url);
   assert.match(execFileSync(process.execPath, [path.pathname, '--help'], {encoding: 'utf8'}), /existing server/);
-  assert.equal(execFileSync(process.execPath, [path.pathname, '--version'], {encoding: 'utf8'}).trim(), '0.9.8');
+  assert.equal(execFileSync(process.execPath, [path.pathname, '--version'], {encoding: 'utf8'}).trim(), JSON.parse(readFileSync(new URL('../package.json', import.meta.url), 'utf8')).version);
 });

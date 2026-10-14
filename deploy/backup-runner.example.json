@@ -2,7 +2,7 @@
   "directory": "/opt/anymsg/backups",
   "project": "anymsg",
   "network": "anymsg_backend",
-  "image": "anymsg-backup:0.9.8",
+  "image": "anymsg-backup:0.9.9",
   "delivery_mode": "staged_v1",
   "files_volume": "anymsg_files",
   "dsn_file": "/opt/anymsg/private/owner.dsn",

@@ -34,7 +34,14 @@ jobs:
       - name: Install pinned dependencies
         run: uv sync --frozen --group dev
       - name: Build packages
+        id: build
         run: |
+          python - <<'PYCODE'
+          import os,tomllib
+          from pathlib import Path
+          version=tomllib.loads(Path('pyproject.toml').read_text())['project']['version']
+          with open(os.environ['GITHUB_OUTPUT'],'a') as output:output.write(f'version={version}\n')
+          PYCODE
           uv build
           mkdir -p dist
           cd packages/npm
@@ -52,8 +59,8 @@ jobs:
       - name: Python/PostgreSQL tests
         env:
           PROBE_TEST_DSN_FILE: ${{ runner.temp }}/anymsg-test.dsn
-          ANYMSG_TEST_WHEEL: ${{ github.workspace }}/dist/anymsg-0.9.8-py3-none-any.whl
-          ANYMSG_TEST_SDIST: ${{ github.workspace }}/dist/anymsg-0.9.8.tar.gz
+          ANYMSG_TEST_WHEEL: ${{ github.workspace }}/dist/anymsg-${{ steps.build.outputs.version }}-py3-none-any.whl
+          ANYMSG_TEST_SDIST: ${{ github.workspace }}/dist/anymsg-${{ steps.build.outputs.version }}.tar.gz
         run: |
           python - <<'PY'
           import os
@@ -80,7 +87,7 @@ jobs:
           "$anymsg_py" -m anymsg whatsapp-assets --directory "$RUNNER_TEMP/anymsg-node-assets"
           mkdir anymsg-npm-install
           cd anymsg-npm-install
-          npm install --ignore-scripts --no-audit --no-fund "$GITHUB_WORKSPACE/dist/anymsg-0.9.8.tgz"
+          npm install --ignore-scripts --no-audit --no-fund "$GITHUB_WORKSPACE"/dist/*.tgz
           ./node_modules/.bin/anymsg --version
           node --input-type=module -e "import {AnyMsgClient} from 'anymsg'; if(typeof AnyMsgClient !== 'function')process.exit(1)"
       - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4

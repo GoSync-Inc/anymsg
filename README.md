@@ -6,7 +6,7 @@ Collect messages and attachments once, then let agents search and read them thro
 MCP or HTTP with separate credentials and account/chat permissions. Original files
 use SHA-256 deduplication; references to every source message stay separate.
 
-Current version: **0.9.8 — experimental**, PostgreSQL schema 21.
+Current version: **0.9.9 — experimental**, PostgreSQL schema 21.
 
 ## What works
 
@@ -42,8 +42,16 @@ uv sync --group dev
 uv run anymsg --help
 ```
 
-The built wheel also installs outside the checkout. Registry publishing requires
-maintainer account setup; see [RELEASING.md](RELEASING.md).
+Registry installation (Python 3.13):
+
+```sh
+pip install anymsg==0.9.9
+npm install anymsg@0.9.9
+```
+
+Python installs the server/operator CLI and HTTP client; npm installs only the
+JavaScript HTTP client/CLI. Deployment prerequisites are in [SETUP.md](SETUP.md).
+Maintainer publication instructions are in [RELEASING.md](RELEASING.md).
 
 JavaScript client:
 

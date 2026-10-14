@@ -1,7 +1,7 @@
 # Local operator only. No port, no automatic startup. Never expose as an API tool.
 services:
   operator:
-    image: anymsg-api:${MESSAGING_VERSION:-0.9.8}
+    image: anymsg-api:${MESSAGING_VERSION:-0.9.9}
     profiles: [operator]
     entrypoint: [python, -m, messaging_service]
     command: [--help]
