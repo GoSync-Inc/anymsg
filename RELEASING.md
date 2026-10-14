@@ -39,7 +39,11 @@ must satisfy PyPI's verification/2FA requirements. Existing projects configure
 publishers in their project settings instead. No PyPI token is committed or
 stored as a GitHub secret.
 
-Both release workflows take a `version` input and require its matching git tag.
+Both release workflows take a `version` input. PyPI requires the selected
+matching git tag. npm may run from that tag or from `main`; in either case its
+build-and-test job explicitly checks out `refs/tags/v<version>`, never untagged
+source. This lets the publication workflow be repaired without moving an already
+published release tag.
 They fail if a package/version differs or if the version is already registered.
 A shared reusable build-and-test workflow validates the source before upload.
 Actions have minimum permissions; the upload job alone receives `id-token: write`.

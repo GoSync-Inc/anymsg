@@ -5,6 +5,9 @@ on:
       version:
         type: string
         default: ''
+      source_ref:
+        type: string
+        default: ''
 permissions:
   contents: read
 jobs:
@@ -22,7 +25,9 @@ jobs:
         options: --health-cmd "pg_isready -U probe_owner -d messaging_probe_test" --health-interval 5s --health-timeout 3s --health-retries 12
     steps:
       - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
-        with: {persist-credentials: false}
+        with:
+          persist-credentials: false
+          ref: ${{ inputs.source_ref }}
       - uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1 # v6
         with: {python-version: '3.13'}
       - uses: actions/setup-node@249970729cb0ef3589644e2896645e5dc5ba9c38 # v6
