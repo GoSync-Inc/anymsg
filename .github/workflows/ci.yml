@@ -1,0 +1,23 @@
+name: Pilot checks
+on:
+  push:
+  pull_request:
+permissions:
+  contents: read
+jobs:
+  synthetic:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          persist-credentials: false
+      - uses: astral-sh/setup-uv@1c37ad07a6a961277cf70c0d37d6f313000f5884 # v10.3.0
+        with:
+          version: '0.9.26'
+          python-version: '3.13'
+      - run: uv sync --locked
+      - run: uv run pytest tests/unit tests/contract
+      - run: uv run ruff check .
+      - run: uv run ruff format --check .
+      - run: uv build

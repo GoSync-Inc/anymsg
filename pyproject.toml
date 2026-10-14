@@ -1,0 +1,44 @@
+[build-system]
+requires = ["hatchling>=1.27,<2"]
+build-backend = "hatchling.build"
+
+[project]
+name = "family-calendar-service"
+version = "0.1.0"
+description = "An isolated iCloud CalDAV pilot for a multi-account family calendar service"
+readme = "README.md"
+requires-python = ">=3.13,<3.14"
+license = "MIT"
+license-files = ["LICENSE"]
+dependencies = [
+  "httpx>=0.28,<0.29",
+  "icalendar>=6,<8",
+  "python-dateutil>=2.9,<3",
+  "defusedxml>=0.7,<0.8",
+  "cryptography>=45,<49",
+]
+
+[project.scripts]
+family-calendar = "family_calendar.cli:main"
+
+[dependency-groups]
+dev = ["pytest>=8,<10", "ruff>=0.12,<1"]
+
+[tool.hatch.build.targets.wheel]
+packages = ["family_calendar"]
+exclude = ["**/.local/**", "**/outputs/**", "**/*.key", "**/*.sqlite*"]
+
+[tool.hatch.build.targets.sdist]
+include = ["family_calendar", "tests", "scripts", "docs", ".github", "AGENTS.md", "README.md", "CONTRACTS.md", "THIRD_PARTY.md", "LICENSE", "pyproject.toml", "uv.lock", ".gitignore", ".gitattributes"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+addopts = "-q -m 'not live'"
+markers = ["live: opt-in iCloud tests requiring owner configuration"]
+
+[tool.ruff]
+target-version = "py313"
+line-length = 110
+
+[tool.ruff.lint]
+select = ["E4", "E7", "E9", "F"]
