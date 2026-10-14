@@ -2,8 +2,7 @@ import {recoverNavigation} from './navigation.mjs';
 // Private child process. No TCP listener, HTTP API or agent credentials.
 import {sendText} from './outgoing.mjs';
 import fs from 'node:fs';
-import readline from 'node:readline';
-import {once} from 'node:events';
+import {runLane,sendingSocket} from './ipc.mjs';
 import {DiskCapture,event,asId,chatId,allows,cursor,compare,readPolicy} from './capture.mjs';
 import {download} from './media.mjs';
 import {cachedSenderNames,cachedOwnerIds} from './sender.mjs';
@@ -27,11 +26,6 @@ const pageBounds=createPageBounds();
 const identities=new IdentityCache();
 function currentPolicy(){
   return readPolicy(cfg.events_directory);
-}
-async function emit(value) {
-  const line=JSON.stringify(value)+'\n';
-  if(Buffer.byteLength(line)>1024*1024)throw new Error('provider_response_too_large');
-  if(!process.stdout.write(line))await once(process.stdout,'drain');
 }
 async function stop(code=0) {
   if(stopping)return;stopping=true;
@@ -140,14 +134,7 @@ const SAFE=new Set([...CONNECTION_ERRORS,'media_unavailable','media_timeout','me
   'media_metadata_unavailable','media_reference_changed','unsupported_media_type','media_hash_mismatch',
   'media_size_mismatch','media_size_limit','invalid_media_path','chat_excluded','provider_response_too_large',
   'provider_page_stalled','send_expired','sending_disabled','send_target_invalid','send_receipt_mismatch']);
-const lines=readline.createInterface({input:process.stdin,crlfDelay:Infinity});
-// Python sends one request at a time. Bound malformed input before readline buffering.
-let buffered=0;process.stdin.on('data',b=>{for(const byte of b){buffered=byte===10?0:buffered+1;if(buffered>1024*1024)void stop(1);}});
-for await(const line of lines) {
-  let request;
-  try {
-    request=JSON.parse(line);
-    if(!Number.isSafeInteger(request.id))throw new Error('invalid_request');
+async function handle(request,emit) {
     const {method,params={}}=request;let result;
     if(method==='start' && !client)result=await start(params.policy);
     else if(!ready)throw new Error('provider_not_ready');
@@ -164,13 +151,17 @@ for await(const line of lines) {
       for await(const chunk of download(meta,cfg.max_media_bytes))await emit({id:request.id,chunk:chunk.toString('base64')});
       result={verified:true};
     } else throw new Error('unsupported_method');
-    await emit({id:request.id,result});
-  }catch(error){
-    try{await emit({id:request?.id,error:SAFE.has(error.message)?error.message:'provider_operation_failed'});}
-    finally{
-      // A rejected page never becomes an empty/exhausted success or advances its
-      // cursor. Restart the owned child to release an uncancellable CDP evaluate.
-      if(error instanceof PageEvaluationStalled){failed('provider_page_stalled');await stop(1);}
-    }
-  }
+    return result;
 }
+async function onError(error) {
+  // An uncancellable CDP evaluation still requires restarting this one client.
+  if(error instanceof PageEvaluationStalled){failed('provider_page_stalled');await stop(1);}
+}
+const sending=sendingSocket();
+sending.on('end',()=>void stop(0));
+try {
+  await Promise.all([
+    runLane(process.stdin,process.stdout,{methods:['start','policy','dialogs','page','media'],handle,safe:SAFE,onError}),
+    runLane(sending,sending,{methods:['send_text'],handle,safe:SAFE,onError}),
+  ]);
+}catch{failed('provider_disconnected');await stop(1);}

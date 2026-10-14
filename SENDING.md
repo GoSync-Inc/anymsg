@@ -66,7 +66,15 @@ must permit the target chat. Queued work rechecks credential expiration/revocati
 principal permissions/scope and account policy immediately before dispatch.
 Policy changes invalidate old scope-version receipts as described in ACCESS.md.
 
-The existing per-account IPC/governor gate serializes sends with collection.
+WhatsApp has two independent private IPC lanes inside its existing authenticated
+collector. Sending has its own socket, response reader and serialization gate;
+history and media use the background pipe. A slow download, including pipe
+backpressure, does not occupy the sending lane. Only one send and one background
+operation can run at once per account; this does not increase bulk API concurrency.
+The same browser and session serve both lanes. Browser/provider outages can still
+affect both, and this is not a guarantee of provider delivery latency. Cancellation
+or protocol corruption stops that owned client; uncertain sends remain `unknown`.
+Account cooldowns and fresh authorization checks still apply to sending.
 An account can accept at most 60 new actions per minute; idempotent receipt reads
 do not count as new actions. Ambiguous attempts are **not retried** by the outbox.
 Telegram's client may retry one RPC using its existing random ID; that is different

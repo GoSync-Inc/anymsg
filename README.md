@@ -6,7 +6,9 @@ Collect messages and attachments once, then let agents search and read them thro
 MCP or HTTP with separate credentials and account/chat permissions. Original files
 use SHA-256 deduplication; references to every source message stay separate.
 
-Current version: **0.9.10 — experimental**, PostgreSQL schema 22.
+Development version: **0.9.11 — experimental**, PostgreSQL schema 22.
+Published npm/PyPI release: **0.9.9**; sending and independent WhatsApp IPC lanes
+require the development source until the next package release.
 
 ## What works
 
@@ -47,8 +49,8 @@ uv run anymsg --help
 Registry installation (Python 3.13):
 
 ```sh
-pip install anymsg==0.9.10
-npm install anymsg@0.9.10
+pip install anymsg==0.9.9
+npm install anymsg@0.9.9
 ```
 
 Python installs the server/operator CLI and HTTP client; npm installs only the

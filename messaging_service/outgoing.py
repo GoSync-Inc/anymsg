@@ -154,8 +154,8 @@ class OutgoingWorker:
     async def once(self):
         if await asyncio.to_thread(self.state.cooldown_remaining)>0:return False
         if self.gate is not None:
-            # Waiting for a long WhatsApp media response leaves the job queued,
-            # not dispatching/unknown. No second IPC reader or messenger client.
+            # Wait for the sending lane before claiming. WhatsApp background
+            # history/media have a separate pipe and never hold this gate.
             async with self.gate:return await self._once()
         return await self._once()
 

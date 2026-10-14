@@ -1,7 +1,9 @@
 # Roadmap
 
 This library stays focused on messenger collection and an agent interface.
-Task/project management is outside the archive. Version 0.9.10 adds opt-in text
+Task/project management is outside the archive. Version 0.9.11 separates the
+WhatsApp sending lane from background history/media in the same authenticated
+collector. Version 0.9.10 adds opt-in text
 sending as a separate, explicitly approved action boundary.
 
 The 0.9.9 baseline already includes per-chat evidence, explicit collector errors,
