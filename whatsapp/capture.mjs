@@ -59,6 +59,14 @@ export function event(message, body=undefined, ownerIds=[]) {
   if (!Number.isSafeInteger(value.timestamp) || value.timestamp<=0) throw new Error('invalid_provider_time');
   if (typeof value.senderId!=='string' || typeof value.body!=='string' || value.body.length>65536)
     throw new Error('invalid_provider_message');
+  // Public cached body is native wire evidence; no inferred entity parse or
+  // undocumented private formatting fields are treated as reliable metadata.
+  const observed=typeof (body===undefined?message.body:body)==='string';
+  value.formatting={version:1,state:observed?'wire_observed':'unknown',
+    basis:observed?'whatsapp_native_wire':null,
+    wire_sha256:observed?createHash('sha256').update(value.body,'utf8').digest('hex'):null,
+    entities:null,unsupported_entities:[],
+    warnings:observed?['syntax_interpretation_unknown']:['native_entities_not_captured']};
   return value;
 }
 export function cursor(e) { return [e.timestamp,e.messageId]; }

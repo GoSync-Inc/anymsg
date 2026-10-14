@@ -145,6 +145,10 @@ def output_options(compact=False, body_chars=None, include_coverage=True):
 
 def shape_messages(rows, *, compact=False, body_chars=None):
     for row in rows:
+        if isinstance(row.get('formatting'),dict):
+            # Native spans remain tied to the complete captured body, even when
+            # the caller requests a shorter body or a compact snippet.
+            row['formatting']={**row['formatting'],'offsets_reference':'full_provider_body_utf16'}
         body=row.get('body')
         if body is not None and body_chars is not None:
             row['body_truncated']=len(body)>body_chars

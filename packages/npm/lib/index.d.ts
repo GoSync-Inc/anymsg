@@ -1,5 +1,19 @@
 export type Json = null | boolean | number | string | Json[] | {[key: string]: Json};
 export type Arguments = {[key: string]: Json};
+export type MessageFormat = 'plain' | 'markdown' | 'html';
+export interface MessageDraft {
+  account: string;
+  chat_id: string;
+  text: string;
+  reply_to?: string;
+  format?: MessageFormat;
+  link_preview?: boolean;
+  allow_lossy?: boolean;
+}
+export interface MessageAction extends MessageDraft {
+  request_id: string;
+  preview_digest?: string;
+}
 export declare const tools: readonly string[];
 export declare class AnyMsgError extends Error {
   readonly code: string;
@@ -28,6 +42,9 @@ export declare class AnyMsgClient {
   ackUpdates(args: Arguments): Promise<Record<string, unknown>>;
   getReviews(args: Arguments): Promise<Record<string, unknown>>;
   recordReview(args: Arguments): Promise<Record<string, unknown>>;
-  sendMessage(args: {account:string;chat_id:string;text:string;request_id:string;reply_to?:string}): Promise<Record<string,unknown>>;
+  /** Passive rendering. Its digest binds the payload but does not prove owner approval. */
+  previewMessage(args: MessageDraft): Promise<Record<string,unknown>>;
+  /** Rich content requires the reviewed preview digest and exact owner confirmation. */
+  sendMessage(args: MessageAction): Promise<Record<string,unknown>>;
   getSendStatus(args: {send_id:string}): Promise<Record<string,unknown>>;
 }

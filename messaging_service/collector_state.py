@@ -32,7 +32,7 @@ def validate_capture(value):
         event=value['event']
         if not isinstance(event,dict) or set(event)-{'chatId','chatName','messageId','senderId','body',
                 'timestamp','fromMe','hasMedia','filename','mimetype','filesize','editedTimestampMs',
-                'senderName','senderUsername','replyToId','forwarded','mediaKind','mentionsOwner','replyToOwner','identityObservations'}:
+                'senderName','senderUsername','replyToId','forwarded','mediaKind','mentionsOwner','replyToOwner','identityObservations','formatting'}:
             raise ValueError('invalid_whatsapp_event')
         envelope=whatsapp_message(value['account'],event,change=value['change'],
             observed_at=utc(value['observed_at']),origin=value['origin'])
@@ -350,6 +350,9 @@ class CollectorState:
             e.pop('message',None); e.pop('revision',None)
             e.update(deleted=True,body='',media=[],origin='reconcile',
                      updated_at=max(row['deleted_at'],datetime.fromisoformat(e['updated_at'])).isoformat())
+            if 'formatting' in e:
+                from .incoming_formatting import unknown
+                e['formatting']=unknown()
             result=self.archive.ingest(e,lease=self.lease)
             applied+=result['outcome']=='deleted'
         return applied

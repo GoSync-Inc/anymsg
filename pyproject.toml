@@ -4,7 +4,7 @@ build-backend = "hatchling.build"
 
 [project]
 name = "anymsg"
-version = "0.9.13"
+version = "0.9.14"
 description = "A self-hosted messaging archive and MCP interface for agents"
 readme = "README.md"
 requires-python = ">=3.13,<3.14"
@@ -25,6 +25,7 @@ dependencies = [
   "starlette==1.7.0",
   "httpx==0.28.1",
   "telethon==1.45.0",
+  "markdown-it-py==4.2.0",
 ]
 
 [project.urls]

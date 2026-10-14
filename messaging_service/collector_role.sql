@@ -20,6 +20,7 @@ GRANT SELECT,INSERT,UPDATE,DELETE ON media_reservations TO messaging_collector;
 -- Outbound dispatch rechecks only policy and public key metadata, never token hashes.
 GRANT SELECT(id,accounts,chat_ids,permissions,enabled,scope_version) ON principals TO messaging_collector;
 GRANT SELECT(id,principal,revoked,expires_at) ON api_keys TO messaging_collector;
+-- Rich payloads are immutable to the collector; it dispatches stored output only.
 GRANT SELECT ON outgoing_messages TO messaging_collector;
 GRANT UPDATE(status,started_at,finished_at,lease_epoch,provider_message_id,error_code)
     ON outgoing_messages TO messaging_collector;

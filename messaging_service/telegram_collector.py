@@ -134,15 +134,30 @@ class TelethonProvider:
     async def wait_disconnected(self): await self.client.disconnected
 
     async def send_text(self,job):
-        from .outgoing import SendRejected
+        from .outgoing import SendRejected,dispatch_payload
+        from telethon import types
+        payload=dispatch_payload(job,'telegram')
+        options={'parse_mode':None,'link_preview':payload['link_preview'],
+            'reply_to':int(job['reply_provider_id']) if job.get('reply_provider_id') else None,
+            'clear_draft':False}
+        if job.get('render_artifact') is not None:
+            constructors={'bold':types.MessageEntityBold,'italic':types.MessageEntityItalic,
+                'strikethrough':types.MessageEntityStrike,'underline':types.MessageEntityUnderline,
+                'spoiler':types.MessageEntitySpoiler,'code':types.MessageEntityCode,
+                'pre':types.MessageEntityPre,'blockquote':types.MessageEntityBlockquote,
+                'text_link':types.MessageEntityTextUrl}
+            entities=[]
+            for entity in payload['entities']:
+                arguments={'offset':entity['offset'],'length':entity['length']}
+                if entity['type']=='text_link':arguments['url']=entity['url']
+                elif entity['type']=='pre':arguments['language']=entity.get('language','')
+                entities.append(constructors[entity['type']](**arguments))
+            options['formatting_entities']=entities
         async def send():
             # Recheck after waiting for the shared rate/cooldown gate.
             if datetime.now(timezone.utc).timestamp()>=job['expires_at']:
                 raise SendRejected('send_expired')
-            message=await self.client.send_message(int(job['provider_chat']),job['body'],
-                parse_mode=None,link_preview=False,
-                reply_to=int(job['reply_provider_id']) if job.get('reply_provider_id') else None,
-                clear_draft=False)
+            message=await self.client.send_message(int(job['provider_chat']),payload['text'],**options)
             if not message or str(message.chat_id)!=job['provider_chat']:
                 raise RuntimeError('send_receipt_mismatch')
             return {'provider_message_id':str(message.id),'message':message}

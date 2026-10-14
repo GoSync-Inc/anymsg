@@ -8,6 +8,7 @@ from psycopg.types.json import Jsonb
 
 from .envelope import canonical, fingerprint, stable_id, validate
 from .store import serial
+from .incoming_formatting import known as known_formatting, unknown as unknown_formatting
 
 
 class Archive:
@@ -95,6 +96,7 @@ class Archive:
             if tombstone and not e['deleted']:
                 e={**e,'deleted':True,'body':'','media':[],
                    'updated_at':max(tombstone,datetime.fromisoformat(e['updated_at'])).isoformat()}
+                if 'formatting' in e:e['formatting']=unknown_formatting()
             previous=c.execute('SELECT outcome FROM ingest_receipts WHERE digest=%s',(receipt,)).fetchone()
             if previous: return {'outcome':'duplicate','message':mid}
             chat_type=e.get('metadata',{}).get('chat_type')
@@ -109,22 +111,38 @@ class Archive:
                       (cid,aid,e['chat_title'],e['chat'],chat_type,e['chat'],e['chat']))
             old=c.execute('SELECT * FROM messages WHERE id=%s FOR UPDATE',(mid,)).fetchone()
             content=fingerprint(e); updated=datetime.fromisoformat(e['updated_at']); outcome='created'
+            old_format=None
+            if old:
+                retained=c.execute('SELECT snapshot FROM message_revisions WHERE message=%s AND revision=%s',
+                    (mid,old['revision'])).fetchone()
+                old_format=retained['snapshot'].get('formatting') if retained else None
+            candidate_format=e.get('formatting')
+            known_candidate=known_formatting(candidate_format);known_retained=known_formatting(old_format)
+            formatting_changed=known_candidate and known_retained and candidate_format!=old_format
+            formatting_completed=known_candidate and not known_retained
             sender_completed=bool(old and not old['sender'] and e['sender'] and not old['deleted']
                 and not e['deleted'] and e['platform']=='telegram' and e['direction']=='outgoing'
                 and e.get('metadata',{}).get('chat_type')=='private'
                 and e.get('metadata',{}).get('sender_identity_basis')=='authenticated_self'
                 and old['provider_updated_at']==updated
-                and fingerprint({**e,'sender':''})==old['content_hash'])
+                and fingerprint({**e,'sender':''})==old['content_hash']
+                and not formatting_changed)
             if old:
                 if old['deleted'] and not e['deleted']: outcome='tombstoned'
                 elif sender_completed:outcome='edited'
                 elif (old['sent_at']!=datetime.fromisoformat(e['sent_at']) or old['direction']!=e['direction']
                       or old['sender']!=e['sender']): outcome='conflict'
-                elif old['content_hash']==content: outcome='unchanged'
+                elif old['content_hash']==content and not (formatting_changed or formatting_completed): outcome='unchanged'
                 elif old['provider_updated_at'] and updated<old['provider_updated_at']: outcome='stale'
+                elif old['content_hash']==content and formatting_completed:outcome='edited'
                 elif (old['provider_updated_at']==updated and not e['deleted']): outcome='conflict'
                 else: outcome='deleted' if e['deleted'] else 'edited'
             elif e['deleted']: outcome='deleted'
+            # An incomplete observation of the same retained provider body must
+            # not erase known formatting, including authenticated sender repair.
+            inherited_format=bool(old and known_retained and not known_candidate and not e['deleted']
+                and (old['content_hash']==content or sender_completed))
+            if inherited_format:e={**e,'formatting':old_format}
             if outcome in ('created','edited','deleted'):
                 revision=old['revision']+1 if old else 1
                 c.execute('''INSERT INTO messages(id,account,chat,provider_id,sender,body,sent_at,revision,
@@ -183,10 +201,13 @@ class Archive:
             elif outcome in ('edited','deleted','unchanged'):
                 # A repeated copy of the retained revision does not resolve an
                 # equal/newer conflicting observation. Only later evidence does.
-                c.execute('''UPDATE message_conflicts SET resolved_at=clock_timestamp(),
+                c.execute('''UPDATE message_conflicts mc SET resolved_at=clock_timestamp(),
                     resolved_revision=(SELECT revision FROM messages WHERE id=%s)
-                    WHERE message=%s AND resolved_at IS NULL AND candidate_updated_at<%s''',
-                    (mid,mid,updated))
+                    FROM ingest_receipts r WHERE r.digest=mc.receipt_digest
+                    AND mc.message=%s AND mc.resolved_at IS NULL AND mc.candidate_updated_at<%s
+                    AND (NOT %s OR coalesce(r.envelope->'formatting'->>'state','unknown')='unknown'
+                        OR r.envelope->'formatting'=%s::jsonb)''',
+                    (mid,mid,updated,inherited_format,Jsonb(old_format)))
                 if sender_completed:
                     # Only competing copies of this exact content are resolved.
                     # Unrelated equal-version contradictions stay visible.
@@ -196,7 +217,10 @@ class Archive:
                         ORDER BY mc.observed_at,mc.receipt_digest LIMIT 100''',(mid,)).fetchall()
                     equivalent=[r['receipt_digest'] for r in candidates
                         if r['candidate_updated_at']<=updated
-                        and fingerprint(validate(r['envelope'])) in (content,old['content_hash'])]
+                        and fingerprint(validate(r['envelope'])) in (content,old['content_hash'])
+                        and (not known_formatting(r['envelope'].get('formatting'))
+                            or not known_formatting(e.get('formatting'))
+                            or r['envelope']['formatting']==e['formatting'])]
                     if equivalent:c.execute('''UPDATE message_conflicts SET resolved_at=clock_timestamp(),
                         resolved_revision=%s WHERE message=%s AND receipt_digest=ANY(%s) AND resolved_at IS NULL''',
                         (revision,mid,equivalent))

@@ -25,6 +25,23 @@ def send_provenance(c,rows):
                 'owner_approval_verified_by_server':False}
 
 
+def formatting_evidence(c,rows):
+    """Read exact authorized revisions; never attach newer proof to old events."""
+    from .incoming_formatting import unknown
+    missing=[r for r in rows if 'formatting' not in r]
+    if not missing:return
+    # A message may occur at multiple frozen revisions in an update batch.
+    pairs=list(dict.fromkeys((r.get('id') or r['message'],r['revision']) for r in missing))
+    proof={(r['message'],r['revision']):r['formatting'] for r in c.execute(
+        """SELECT mr.message,mr.revision,mr.snapshot->'formatting' AS formatting
+            FROM message_revisions mr JOIN unnest(%s::text[],%s::integer[]) AS requested(message,revision)
+                ON mr.message=requested.message AND mr.revision=requested.revision""",
+        ([p[0] for p in pairs],[p[1] for p in pairs])).fetchall()}
+    for row in missing:
+        value=proof.get((row.get('id') or row['message'],row['revision']))
+        row['formatting']=value if value is not None else unknown()
+
+
 def delivery_evidence(c,rows):
     """Decorate authorized rows, preserving receipt events' frozen evidence."""
     from .receipts import for_rows,unknown_evidence
@@ -81,7 +98,11 @@ def decorate(c,rows):
     current={r['id']:r['revision'] for r in c.execute('SELECT id,revision FROM messages WHERE id=ANY(%s)',(ids,))}
     send_provenance(c,rows)
     delivery_evidence(c,rows)
+    formatting_evidence(c,rows)
     for row in rows:
+        # Some query paths truncate before decoration; never imply these spans
+        # address the shortened response body. Do not mutate stored snapshots.
+        row['formatting']={**row['formatting'],'offsets_reference':'full_provider_body_utf16'}
         row['attachments']=grouped.get(row['id'],[])
         conflict=conflicts.get(row['id'],{'active_conflicts':0,'historical_conflicts':0,'last_conflict_at':None})
         row['evidence']={k:v for k,v in conflict.items() if k!='message'}

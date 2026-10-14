@@ -5,6 +5,10 @@ installation from npm/PyPI does not relicense those dependencies. The pinned
 lock files are the dependency inventory. Preserve dependency notices when
 redistributing installed environments or container images.
 
+Message formatting uses [markdown-it-py](https://github.com/executablebooks/markdown-it-py)
+and [mdurl](https://github.com/executablebooks/mdurl) (MIT), pinned in the Python
+lock files. Raw HTML parsing is disabled in Markdown.
+
 Direct components include [Telethon](https://github.com/LonamiWebs/Telethon)
 (MIT), [MCP Python SDK](https://github.com/modelcontextprotocol/python-sdk)
 (MIT), [Psycopg](https://github.com/psycopg/psycopg) (LGPL-3.0),

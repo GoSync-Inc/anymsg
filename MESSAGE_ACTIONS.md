@@ -59,11 +59,11 @@ Receipt capture must not mark provider chats read or acknowledge archive updates
 
 ## Then: reactions and expanded sends
 
-Formatting is a new requirement from the subsequent feedback. Its staged
-contract is in [FORMATTING.md](FORMATTING.md): maintained parser evaluation,
+Formatting is a new requirement from the subsequent feedback. Its implemented 0.9.14
+contract is in [FORMATTING.md](FORMATTING.md): bounded maintained parser,
 passive preview, native rendering, payload-bound outbox persistence, then incoming
-format evidence. It is not implemented in 0.9.13. Plan it after receipt capture
-and before expanded sends; it needs no new provider session. Long messages stay
+format evidence. It is implemented after receipt capture
+and before expanded sends; it uses the existing provider sessions. Long messages stay
 single actions until an explicit multipart protocol exists.
 
 | Stage | Scope | Acceptance boundary |
@@ -80,7 +80,7 @@ explicitly configured: the report does not change acting-agent approval mode.
 
 ## Client discovery
 
-The current manifest has 19 tools. A different client count alone does not prove
+The current manifest has 20 tools. A different client count alone does not prove
 caching: compare actual names, the authenticated server's `tools/list`,
 `capabilities.tool_manifest` and any host filtering/configuration first. Check
 the caller's effective permissions separately; discovery never grants sending

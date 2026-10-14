@@ -14,7 +14,7 @@ OPERATION_PERMISSIONS = {
     'search_people': 'read', 'search_files': 'read', 'get_file_text': 'read',
     'get_file_occurrences':'read', 'get_file_segments':'read', 'get_sync_status':'read',
     'resolve_reference':'read',
-    'send_message':'send','get_send_status':'send',
+    'preview_message':'read','send_message':'send','get_send_status':'send',
 }
 AUDIT_OPERATIONS = frozenset(OPERATION_PERMISSIONS) | {
     'issue_key', 'revoke_key', 'set_access', 'http_boundary', 'send_dispatch', 'set_sending',
@@ -30,6 +30,9 @@ AUDIT_CODES = frozenset({
     'query_timeout','service_busy','service_unavailable','chat_required','ambiguous_reference',
     'invalid_message_text','invalid_request_id','idempotency_conflict','sending_disabled',
     'sender_not_ready','send_access_changed','send_expired','send_result_unknown',
+    'invalid_message_format','unsafe_message_markup','invalid_message_entities',
+    'formatting_too_complex','unsupported_message_formatting',
+    'lossy_formatting_requires_confirmation','message_too_long','preview_required','preview_mismatch',
 })
 UNSET = object()
 

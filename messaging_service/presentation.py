@@ -2,7 +2,7 @@
 MESSAGE_FIELDS = ('id','message','account','chat','sender','sent_at','revision','direction',
     'provider_message_id','kind','origin','historical','is_backfill','event_sequence','sender_name','username',
     'chat_title','chat_type','reply_to_provider_id','mentions_owner','reply_to_owner','forwarded','media_kind','body_truncated',
-    'sender_identity_basis','agent_send','delivery_receipt')
+    'sender_identity_basis','agent_send','delivery_receipt','formatting')
 FILE_FIELDS = ('attachment_id','id','message_id','account','chat','revision','sha256','mime',
     'bytes','display_name','download_status','extraction_status','enrichment_status',
     'truncated','error_code','title','document_type','snippet','match_type',
@@ -35,6 +35,9 @@ def file_summary(row):
 
 def message_summary(row):
     result={k:row[k] for k in MESSAGE_FIELDS if k in row and row[k] is not None}
+    if 'formatting' in result:
+        from .incoming_formatting import summary
+        result['formatting']=summary(result['formatting'])
     for key,maximum in [('sender_name',64),('username',64),('chat_title',72)]:
         if key in result:result[key]=result[key][:maximum]
     snippet=row.get('snippet') or row.get('body') or ''

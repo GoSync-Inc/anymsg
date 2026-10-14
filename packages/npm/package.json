@@ -1,6 +1,6 @@
 {
   "name": "anymsg",
-  "version": "0.9.13",
+  "version": "0.9.14",
   "description": "GoSync AnyMsg JavaScript client for a self-hosted messenger archive and agent API",
   "type": "module",
   "engines": {"node": ">=22.14.0"},

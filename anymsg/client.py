@@ -20,6 +20,9 @@ SAFE_ERROR_CODES = frozenset({
     'query_timeout','rate_limited','service_busy','service_unavailable',
     'stale_ack','temporarily_unavailable','unauthorized','version_conflict',
     'invalid_message_text','invalid_request_id','idempotency_conflict','sending_disabled','sender_not_ready',
+    'invalid_message_format','unsafe_message_markup','invalid_message_entities',
+    'formatting_too_complex','unsupported_message_formatting',
+    'lossy_formatting_requires_confirmation','message_too_long','preview_required','preview_mismatch',
 })
 
 
@@ -131,10 +134,32 @@ class Client:
     def search(self, query, **filters):
         return self.call("search",{"query":query,**filters})
 
-    def send_message(self,*,account,chat_id,text,request_id,reply_to=''):
-        """Submit exactly confirmed text; keep request_id until the result is known."""
-        return self.call('send_message',dict(account=account,chat_id=chat_id,text=text,
-            request_id=request_id,reply_to=reply_to))
+    def preview_message(self,*,account,chat_id,text,reply_to='',format='plain',
+                        link_preview=False,allow_lossy=False):
+        """Render a scoped draft without queuing or contacting a messenger.
+
+        The digest binds content and policy; it is not owner approval. Review
+        visible text, formatting, warnings and link destinations before a send.
+        """
+        return self.call('preview_message',dict(account=account,chat_id=chat_id,text=text,
+            reply_to=reply_to,format=format,link_preview=link_preview,allow_lossy=allow_lossy))
+
+    def send_message(self,*,account,chat_id,text,request_id,reply_to='',format='plain',
+                     preview_digest='',link_preview=False,allow_lossy=False):
+        """Submit exactly confirmed content; rich sends must match a reviewed preview.
+
+        Keep request_id until the result is known. The digest never proves human
+        approval; the acting agent obtains exact owner confirmation separately.
+        """
+        parameters=dict(account=account,chat_id=chat_id,text=text,
+            request_id=request_id,reply_to=reply_to)
+        # Default plain calls remain compatible with older strict servers.
+        # Nondefault values pass unchanged so the server can reject bad types.
+        if (format!='plain' or preview_digest!='' or link_preview is not False
+                or allow_lossy is not False):
+            parameters.update(format=format,preview_digest=preview_digest,
+                link_preview=link_preview,allow_lossy=allow_lossy)
+        return self.call('send_message',parameters)
 
     def get_send_status(self,send_id):
         return self.call('get_send_status',{'send_id':send_id})

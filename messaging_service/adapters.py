@@ -7,6 +7,7 @@ from datetime import datetime,timezone
 import re
 
 from .envelope import validate
+from .incoming_formatting import telegram as telegram_formatting, unknown as unknown_formatting
 
 
 def timestamp(value):
@@ -72,6 +73,7 @@ def telegram_message(account,message,*,chat_title='',origin='live',verified_self
         'chat_title':(chat_title if chat_title and chat_title!=str(message.chat_id) else observed_title) or str(message.chat_id),
         'provider_id':str(message.id),
         'sender':str(sender_id or ''),'body':message.message or '',
+        'formatting':telegram_formatting(message.message or '',getattr(message,'entities',None)),
         'sent_at':timestamp(message.date),'updated_at':timestamp(message.edit_date or message.date),
         'deleted':False,'direction':'outgoing' if message.out else 'incoming','origin':origin,'media':media,
         'sender_profile':profile,'metadata':{
@@ -107,6 +109,7 @@ def whatsapp_message(account,event,*,origin='live',change='message',observed_at=
     return validate({'account':account,'platform':'whatsapp','chat':event['chatId'],
         'chat_title':event.get('chatName') or event['chatId'],'provider_id':event['messageId'],
         'sender':event.get('senderId') or '','body':event.get('body') or '',
+        'formatting':event.get('formatting',unknown_formatting()),
         'sent_at':timestamp(event['timestamp']),'updated_at':timestamp(updated or event['timestamp']),
         'deleted':change=='delete','direction':'outgoing' if event.get('fromMe') else 'incoming',
         'origin':origin,'media':media,'sender_profile':{'display_name':event.get('senderName') or '',

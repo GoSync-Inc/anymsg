@@ -1,37 +1,57 @@
-# Message formatting proposal
+# Message formatting and preview
 
-Status: **planned, not implemented**. The current 0.9.13 sender accepts plain
-text only. This document adds the formatting feedback to [MESSAGE_ACTIONS.md](MESSAGE_ACTIONS.md);
-it does not enable a new send mode or change [SENDING.md](SENDING.md) approvals.
+Status: **implemented in 0.9.14**, PostgreSQL schema24. Plain remains the default.
+Formatting does not change [SENDING.md](SENDING.md) owner approvals. Native visual
+rendering is not proven by synthetic tests; live acceptance needs separately
+approved messages for each provider.
 
-## Contract and implementation order
+## API and persistence
 
-1. Build a bounded, deterministic renderer without provider calls. Evaluate
-   [markdown-it-py](https://markdown-it-py.readthedocs.io/en/latest/) for CommonMark
-   token parsing rather than replacing delimiters with regular expressions.
-   Explicitly disable raw HTML in Markdown; its default settings enable HTML
-   ([security guidance](https://markdown-it-py.readthedocs.io/en/latest/security.html)).
-   Choose and pin a version only after testing the required extensions.
-2. Add a preview that returns `rendered_text`, structured entities, warnings,
-   UTF-16 length, a renderer version and a payload digest. A preview is passive;
-   it neither queues a send nor proves owner approval. Distinguish provider wire
-   text from visible text where WhatsApp needs native markup.
-3. Extend the outbox with an additive migration. Store source text/format,
-   provider payload, entities, preview policy and renderer version. Bind
-   idempotency to this entire effective payload, account, chat and reply target.
-   Dispatch persisted output; do not re-render after a queued job or a restart.
-4. Expose `format: plain | markdown | html` in MCP/REST and both clients, keeping
-   `plain` as the default. Rich sends must match their reviewed preview digest.
-   The digest binds content, not human identity or approval. The acting agent
-   still obtains approval for the exact recipient, visible text, formatting,
-   warnings, link destinations and reply target before sending.
-5. Capture incoming native formatting as versioned evidence. Preserve current
-   archive bodies/search behavior; expose formatting separately. Missing capture
-   means unknown, not an empty entity list. Formatting-only changes must be
-   detectable without rewriting immutable snapshots or hiding conflicts.
+`preview_message(account, chat_id, text, reply_to="", format="plain",
+link_preview=false, allow_lossy=false)` requires `read`. It resolves only an
+authorized archived target, makes no provider call and queues nothing. A
+disconnected collector or disabled sending does not prevent preview. The REST
+endpoint is `POST /v1/preview_message`; Python provides `preview_message` and npm provides `previewMessage`.
 
-These are implementation stages, not currently accepted API parameters. Unknown
-`format`/preview arguments continue to fail current strict validation.
+The response contains source and visible `rendered_text`, wire `provider_text`,
+UTF-16 semantic entities, provider payload, safe warnings, visible link
+destinations, wire `utf16_units`, renderer version, target/reply and effective
+`render_policy`, plus `preview_digest`. The digest binds the principal and scope
+version, account/chat/provider target, reply, exact source and complete render
+artifact/policy. It is a consistency check, not an owner approval credential.
+
+`send_message` accepts the same fields plus `request_id` and `preview_digest`.
+Rich text or a nondefault link/loss policy requires the exact reviewed digest;
+missing or stale previews return `preview_required` or `preview_mismatch`. Plain
+with default policy retains the earlier request shape and idempotency behavior.
+The acting agent still shows account, recipient, visible text, formatting,
+warnings, destinations and reply to the owner and obtains approval before sending.
+
+Migration24 preserves legacy plain rows. New rows persist source, format, full
+render artifact, policy and optional digest; the existing outbox body stores
+provider wire text for receipt/provenance comparisons. Identical retries compare
+saved intent before invoking the current renderer. Dispatch validates and uses
+the saved payload without rendering it again, including after parser upgrades
+or restarts. Status exposes only safe format/version/warning/digest metadata.
+Draft text, entities and URLs are not written into audit entries.
+
+The renderer pins `markdown-it-py==4.2.0` with raw HTML disabled. Bounds are
+16000 source UTF-16 units, 4000 provider units, 1024 parser tokens, 128 entities
+and 32 nesting levels. The existing HTTP JSON body limit can further restrict
+large source markup. Invalid markup, unsafe links, unsupported nesting and
+complexity are rejected before queuing. Nothing is fetched while rendering.
+
+Incoming `formatting` is separate evidence bound to the exact archive revision.
+Telegram native entities may be observed, partial or unknown. Unsupported native
+entities are reported without manufacturing mentions/custom-emoji identities.
+WhatsApp records `wire_observed` and a SHA-256 of captured wire text; it does not
+claim that guessed markup yields complete native entities. Absent capture is
+unknown, distinct from observed empty entities. Compact unknown evidence carries
+only its version and state; full evidence retains the diagnostic fields. First known evidence appends a
+revision; equal-time contradictory known evidence remains a conflict, and later
+unknown captures cannot erase known evidence. Existing snapshots stay immutable.
+Offsets always reference the full provider body in UTF-16 units, including
+compact or truncated responses; `offsets_reference` states this explicitly.
 
 ## Input dialect
 
@@ -56,15 +76,15 @@ separate explicit support, rather than constructing them from arbitrary HTML.
 
 ## Provider behavior
 
-| Feature | Telegram proposal | WhatsApp proposal |
+| Feature | Telegram | WhatsApp |
 | --- | --- | --- |
 | Bold, italic, strike | Explicit native entities | Native markup with delimiter validation |
 | Inline/fenced code | `code`/`pre`, preserving language when supported | Supported native code syntax; warn on unsupported language styling |
-| Quotes and lists | Quote entities; textual list markers | Native quotes/list markers after compatibility tests |
+| Quotes and lists | Quote entities; textual list markers | Native quotes/list markers with bounded textual markers |
 | Named links | Text-link entity plus destination in preview | Visible `label: URL`, with a conversion warning |
 | Underline | Native underline entity | Unsupported: explicit loss warning before approval |
 | Spoiler | Native spoiler entity | Unsupported: reject rich send unless its visible-text conversion was explicitly previewed and accepted |
-| Expandable quote | Enable only after installed-client compatibility tests | Unsupported; reject or explicitly preview the fallback |
+| Expandable quote | Unsupported in this release | Unsupported; reject |
 
 Telegram sends use explicit entities with `parse_mode=None`. Offsets and lengths
 count **UTF-16 code units**, including emoji/surrogate-pair boundaries. The
@@ -86,11 +106,9 @@ do not promise that a boolean always controls provider behavior.
 
 ## Length, evidence and retries
 
-- Keep the current conservative 4000 UTF-16-unit send limit until native payload
-  limits are verified for each adapter. Validate the rendered provider payload,
+- Keep the current conservative 4000 UTF-16-unit send limit. Validate the rendered provider payload,
   including any expanded WhatsApp links/markers, rather than source length alone.
-- **No automatic splitting.** Return a useful length error and optionally a
-  proposed multipart preview. Multipart sending needs its own approved ordered
+- **No automatic splitting.** Return a useful length error and a useful source/payload distinction. Multipart sending needs its own approved ordered
   payload, per-part idempotency/status and partial-failure semantics first.
 - Receipts and identity repair compare the observed provider text with the
   persisted provider payload, not the unrendered Markdown/HTML source. Extend

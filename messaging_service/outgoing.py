@@ -7,6 +7,8 @@ import asyncio
 import hashlib
 import re
 
+from psycopg.types.json import Jsonb
+
 from .envelope import canonical, stable_id
 from .policy import audit, lock_principal, targets
 from .store import APIError, serial
@@ -28,10 +30,113 @@ def permitted(p, account, chat):
     return account in p['accounts'] and (p['chat_ids'] is None or chat in p['chat_ids'])
 
 
+def format_options(format,link_preview,allow_lossy,preview_digest=''):
+    if not isinstance(format,str) or format not in ('plain','markdown','html'):
+        raise APIError('invalid_message_format')
+    if type(link_preview) is not bool or type(allow_lossy) is not bool:
+        raise APIError('invalid_parameters')
+    if not isinstance(preview_digest,str) or (preview_digest and not re.fullmatch(r'[a-f0-9]{64}',preview_digest)):
+        raise APIError('preview_mismatch',409)
+
+
+def target(c,p,account,chat_id,reply_to):
+    if not all(isinstance(v,str) and 1<=len(v)<=256 for v in (account,chat_id)):
+        raise APIError('not_found',404)
+    if not isinstance(reply_to,str) or len(reply_to)>256:
+        raise APIError('not_found',404)
+    if not permitted(p,account,chat_id):raise APIError('not_found',404)
+    chat=c.execute('''SELECT c.*,a.platform FROM chats c JOIN accounts a ON a.id=c.account
+        WHERE c.id=%s AND c.account=%s''',(chat_id,account)).fetchone()
+    if not chat or not chat['provider_chat']:raise APIError('not_found',404)
+    reply_id=None
+    if reply_to:
+        source=c.execute('SELECT provider_id FROM messages WHERE id=%s AND chat=%s AND account=%s AND NOT deleted',
+            (reply_to,chat_id,account)).fetchone()
+        if not source:raise APIError('not_found',404)
+        reply_id=source['provider_id']
+    targets(p,[chat_id,*([reply_to] if reply_to else [])])
+    return chat,reply_id
+
+
+def reviewed(c,p,account,chat_id,text,reply_to,format,link_preview,allow_lossy,chat,reply_id):
+    from .formatting import render_message
+    artifact=render_message(chat['platform'],text,format=format,
+        link_preview=link_preview,allow_lossy=allow_lossy)
+    policy={'link_preview':link_preview,'allow_lossy':allow_lossy}
+    # This binds a scoped draft, never the owner's identity or approval.
+    digest=hashlib.sha256(canonical({'principal':p['id'],'scope_version':p['scope_version'],
+        'account':account,'chat_id':chat_id,'provider_chat':chat['provider_chat'],
+        'platform':chat['platform'],'reply_to':reply_to,'reply_provider_id':reply_id,
+        'source_text':text,'artifact':artifact,'render_policy':policy})).hexdigest()
+    return {**artifact,'account':account,'chat_id':chat_id,'provider_chat_id':chat['provider_chat'],
+        'reply_to':reply_to,'reply_provider_id':reply_id,'render_policy':policy,
+        'preview_digest':digest,'owner_approval_verified_by_server':False}
+
+
+def preview(c,p,account,chat_id,text,reply_to='',format='plain',link_preview=False,allow_lossy=False):
+    """Render a scoped draft without provider calls, readiness or enqueueing."""
+    format_options(format,link_preview,allow_lossy)
+    chat,reply_id=target(c,p,account,chat_id,reply_to)
+    return reviewed(c,p,account,chat_id,text,reply_to,format,link_preview,allow_lossy,chat,reply_id)
+
+
+def dispatch_payload(job,platform):
+    """Validate persisted output without invoking the renderer again."""
+    from .formatting import validate_entities,validate_semantic_entities,validate_provider_payload
+    try:
+        artifact=job.get('render_artifact')
+        if artifact is None:
+            # A pre-migration plain row has no render artifact or preview policy.
+            if job.get('source_format','plain')!='plain' or job.get('render_policy') is not None:
+                raise ValueError('invalid_legacy_payload')
+            payload={'text':job['body'],'entities':[],'link_preview':False}
+        else:
+            policy=job.get('render_policy')
+            if (not isinstance(artifact,dict) or not isinstance(policy,dict) or
+                set(artifact)!={'format','source_text','rendered_text','provider_text','entities',
+                    'provider_payload','warnings','links','utf16_units','renderer_version'} or
+                set(policy)!={'link_preview','allow_lossy'} or
+                any(type(v) is not bool for v in policy.values()) or
+                artifact.get('format') not in ('plain','markdown','html') or
+                artifact.get('format')!=job.get('source_format') or
+                not isinstance(artifact.get('source_text'),str) or
+                artifact.get('source_text')!=job.get('source_text') or
+                artifact.get('provider_text')!=job.get('body') or
+                not isinstance(artifact.get('rendered_text'),str) or
+                not isinstance(artifact.get('renderer_version'),str) or
+                not re.fullmatch(r'[a-zA-Z0-9_.:-]{1,128}',artifact['renderer_version']) or
+                not isinstance(artifact.get('warnings'),list) or len(artifact['warnings'])>32 or
+                any(not isinstance(v,str) or not re.fullmatch(r'[a-z_]{1,64}',v) for v in artifact['warnings']) or
+                not isinstance(artifact.get('links'),list) or len(artifact['links'])>128):
+                raise ValueError('invalid_persisted_artifact')
+            payload=artifact['provider_payload']
+            if (payload.get('text')!=job['body'] or
+                (platform=='telegram' and payload.get('entities')!=artifact.get('entities')) or
+                payload.get('link_preview') is not policy['link_preview'] or
+                type(artifact['utf16_units']) is not int or
+                artifact['utf16_units']!=len(payload['text'].encode('utf-16-le'))//2 or
+                (platform=='telegram' and artifact['rendered_text']!=payload['text'])):
+                raise ValueError('invalid_persisted_payload')
+            # WhatsApp's wire uses native delimiters, while preview spans describe
+            # visible text. Those semantic spans are not provider entities.
+            validator=validate_entities if platform=='telegram' else validate_semantic_entities
+            validator(artifact['rendered_text'],artifact['entities'])
+            if (artifact['format']!='plain' or policy['link_preview'] or policy['allow_lossy']) and (
+                not isinstance(job.get('preview_digest'),str) or
+                not re.fullmatch(r'[a-f0-9]{64}',job['preview_digest'])):
+                raise ValueError('invalid_persisted_digest')
+        return validate_provider_payload(platform,payload)
+    except (APIError,ValueError,TypeError,KeyError,AttributeError):
+        raise SendRejected('send_target_invalid') from None
+
+
 def result(row,c=None):
     from .receipts import for_reference,unknown_evidence
     receipt=for_reference(c,row['account'],row['provider_chat'],row['provider_message_id']) \
         if c is not None and row['status']=='sent' and row['provider_message_id'] else unknown_evidence()
+    artifact=row.get('render_artifact')
+    artifact=artifact if isinstance(artifact,dict) else {}
+    warning_codes=artifact.get('warnings',[]) if isinstance(artifact,dict) else []
     return serial({
         'send_id':row['id'],'status':row['status'],'account':row['account'],
         'chat_id':row['chat'],'provider_chat_id':row['provider_chat'],
@@ -46,34 +151,54 @@ def result(row,c=None):
         'delivery_receipt':receipt,
         'recipient_delivery_confirmed':receipt['recipient_delivery_confirmed'],'automatic_retry':False,
         'delivered_at':receipt['delivered_at'],'read_at':receipt['read_at'],'played_at':receipt['played_at'],
+        'formatting':{'format':row.get('source_format','plain'),
+            'renderer_version':artifact.get('renderer_version'),
+            'warnings':[code for code in warning_codes if isinstance(code,str) and
+                re.fullmatch(r'[a-z_]{1,64}',code)][:32],
+            'preview_digest':row.get('preview_digest')},
         'next_action':'get_send_status' if row['status'] in ('queued','dispatching') else
             'verify_history_before_any_new_send' if row['status']=='unknown' else 'none',
     })
 
 
-def enqueue(c, p, account, chat_id, text, request_id, reply_to):
-    valid_text(text)
+def enqueue(c,p,account,chat_id,text,request_id,reply_to='',format='plain',
+            preview_digest='',link_preview=False,allow_lossy=False):
+    format_options(format,link_preview,allow_lossy,preview_digest)
+    # Source length is bounded by the renderer; the actual provider wire payload
+    # must satisfy the conservative 4000 UTF-16-unit limit.
+    if not isinstance(text,str) or not text.strip() or any(
+            ord(v)<32 and v not in '\n\r\t' or 0xD800<=ord(v)<=0xDFFF for v in text):
+        raise APIError('invalid_message_text')
+    if format=='plain':valid_text(text)
     if not isinstance(request_id,str) or not re.fullmatch(r'[a-zA-Z0-9_.:-]{8,128}',request_id):
         raise APIError('invalid_request_id')
-    if not all(isinstance(v,str) and 1<=len(v)<=256 for v in (account,chat_id)):
-        raise APIError('not_found',404)
-    if not permitted(p,account,chat_id):raise APIError('not_found',404)
-    chat=c.execute('SELECT * FROM chats WHERE id=%s AND account=%s',(chat_id,account)).fetchone()
-    if not chat or not chat['provider_chat']:raise APIError('not_found',404)
-    reply_id=None
-    if reply_to:
-        source=c.execute('SELECT provider_id FROM messages WHERE id=%s AND chat=%s AND account=%s AND NOT deleted',
-            (reply_to,chat_id,account)).fetchone()
-        if not source:raise APIError('not_found',404)
-        reply_id=source['provider_id']
-    request_hash=hashlib.sha256(canonical([account,chat_id,text,reply_id])).hexdigest()
+    chat,reply_id=target(c,p,account,chat_id,reply_to)
+    default_policy=format=='plain' and not link_preview and not allow_lossy
+    legacy_hash=hashlib.sha256(canonical([account,chat_id,text,reply_id])).hexdigest()
     c.execute('SELECT pg_advisory_xact_lock(hashtextextended(%s,0))',('outgoing:'+p['id'],))
     existing=c.execute('SELECT * FROM outgoing_messages WHERE principal=%s AND request_id=%s',
         (p['id'],request_id)).fetchone()
     targets(p,[chat_id])
     if existing:
-        if existing['request_hash']!=request_hash:raise APIError('idempotency_conflict',409)
+        # Check saved intent BEFORE calling a renderer: upgrades or restarts must
+        # neither alter nor reject an exact retry of an already queued action.
+        if existing.get('render_artifact') is None:
+            matches=default_policy and not preview_digest and existing['request_hash']==legacy_hash
+        else:
+            matches=(existing['account']==account and existing['chat']==chat_id and
+                existing['provider_chat']==chat['provider_chat'] and existing['reply_provider_id']==reply_id and
+                existing.get('source_text')==text and existing.get('source_format')==format and
+                existing.get('render_policy')=={'link_preview':link_preview,'allow_lossy':allow_lossy} and
+                (existing.get('preview_digest') or '')==preview_digest)
+        if not matches:raise APIError('idempotency_conflict',409)
         return result(existing,c)
+    if not default_policy and not preview_digest:raise APIError('preview_required',409)
+    draft=reviewed(c,p,account,chat_id,text,reply_to,format,link_preview,allow_lossy,chat,reply_id)
+    if preview_digest and preview_digest!=draft['preview_digest']:raise APIError('preview_mismatch',409)
+    artifact={name:draft[name] for name in ('format','source_text','rendered_text','provider_text','entities',
+        'provider_payload','warnings','links','utf16_units','renderer_version')}
+    request_hash=legacy_hash if default_policy else hashlib.sha256(canonical([
+        account,chat_id,chat['provider_chat'],reply_id,artifact,draft['render_policy'],preview_digest])).hexdigest()
     policy=c.execute('SELECT * FROM account_policies WHERE account=%s',(account,)).fetchone()
     if not policy or not policy['enabled'] or not policy['send_enabled']:
         raise APIError('sending_disabled',409)
@@ -89,8 +214,10 @@ def enqueue(c, p, account, chat_id, text, request_id, reply_to):
         (account,)).fetchone()['n']
     if count>=60:raise APIError('rate_limited',429)
     row=c.execute('''INSERT INTO outgoing_messages(principal,key_id,scope_version,request_id,request_hash,
-        account,chat,provider_chat,body,reply_provider_id) VALUES(%s,%s,%s,%s,%s,%s,%s,%s,%s,%s) RETURNING *''',
-        (p['id'],p['key_id'],p['scope_version'],request_id,request_hash,account,chat_id,chat['provider_chat'],text,reply_id)).fetchone()
+        account,chat,provider_chat,body,reply_provider_id,source_text,source_format,render_artifact,render_policy,
+        preview_digest) VALUES(%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s) RETURNING *''',
+        (p['id'],p['key_id'],p['scope_version'],request_id,request_hash,account,chat_id,chat['provider_chat'],
+         artifact['provider_text'],reply_id,text,format,Jsonb(artifact),Jsonb(draft['render_policy']),preview_digest or None)).fetchone()
     targets(p,[chat_id,row['id']])
     return result(row,c)
 

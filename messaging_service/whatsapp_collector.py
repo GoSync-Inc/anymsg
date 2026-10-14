@@ -262,7 +262,10 @@ class NodeProvider:
     async def send_text(self,job):
         # OutgoingWorker holds send_gate before claiming a queued job.
         if not self.send_lock.locked():raise RuntimeError('send_gate_required')
-        return await self._call_unlocked('send_text',{'chat':job['provider_chat'],'text':job['body'],
+        from .outgoing import dispatch_payload
+        payload=dispatch_payload(job,'whatsapp')
+        return await self._call_unlocked('send_text',{'chat':job['provider_chat'],'text':payload['text'],
+            'link_preview':payload['link_preview'],
             'reply_provider_id':job.get('reply_provider_id'),'expires_at':job['expires_at']},sending=True)
     async def chunks(self,source,descriptor):
         complete=False

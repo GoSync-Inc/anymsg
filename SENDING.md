@@ -24,10 +24,16 @@ approval. The API intentionally does not accept `approved: true` as proof.
    Changing the payload with that ID fails with `idempotency_conflict`.
    Never create another action ID automatically to bypass an uncertain result.
 
-Both tools are also available as `POST /v1/send_message` and
+`preview_message` requires only `read` and does not require sending to be enabled
+or a collector to be connected. For rich text, first preview the exact account,
+chat, source, format and reply. Show the owner its visible text, warnings and link
+destinations, then pass the same arguments plus `preview_digest` to `send_message`.
+The digest detects payload changes; it does not prove human approval.
+
+Sending tools are also available as `POST /v1/send_message` and
 `POST /v1/get_send_status`, using the same scoped bearer key. Responses contain
 receipt metadata, not the outgoing text or provider session credentials.
-Refresh MCP discovery after upgrading; the manifest contains 19 tools.
+Refresh MCP discovery after upgrading; the manifest contains 20 tools.
 
 | State | Meaning | Next action |
 | --- | --- | --- |
@@ -39,8 +45,12 @@ Refresh MCP discovery after upgrading; the manifest contains 19 tools.
 | `failed` | Locally rejected before invoking send | Inspect safe error code |
 | `unknown` | Timeout, interrupted dispatch or unverified receipt | Check history; never automatically send again |
 
-Plain text is limited to 4000 UTF-16 units, with no automatic splitting, markup
-parsing or link previews. New conversations by an arbitrary phone/username,
+The provider payload is limited to 4000 UTF-16 units, with no automatic splitting.
+Plain is the default; Markdown and restricted HTML use the passive
+`preview_message` tool and require its exact `preview_digest` when queued.
+The preview distinguishes visible text from provider wire text and exposes
+formatting warnings and link destinations. Link previews are off by default;
+WhatsApp multi-device behavior is provider-controlled. See [FORMATTING.md](FORMATTING.md). New conversations by an arbitrary phone/username,
 attachments, edits, deletes, forwarding and a server approval workflow are not
 implemented. Reply to an already archived message is supported. Provider chat
 permissions still apply. Reads and WhatsApp sends do not explicitly mark chats
@@ -77,7 +87,7 @@ anymsg set-sending --account account-personal --enable
 anymsg set-access --principal assistant-personal --permissions read download cursor-write send
 ```
 
-Apply `gateway_role.sql` and `collector_role.sql` as owner after migration23.
+Apply `gateway_role.sql` and `collector_role.sql` as owner after migration24.
 Gateway can enqueue/read receipts but cannot set their state or invoke providers.
 Collector can update delivery state and read public key/policy metadata needed
 for a fresh authorization check; it cannot read token hashes or change ACL.
