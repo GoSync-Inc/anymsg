@@ -8,6 +8,14 @@ sys.path.insert(0,str(Path(__file__).resolve().parents[1]))
 from messaging_service.store import Store
 
 
+@pytest.fixture(autouse=True)
+def isolated_processing_lock(tmp_path, monkeypatch):
+    # Native runs must not depend on a precreated container/production mount.
+    directory = tmp_path / 'processing-locks'
+    directory.mkdir(mode=0o700)
+    monkeypatch.setenv('PROCESSING_LOCK_DIR', str(directory))
+
+
 @pytest.fixture(scope='session')
 def database(tmp_path_factory):
     filename=os.environ.get('PROBE_TEST_DSN_FILE')
