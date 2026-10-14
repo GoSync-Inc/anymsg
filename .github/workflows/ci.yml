@@ -1,7 +1,23 @@
 name: CI
-on: [push, pull_request, workflow_dispatch]
+on:
+  push:
+  pull_request:
+  workflow_dispatch:
+    inputs:
+      source_ref:
+        description: 'Optional exact source revision for a baseline verification'
+        type: string
+        default: ''
+      tiden_branch:
+        description: 'Explicit existing Tiden branch for baseline verification'
+        type: string
+        default: ''
 permissions:
   contents: read
 jobs:
   checks:
     uses: ./.github/workflows/checks.yml
+    with:
+      source_ref: ${{ inputs.source_ref || '' }}
+      tiden_branch: ${{ inputs.tiden_branch || '' }}
+    secrets: inherit
