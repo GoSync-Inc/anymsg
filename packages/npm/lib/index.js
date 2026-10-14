@@ -2,7 +2,7 @@ const METHODS = Object.freeze([
   'capabilities', 'list_chats', 'search', 'search_people', 'search_files',
   'get_messages', 'get_context', 'get_sync_status', 'resolve_reference',
   'get_attachment', 'get_file_text', 'get_file_segments', 'get_file_occurrences',
-  'get_updates', 'ack_updates', 'get_reviews', 'record_review',
+  'get_updates', 'dismiss_reply', 'ack_updates', 'get_reviews', 'record_review',
   'preview_message','send_message','get_send_status',
   'list_messenger_operations','preview_messenger_operation','execute_messenger_operation','get_messenger_operation',
   'create_subscription','list_subscriptions','get_subscription','update_subscription','get_subscription_events',
@@ -24,7 +24,7 @@ const SAFE_ERRORS = new Set([
   'unsupported_operation','invalid_operation_parameters','operation_disabled','operation_not_ready',
   'operation_target_changed','operation_access_changed','operation_result_unknown',
   'operation_expired','operation_rejected','invalid_operation_result',
-  'invalid_subscription','subscription_limit','subscription_conflict','subscription_closed',
+  'reply_target_changed','invalid_subscription','subscription_limit','subscription_conflict','subscription_closed',
   'subscription_access_changed','invalid_subscription_state',
 ]);
 
@@ -255,6 +255,7 @@ export class AnyMsgClient {
     } finally { clearTimeout(timer); }
   }
   capabilities(args = {}) { return this.call('capabilities', args); }
+  dismissReply(args) { return this.call('dismiss_reply', args); }
   listChats(args = {}) { return this.call('list_chats', args); }
   search(args = {}) { return this.call('search', args); }
   searchPeople(args = {}) { return this.call('search_people', args); }

@@ -202,6 +202,7 @@ class Store:
             features={'read':['search','history','context','updates','reviews','search_people','search_files','get_file_text','get_file_occurrences','get_sync_status','get_file_segments','resolve_reference','preview_message'], 'download':['attachment'], 'cursor-write':['ack'], 'send':['send_message','get_send_status']}
             if 'read' in p['permissions']:
                 features['review-write']=['record_review']
+                features['cursor-write'].append('dismiss_reply')
                 features['read'].extend(['list_subscriptions','get_subscription','get_subscription_events'])
                 features['subscription-write']=['create_subscription','update_subscription']
             available=[feature for permission,names in features.items() if permission in p['permissions'] for feature in names]
@@ -224,9 +225,12 @@ class Store:
                     'query_modes':['all','phrase','web','exact'],'orders':['asc','desc','relevance'],
                     'languages':['auto','simple','russian','english','indonesian'],
                     'fuzzy':'explicit_bounded_fallback','compact':True,'optional_coverage':True,
-                    'context':'independent_before_and_after_counts','chat_orders':['id','activity','last_activity_desc'],
+                    'context':'independent_before_and_after_counts','chat_orders':['id','activity','last_activity_desc','priority'],
                     'chat_order_default':'activity','awaiting_reply_default_days':14,
                     'awaiting_reply_bots':'exclude_observed_bot_senders_not_name_guesses',
+                    'reply_queue_filters':['exclude_chats','exclude_senders','only_questions','only_unread','chat_types'],
+                    'reply_queue_dismissal':'credential_local_until_next_meaningful_incoming',
+                    'owner_read_state':'timestamped_provider_observations_unknown_or_stale_explicit',
                     'sync_status_details':['compact','full'],
                     'updates':'version_checked_filter_reset_preserves_ack_position',
                     'update_orders':['event','sent_at_within_delivered_batch'],
@@ -347,13 +351,20 @@ class Store:
 
     def list_chats(self, token, after='', limit=100, *, accounts=None,query='',chat_types=None,
                    order='id',exclude_channels=False,awaiting_reply=False,from_time='',to_time='',
-                   include_coverage=True,awaiting_reply_days=14):
+                   include_coverage=True,awaiting_reply_days=14,exclude_chats=None,exclude_senders=None,
+                   only_questions=False,only_unread=False):
         from .chat_queries import list_chats
         with self.authorized(token,'list_chats') as (c,p):
             return list_chats(self,c,p,after,limit,accounts=accounts,query=query,chat_types=chat_types,
                 order=order,exclude_channels=exclude_channels,awaiting_reply=awaiting_reply,
                 from_time=from_time,to_time=to_time,include_coverage=include_coverage,
-                awaiting_reply_days=awaiting_reply_days)
+                awaiting_reply_days=awaiting_reply_days,exclude_chats=exclude_chats,exclude_senders=exclude_senders,
+                only_questions=only_questions,only_unread=only_unread)
+
+    def dismiss_reply(self,token,chat_id,message_id,expected_revision):
+        from .reply_state import dismiss
+        with self.authorized(token,'dismiss_reply') as (c,p):
+            return dismiss(self,c,p,chat_id,message_id,expected_revision)
 
     def search_people(self,token,query='',*,accounts=None,chats=None,after='',limit=20,
                       transliterate=False,group_by_sender=False):
@@ -649,8 +660,8 @@ class Store:
             c.execute("SET LOCAL statement_timeout='180s'")
             c.execute(Path(__file__).with_name('schema.sql').read_text())
             version=int(c.execute("SELECT value FROM probe_metadata WHERE name='schema_version'").fetchone()['value'])
-            if version>26: raise RuntimeError('database_newer_than_runtime')
-            for target,name in [(2,'002_archive.sql'),(3,'003_collectors.sql'),(4,'004_whatsapp.sql'),(5,'005_access.sql'),(6,'006_reviews.sql'),(7,'007_search_indexes.sql'),(8,'008_people.sql'),(9,'009_file_index.sql'),(10,'010_search_audit.sql'),(11,'011_telegram_window.sql'),(12,'012_search.sql'),(13,'013_file_search.sql'),(14,'014_collector_health.sql'),(15,'015_enrichment.sql'),(16,'016_file_content.sql'),(17,'017_chat_evidence.sql'),(18,'018_collector_operations.sql'),(19,'019_whatsapp_identities.sql'),(20,'020_processing_admission.sql'),(21,'021_media_storage.sql'),(22,'022_outgoing.sql'),(23,'023_receipts.sql'),(24,'024_formatting.sql'),(25,'025_operations.sql'),(26,'026_subscriptions.sql')]:
+            if version>27: raise RuntimeError('database_newer_than_runtime')
+            for target,name in [(2,'002_archive.sql'),(3,'003_collectors.sql'),(4,'004_whatsapp.sql'),(5,'005_access.sql'),(6,'006_reviews.sql'),(7,'007_search_indexes.sql'),(8,'008_people.sql'),(9,'009_file_index.sql'),(10,'010_search_audit.sql'),(11,'011_telegram_window.sql'),(12,'012_search.sql'),(13,'013_file_search.sql'),(14,'014_collector_health.sql'),(15,'015_enrichment.sql'),(16,'016_file_content.sql'),(17,'017_chat_evidence.sql'),(18,'018_collector_operations.sql'),(19,'019_whatsapp_identities.sql'),(20,'020_processing_admission.sql'),(21,'021_media_storage.sql'),(22,'022_outgoing.sql'),(23,'023_receipts.sql'),(24,'024_formatting.sql'),(25,'025_operations.sql'),(26,'026_subscriptions.sql'),(27,'027_reply_queue.sql')]:
                 migration=Path(__file__).with_name('migrations')/name
                 sha=hashlib.sha256(migration.read_bytes()).hexdigest()
                 if version<target:

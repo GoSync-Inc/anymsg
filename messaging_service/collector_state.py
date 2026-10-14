@@ -15,6 +15,16 @@ from .spool import DurableSpool
 
 def validate_capture(value):
     if not isinstance(value,dict) or len(canonical(value))>MAX_ENVELOPE: raise ValueError('invalid_capture')
+    if value.get('kind')=='owner_read_state':
+        from .reply_state import validate_observation
+        if (set(value)!={'kind','account','chat','observed_at','observation'}
+            or not isinstance(value['account'],str) or not re.fullmatch(r'[a-zA-Z0-9_.-]{1,64}',value['account'])
+            or not isinstance(value['chat'],str) or not re.fullmatch(r'-?[0-9]{1,20}',value['chat'])):
+            raise ValueError('invalid_read_capture')
+        observation=validate_observation(value['observation'])
+        if observation['basis']!='telegram_dialog' or utc(value['observed_at'])!=observation['observed_at']:
+            raise ValueError('invalid_read_capture')
+        return {**value,'observed_at':observation['observed_at'],'observation':observation}
     if value.get('kind')=='message_receipt':
         from .receipts import validate_capture as validate_receipt
         return validate_receipt(value)
@@ -32,7 +42,7 @@ def validate_capture(value):
         event=value['event']
         if not isinstance(event,dict) or set(event)-{'chatId','chatName','messageId','senderId','body',
                 'timestamp','fromMe','hasMedia','filename','mimetype','filesize','editedTimestampMs',
-                'senderName','senderUsername','replyToId','forwarded','mediaKind','mentionsOwner','replyToOwner','identityObservations','formatting'}:
+                'senderName','senderUsername','replyToId','forwarded','mediaKind','mentionsOwner','replyToOwner','identityObservations','formatting','messageType','isService','isSelfChat','senderIsContact'}:
             raise ValueError('invalid_whatsapp_event')
         envelope=whatsapp_message(value['account'],event,change=value['change'],
             observed_at=utc(value['observed_at']),origin=value['origin'])
@@ -142,7 +152,7 @@ class CollectorState:
                     'capture_to_commit_seconds':round(max(0,(now-observed).total_seconds()),3) if observed else None,
                     'provider_age_at_capture_seconds':round((observed-sent).total_seconds(),3) if sent and observed else None,
                     'origin':envelope['origin'] if envelope else
-                        'receipt' if capture['kind']=='message_receipt' else 'deletion',
+                        'receipt' if capture['kind']=='message_receipt' else 'owner_read_state' if capture['kind']=='owner_read_state' else 'deletion',
                     'mcp_available_after_commit':True,'measurement':'upper_bound_after_archive_commit' if observed else 'capture_time_not_recorded'}
             self._phase(value,'live_capture','backlogged' if pending else 'receiving',
                 'capture_draining' if pending else 'capture_ready',now,**extra)
@@ -184,7 +194,7 @@ class CollectorState:
                     chat,kind,title=dialog[:3]
                     if not self.allows(policy,chat): continue
                     if kind not in ('user','chat','channel'): raise ValueError('invalid_peer_kind')
-                    chat_type=dialog[3] if len(dialog)==4 else {'user':'private','chat':'group','channel':'unknown'}[kind]
+                    chat_type=dialog[3] if len(dialog)>=4 else {'user':'private','chat':'group','channel':'unknown'}[kind]
                     if chat_type not in ('private','group','channel','unknown'):raise ValueError('invalid_chat_type')
                     c.execute('''INSERT INTO collector_chats(account,provider_chat,peer_kind,history_since)
                         VALUES(%s,%s,%s,%s) ON CONFLICT(account,provider_chat) DO UPDATE SET
@@ -198,6 +208,9 @@ class CollectorState:
                         provider_chat=excluded.provider_chat''',
                         (stable_id('chat',self.account,chat),self.account,title or chat,
                          chat_type,chat,chat))
+                    if len(dialog)>=5 and dialog[4] is not None:
+                        from .reply_state import observe
+                        observe(c,self.account,chat,dialog[4])
                     stored+=1
                 if discovery:
                     c.execute('''UPDATE collector_health SET discovery_count=discovery_count+%s,
@@ -298,6 +311,20 @@ class CollectorState:
         if capture['account']!=self.account: raise ValueError('foreign_capture')
         chat=capture['chat']
         if chat and not self.allows(self.policy(),chat): return {'outcome':'excluded'}
+        if capture['kind']=='owner_read_state':
+            from .reply_state import observe
+            with self.archive.store.pool.connection() as c:
+                c.execute('SELECT pg_advisory_xact_lock(hashtextextended(%s,0))',('archive:'+self.account,))
+                self.archive.fence(c,self.account,self.lease)
+                policy=c.execute('SELECT p.*,a.platform FROM account_policies p JOIN accounts a ON a.id=p.account '
+                    'WHERE p.account=%s AND p.enabled',(self.account,)).fetchone()
+                if not policy or policy['platform']!='telegram':raise RuntimeError('collection_disabled')
+                if not self.allows(policy,chat):return {'outcome':'excluded'}
+                cid=stable_id('chat',self.account,chat)
+                c.execute('INSERT INTO chats(id,account,title,provider_chat) VALUES(%s,%s,%s,%s) '
+                    'ON CONFLICT(id) DO NOTHING',(cid,self.account,chat,chat))
+                observe(c,self.account,chat,capture['observation'])
+            return {'outcome':'owner_read_observed'}
         if capture['kind']=='message_receipt':
             from .receipts import record
             with self.archive.store.pool.connection() as c:

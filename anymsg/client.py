@@ -27,7 +27,7 @@ SAFE_ERROR_CODES = frozenset({
     'unsupported_operation','invalid_operation_parameters','operation_disabled','operation_not_ready',
     'operation_target_changed','operation_access_changed','operation_result_unknown',
     'operation_expired','operation_rejected','invalid_operation_result',
-    'invalid_subscription','subscription_limit','subscription_conflict','subscription_closed',
+    'reply_target_changed','invalid_subscription','subscription_limit','subscription_conflict','subscription_closed',
     'subscription_access_changed','invalid_subscription_state',
 })
 
@@ -222,6 +222,10 @@ class Client:
 
     def search(self, query, **filters):
         return self.call("search",{"query":query,**filters})
+
+    def dismiss_reply(self, *, chat_id, message_id, expected_revision):
+        """Dismiss an exact hint for this key, without changing provider read state."""
+        return self.call('dismiss_reply',dict(chat_id=chat_id,message_id=message_id,expected_revision=expected_revision))
 
     def preview_message(self,*,account,chat_id,text,reply_to='',format='plain',
                         link_preview=False,allow_lossy=False):

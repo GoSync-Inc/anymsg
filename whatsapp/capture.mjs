@@ -43,7 +43,16 @@ export function event(message, body=undefined, ownerIds=[]) {
   if(raw.mimetype && (typeof raw.mimetype!=='string' || /[\x00-\x1f\x7f]/.test(raw.mimetype)))
     throw new Error('invalid_provider_mime');
   const mime=raw.mimetype ? raw.mimetype.split(';',1)[0].trim().toLowerCase() : null;
-  const value={chatId:chatId(message),messageId:asId(message.id),
+  const chat=chatId(message);
+  const own=new Set(ownerIds.map(personalId).filter(Boolean));
+  const peer=personalId(chat);
+  const self=peer && own.size ? own.has(peer)?true:
+    [...own].some(id=>id.split('@')[1]===peer.split('@')[1])?false:null:null;
+  const type=typeof message.type==='string'?message.type:null;
+  const value={chatId:chat,messageId:asId(message.id),
+    messageType:type,
+    isService:['notification','e2e_notification','call_log','gp2','protocol','ciphertext','revoked'].includes(type),
+    isSelfChat:self,
     chatName:chatId(message),senderId:message.author || message.from || '',
     senderName:typeof raw.notifyName==='string'?raw.notifyName.slice(0,512):'',
     body:body===undefined ? message.body || '' : body,timestamp:message.timestamp,

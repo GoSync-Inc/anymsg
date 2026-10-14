@@ -4,7 +4,7 @@ build-backend = "hatchling.build"
 
 [project]
 name = "anymsg"
-version = "0.9.16"
+version = "0.9.17"
 description = "A self-hosted messaging archive and MCP interface for agents"
 readme = "README.md"
 requires-python = ">=3.13,<3.14"
@@ -63,6 +63,7 @@ exclude = [
 "whatsapp/provider.mjs" = "messaging_service/whatsapp_assets/provider.mjs"
 "whatsapp/sender.mjs" = "messaging_service/whatsapp_assets/sender.mjs"
 "whatsapp/outgoing.mjs" = "messaging_service/whatsapp_assets/outgoing.mjs"
+"whatsapp/read-state.mjs" = "messaging_service/whatsapp_assets/read-state.mjs"
 "whatsapp/receipts.mjs" = "messaging_service/whatsapp_assets/receipts.mjs"
 "whatsapp/operations.mjs" = "messaging_service/whatsapp_assets/operations.mjs"
 "whatsapp/transport-state.mjs" = "messaging_service/whatsapp_assets/transport-state.mjs"
