@@ -109,10 +109,13 @@ def bootstrap(repo, db_port=13231, api_port=13232):
     else:
         raise CalendarError("database_not_ready")
     store = Store(config["dsn"])
-    store.migrate()
     from .cli import db_roles
 
-    db_roles(store, root, config)
+    try:
+        store.migrate()
+        db_roles(store, root, config)
+    finally:
+        store.close()
     return {"database_ready": True, "schema_ready": True, "separate_db_roles": True}
 
 

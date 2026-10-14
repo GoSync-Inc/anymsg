@@ -160,6 +160,13 @@ def run(argv, home):
         profile = "gateway"
     config = json.loads(read_private(root / (profile + ".json")))
     store = Store(config["dsn"])
+    try:
+        return dispatch(args, home, root, config, store)
+    finally:
+        store.close()
+
+
+def dispatch(args, home, root, config, store):
     if args.action == "serve":
         import uvicorn
         from .api import create_app
