@@ -153,3 +153,12 @@ or login. On macOS use `/private/tmp`, not the symlink `/tmp`, for temporary exp
 Use the same asset override for pairing and the collector. Native Windows servers
 and Docker ARM support are not claimed. See the source Dockerfiles for pinned
 system dependencies; the Python package alone is not a one-command VPS installer.
+
+### Reply queue upgrade (0.9.17)
+
+Apply migration 027 as owner and reapply `gateway_role.sql` and
+`collector_role.sql` before restarting the updated gateway and collectors.
+The new owner-read observations and credential-local dismissals are included
+in schema-27 backups. Existing migration checksums are unchanged. Preserve
+provider session volumes and existing custom collector extensions. Reconnect
+clients which cache the tools manifest to discover `dismiss_reply`.

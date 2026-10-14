@@ -66,6 +66,7 @@ export declare class AnyMsgClient {
     maxResponseBytes?: number; fetch?: typeof globalThis.fetch});
   call<T = Record<string, unknown>>(method: string, arguments_?: Arguments, options?: {signal?: AbortSignal}): Promise<T>;
   capabilities(args?: Arguments): Promise<Record<string, unknown>>;
+  dismissReply(args: {chat_id: string; message_id: string; expected_revision: number}): Promise<Record<string, unknown>>;
   listChats(args?: Arguments): Promise<Record<string, unknown>>;
   search(args?: Arguments): Promise<Record<string, unknown>>;
   searchPeople(args?: Arguments): Promise<Record<string, unknown>>;

@@ -78,6 +78,10 @@ def telegram_message(account,message,*,chat_title='',origin='live',verified_self
         'deleted':False,'direction':'outgoing' if message.out else 'incoming','origin':origin,'media':media,
         'sender_profile':profile,'metadata':{
             'chat_type':observed_type,
+            'is_service':getattr(message,'action',None) is not None or message.chat_id==777000,
+            'is_self_chat':bool(isinstance(chat_entity,types.User) and chat_entity.is_self) or
+                bool(isinstance(verified_self,types.User) and verified_self.is_self and message.chat_id==verified_self.id),
+            'sender_is_contact':getattr(entity,'contact',None) if isinstance(entity,types.User) else None,
             'sender_identity_basis':identity_basis,
             'sender_is_bot':getattr(entity,'bot',None) if isinstance(entity,types.User) else None,
             'reply_to_provider_id':reply_id,
@@ -115,6 +119,10 @@ def whatsapp_message(account,event,*,origin='live',change='message',observed_at=
         'origin':origin,'media':media,'sender_profile':{'display_name':event.get('senderName') or '',
                                                      'username':event.get('senderUsername') or ''},
         'metadata':{'reply_to_provider_id':event.get('replyToId'),
+                    'is_service':event.get('isService') if type(event.get('isService')) is bool else
+                        event.get('messageType') in ('notification','e2e_notification','call_log','gp2','protocol','ciphertext','revoked'),
+                    'is_self_chat':event.get('isSelfChat'),
+                    'sender_is_contact':event.get('senderIsContact'),
                     'mentions_owner':event.get('mentionsOwner'),
                     'reply_to_owner':event.get('replyToOwner'),
                     'forwarded':event.get('forwarded'),

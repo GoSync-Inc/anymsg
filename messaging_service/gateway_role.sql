@@ -40,3 +40,5 @@ GRANT INSERT(principal,key_id,scope_version,key_permission_version,request_id,re
 GRANT SELECT,INSERT,UPDATE ON subscriptions TO messaging_gateway;
 GRANT SELECT,INSERT ON subscription_sources TO messaging_gateway;
 GRANT SELECT ON subscription_matches TO messaging_gateway;
+GRANT SELECT ON chat_read_observations TO messaging_gateway;
+GRANT SELECT,INSERT,UPDATE ON reply_dismissals TO messaging_gateway;

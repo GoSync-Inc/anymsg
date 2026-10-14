@@ -123,3 +123,15 @@ def test_compression_is_not_decoded_before_bounds_check():
 @pytest.mark.parametrize('token',['','has space','has\nnewline','unicode-ключ',False])
 def test_bearer_headers_are_not_injectable(token):
     with pytest.raises(ValueError,match='invalid_bearer_token'):Client('https://archive.example',token)
+
+
+def test_local_reply_dismissal_preserves_target_and_safe_conflict():
+    import httpx
+    seen=[]
+    def handler(request):
+        seen.append((request.url.path,json.loads(request.content)))
+        return httpx.Response(409,json={'error':'reply_target_changed','detail':'synthetic-sensitive'})
+    with Client('https://archive.example','synthetic-token',transport=httpx.MockTransport(handler)) as client:
+        with pytest.raises(AnyMsgError,match='reply_target_changed'):
+            client.dismiss_reply(chat_id='chat_synthetic',message_id='msg_synthetic',expected_revision=3)
+    assert seen==[('/v1/dismiss_reply',{'chat_id':'chat_synthetic','message_id':'msg_synthetic','expected_revision':3})]

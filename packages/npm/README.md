@@ -36,3 +36,10 @@ server's `/mcp` endpoint; this package is not a stdio MCP bridge.
 
 Server, source and Python package: https://github.com/GoSync-Inc/anymsg.
 MIT license, copyright GoSync.
+
+Development source 0.9.17 adds `dismissReply({chat_id, message_id,
+expected_revision})`. Read the current `listChats({awaiting_reply:true})` hint
+first; dismissal affects only this credential and needs read + cursor-write.
+`reply_target_changed` means refresh the hint, not automatically retry a changed
+write. Queue filters and priority use the same snake_case parameters as REST.
+See the server's SEARCH.md for owner-read observations and heuristic limits.

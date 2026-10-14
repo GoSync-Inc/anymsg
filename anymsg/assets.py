@@ -9,7 +9,7 @@ import stat
 ASSET_NAMES = (
     'bounds.mjs','capture.mjs','history.mjs','identity.mjs','ipc.mjs','media.mjs',
     'navigation.mjs','pair.mjs','pairing.mjs','provider.mjs','sender.mjs','outgoing.mjs',
-    'transport-state.mjs','receipts.mjs','operations.mjs','package.json','package-lock.json',
+    'transport-state.mjs','read-state.mjs','receipts.mjs','operations.mjs','package.json','package-lock.json',
 )
 
 

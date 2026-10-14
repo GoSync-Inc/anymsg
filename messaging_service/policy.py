@@ -20,7 +20,7 @@ OPERATION_PERMISSIONS = {
     'list_chats': 'read', 'search': 'read', 'get_messages': 'read',
     'get_context': 'read', 'get_updates': 'read',
     'get_attachment': 'download', 'download': 'download',
-    'ack_updates': 'cursor-write',
+    'ack_updates': 'cursor-write', 'dismiss_reply':'cursor-write',
     'get_reviews': 'read', 'record_review': 'review-write',
     'search_people': 'read', 'search_files': 'read', 'get_file_text': 'read',
     'get_file_occurrences':'read', 'get_file_segments':'read', 'get_sync_status':'read',
@@ -52,7 +52,7 @@ AUDIT_CODES = frozenset({
     'lossy_formatting_requires_confirmation','message_too_long','preview_required','preview_mismatch',
     'unsupported_operation','invalid_operation_parameters','operation_disabled','operation_expired',
     'operation_access_changed','operation_result_unknown','operation_target_changed','operation_rejected',
-    'invalid_subscription','subscription_limit','subscription_conflict','subscription_closed',
+    'reply_target_changed','invalid_subscription','subscription_limit','subscription_conflict','subscription_closed',
     'subscription_access_changed','invalid_subscription_state',
 })
 UNSET = object()

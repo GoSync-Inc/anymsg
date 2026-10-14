@@ -6,6 +6,16 @@ import path from 'node:path';
 import {createHash} from 'node:crypto';
 import {DiskCapture,event,asId,allows,ownerAttention} from '../capture.mjs';
 
+test('cached service and verified self-chat flags require no contact fetch',()=>{
+  const msg={id:{fromMe:false,remote:'42@c.us',id:'N'},from:'42@c.us',fromMe:false,
+    body:'Disappearing messages enabled',timestamp:1800000000,type:'notification',hasMedia:false};
+  const e=event(msg,undefined,['42@c.us']);
+  assert.equal(e.isService,true);assert.equal(e.isSelfChat,true);
+  assert.equal(e.messageType,'notification');
+  msg.id.remote='99@lid';msg.from='99@lid';
+  assert.equal(event(msg,undefined,['42@c.us']).isSelfChat,null);
+});
+
 test('durable captures are hashed, private, ordered and retained after reopen',()=>{
   const dir=fs.mkdtempSync(path.join(os.tmpdir(),'wa-spool-'));
   try {

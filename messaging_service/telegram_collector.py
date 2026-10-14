@@ -99,6 +99,7 @@ def peer_kind(message):
 
 class TelethonProvider:
     supports_receipts=True
+    supports_owner_reads=True
     def __init__(self,cfg,auth,*,receive_updates=True):
         from telethon import TelegramClient
         # Do not let library diagnostics log payloads or credentials.
@@ -119,13 +120,15 @@ class TelethonProvider:
         governor=getattr(self,'governor',None)
         return await governor.call(operation,phase) if governor else await operation()
 
-    def subscribe(self,capture,deleted,receipts=None):
+    def subscribe(self,capture,deleted,receipts=None,*,owner_reads=None):
         from telethon import events,types
         self.client.add_event_handler(capture,events.NewMessage())
         self.client.add_event_handler(capture,events.MessageEdited())
         self.client.add_event_handler(deleted,events.MessageDeleted())
         if receipts is not None:
             self.client.add_event_handler(receipts,events.Raw(types.UpdateReadHistoryOutbox))
+        if owner_reads is not None:
+            self.client.add_event_handler(owner_reads,events.Raw([types.UpdateReadHistoryInbox,types.UpdateReadChannelInbox]))
 
     async def connect(self):
         self.verified_self=None
@@ -188,12 +191,13 @@ class TelethonProvider:
         # _load_next_chunk raises FloodWait. Retry THIS iterator after the durable
         # pause, not a fresh traversal. Catalog batches already yielded stay saved.
         iterator=self.client.iter_dialogs(limit=limit).__aiter__()
-        batch=[]
+        batch=[];page_observed_at=datetime.now(timezone.utc).isoformat()
         while True:
             try:
                 buffer=getattr(iterator,'buffer',None)
                 if buffer is None or getattr(iterator,'index',0)==len(buffer):
                     dialog=await self.rpc(iterator.__anext__,'telegram_discovery')
+                    page_observed_at=datetime.now(timezone.utc).isoformat()
                 else:
                     # Consuming the already downloaded buffer makes no RPC.
                     dialog=await iterator.__anext__()
@@ -203,7 +207,13 @@ class TelethonProvider:
                 continue
             kind='channel' if dialog.is_channel else ('user' if dialog.is_user else 'chat')
             chat_type='private' if dialog.is_user else ('group' if dialog.is_group else 'channel')
-            batch.append((str(dialog.id),kind,dialog.name or str(dialog.id),chat_type))
+            raw=getattr(dialog,'dialog',None)
+            observation={'observed_at':page_observed_at,
+                'unread_count':getattr(raw,'unread_count',None),
+                'read_inbox_max_id':getattr(raw,'read_inbox_max_id',None),
+                'is_self_chat':bool(getattr(getattr(dialog,'entity',None),'is_self',False)),
+                'basis':'telegram_dialog'}
+            batch.append((str(dialog.id),kind,dialog.name or str(dialog.id),chat_type,observation))
             if len(batch)>=100:yield batch;batch=[]
         if batch:yield batch
 
@@ -304,6 +314,22 @@ class TelegramCollector:
                 'chat':chat,'ids':list(event.deleted_ids),'observed_at':datetime.now(timezone.utc).isoformat()})
         except Exception: self.fail('durable_capture_failed')
         finally: self.capture_count-=1
+
+    async def owner_read(self,event):
+        if self.stopping.is_set() or self.failed.is_set():return
+        pending=False
+        try:
+            from .reply_state import telegram_read_capture
+            capture=telegram_read_capture(self.account,event,verified_self=getattr(self.provider,'verified_self',None),
+                expected_user_id=getattr(self.provider,'expected_user_id',None))
+            if capture is None or not self.policy or self.policy.get('account')!=self.account:return
+            if not self.state.allows(self.policy,capture['chat']):return
+            if self.capture_count>=16:self.fail('capture_overload');return
+            self.capture_count+=1;pending=True
+            await asyncio.to_thread(self.spool.put,capture)
+        except Exception:self.fail('durable_capture_failed')
+        finally:
+            if pending:self.capture_count-=1
 
     async def receipt(self,event):
         if self.stopping.is_set() or self.failed.is_set(): return
@@ -529,7 +555,9 @@ class TelegramCollector:
             self.policy=await asyncio.to_thread(self.state.policy)
             await asyncio.to_thread(self.state.status,'starting',self.coverage_code)
             if hasattr(self.provider,'bind_state'):self.provider.bind_state(self.state)
-            if getattr(self.provider,'supports_receipts',False) is True:
+            if getattr(self.provider,'supports_owner_reads',False) is True:
+                self.provider.subscribe(self.capture,self.deleted,self.receipt,owner_reads=self.owner_read)
+            elif getattr(self.provider,'supports_receipts',False) is True:
                 self.provider.subscribe(self.capture,self.deleted,self.receipt)
             else:self.provider.subscribe(self.capture,self.deleted)
             # Renew ownership and honor shutdown during a slow network connect.

@@ -129,3 +129,50 @@ or client processing. Global `get_sync_status` and file coverage counts examine
 the permitted scope and can take longer than a specific chat read. Prefer
 `get_sync_status(chat_id=...)` when investigating one chat; for message/chat
 lists, compact output and optional coverage reduce the returned payload.
+
+## Reply queue (0.9.17, schema 27)
+
+`list_chats(awaiting_reply=true)` returns the attention message's time, bounded
+snippet, exact archive/provider IDs, current revision, sender/name/username and
+`awaiting_reply_incoming_count` (meaningful incoming messages since the last
+meaningful owner message). Empty/service messages and observed self chats are
+excluded. Media without a caption remains meaningful. Telegram service account
+777000 is excluded. Already archived messages can acquire service/self metadata
+through ordinary re-observation; no bulk provider fetch is triggered by a read.
+Telegram numeric message IDs resolve same-second ordering; WhatsApp ties have
+no reliable comparable counter and are conservatively excluded after an owner
+message at the same timestamp. This is still a heuristic, not proof that a
+request was answered.
+
+`order='priority'` requires `awaiting_reply=true`. The score is 100 for private
+chats or 25 for explicit group attention, +25 for question punctuation, +10 for
+an observed provider contact, plus waiting days capped at 20. Each row includes
+the score and reasons. This does not infer identity from names or decide whether
+a statement semantically requires an answer. Contact flags can be unknown.
+Priority cursors retain a scoring timestamp and bind all filters.
+
+Additional query filters: `exclude_chats` (archive chat IDs), `exclude_senders`
+(provider sender IDs within selected accounts), `only_questions`, `only_unread`,
+and `chat_types=['private']`. Exclusions are per request, not a stored global
+mute policy. Select accounts when the same provider sender ID is ambiguous.
+
+`unread_count`/`provider_unread_count` is a timestamped chat observation, separate
+from recipient delivery/read receipts. `read_state` is observed, stale or unknown;
+`read_state_observed_at` and `read_state_basis` explain it. Counts remain visible
+when stale; the current boolean and `read_by_owner` then stay unknown. A snapshot
+is fresh for at most five minutes and cannot predate the latest incoming message.
+Telegram's inbox boundary can establish `read_by_owner` for the hinted message;
+inbox read updates flow through the existing durable collector. WhatsApp uses
+cached chat counts from catalog scans; it cannot establish exact per-message
+owner reads, so `read_by_owner` stays unknown. There is no extra account session,
+provider polling or implicit mark-read action. `only_unread` includes chats with
+a fresh positive count; `read_state_unknown_total` reports excluded unknown/stale
+candidates. It is not an exhaustive unread inbox.
+
+`dismiss_reply(chat_id, message_id, expected_revision)` requires `read` and
+`cursor-write`. It hides the exact current hint for this credential until the
+next meaningful incoming head or a changed attention revision. Other keys keep
+their own queue. Historical backfill older than the incoming head does not reopen
+it. Repeating the same exact dismissal is safe; a changed target returns
+`reply_target_changed`, requiring a fresh queue read. Dismissal does not send,
+mark source messages read, change archive ACKs or assert the request was fulfilled.

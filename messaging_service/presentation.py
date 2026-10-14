@@ -106,19 +106,22 @@ def render(method, result, detail):
             if not result.get('awaiting_reply_scope'):
                 for key in tuple(row):
                     if key.startswith('awaiting_reply_'):row.pop(key,None)
+                if row.get('read_state')=='unknown':row.pop('read_state',None)
             row['title']=row['title'][:64]
             if result.get('awaiting_reply_scope') and row.get('last_message_snippet'):
                 row['last_message_snippet']=row['last_message_snippet'][:80]
             else:row.pop('last_message_snippet',None)
             if row.get('awaiting_reply_snippet'):
                 row['awaiting_reply_snippet']=row['awaiting_reply_snippet'][:80]
-        result['awaiting_reply_notice']='heuristic_not_obligation'
+        if result.get('awaiting_reply_scope'):result['awaiting_reply_notice']='heuristic_not_obligation'
         if result.get('awaiting_reply_scope') is None:
             result.pop('awaiting_reply_scope',None)
             result.pop('awaiting_reply_total',None)
             result.pop('awaiting_reply_days',None)
             result.pop('bot_filter_coverage',None)
             result.pop('group_attention_coverage',None)
+            for key in ('read_state_unknown_total','only_unread_notice'):
+                if result.get(key) is None:result.pop(key,None)
     elif method=='search_files':
         result['items']=[file_summary(row) for row in result['items']]
     if method in ('search_files','get_file_text','get_file_segments'):

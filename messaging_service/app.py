@@ -371,20 +371,39 @@ def create_app(store: Store, allowed_hosts: list[str]):
 
     @mcp.tool(structured_output=True, annotations=read)
     def list_chats(ctx: Context, after: str='', limit: int=100, accounts: list[StrictStr] | None=None,
-                   query: str='', chat_types: list[Literal['private','group','channel','unknown']] | None=None, order: Literal['id','activity','last_activity_desc']='activity',
+                   query: str='', chat_types: list[Literal['private','group','channel','unknown']] | None=None, order: Literal['id','activity','last_activity_desc','priority']='activity',
                    exclude_channels: bool=False, awaiting_reply: bool=False,
                    from_time: str='', to_time: str='', include_coverage: bool | None=None, detail: Detail='compact',
-                   awaiting_reply_days: StrictInt=14) -> dict[str, Any]:
+                   awaiting_reply_days: StrictInt=14,exclude_chats: list[StrictStr] | None=None,
+                   exclude_senders: list[StrictStr] | None=None,only_questions: bool=False,only_unread: bool=False) -> dict[str, Any]:
         """List permitted chats. order: activity (default) or last_activity_desc = recent first;
         id = stable catalogue traversal. awaiting_reply: private incoming, excluding known bots,
         or explicit group owner mention/reply; heuristic, not obligation. Attention expires after
         awaiting_reply_days (default 14; 0 = no age limit), based on the attention message time.
         Group evidence survives others' chatter and clears after owner writes. No provider read changes.
+        priority requires awaiting_reply=true; score/reasons are transparent heuristics.
+        exclude_chats takes archive IDs, exclude_senders account-scoped provider sender IDs.
+        only_questions uses question punctuation; private-only uses chat_types=['private'].
+        only_unread includes fresh known chat read observations only; unknown/stale count is explicit.
         """
         return call(ctx,'list_chats',detail=detail,after=after,limit=limit,accounts=accounts,query=query,chat_types=chat_types,
                     order=order,exclude_channels=exclude_channels,awaiting_reply=awaiting_reply,
                     from_time=from_time,to_time=to_time,include_coverage=include_coverage,
-                    awaiting_reply_days=awaiting_reply_days)
+                    awaiting_reply_days=awaiting_reply_days,exclude_chats=exclude_chats,exclude_senders=exclude_senders,
+                    only_questions=only_questions,only_unread=only_unread)
+
+    @mcp.tool(structured_output=True, annotations=ToolAnnotations(readOnlyHint=False,
+        destructiveHint=False, idempotentHint=True, openWorldHint=False))
+    def dismiss_reply(ctx: Context,chat_id: StrictStr,message_id: StrictStr,expected_revision: StrictInt) -> dict[str,Any]:
+        """Hide this exact reply hint for this credential until a new meaningful incoming.
+
+        Requires read and cursor-write. Use the hint's message ID/revision. A changed
+        target returns reply_target_changed; refresh it before deciding. Repeating
+        the same dismissal is safe, but does not prove a newer hint was dismissed.
+        Archive-local queue action: does not send, mark provider read or assert a
+        request was fulfilled. Other agents' credentials keep their own queue.
+        """
+        return call(ctx,'dismiss_reply',chat_id=chat_id,message_id=message_id,expected_revision=expected_revision)
 
     @mcp.tool(structured_output=True, annotations=read)
     def search_people(ctx: Context, query: str='', accounts: list[StrictStr] | None=None,
@@ -630,7 +649,7 @@ def create_app(store: Store, allowed_hosts: list[str]):
 
     async def rest(request):
         operations={'capabilities','list_chats','search','get_messages','get_context',
-                    'get_attachment','get_updates','ack_updates','record_review','get_reviews',
+                    'get_attachment','get_updates','ack_updates','dismiss_reply','record_review','get_reviews',
                     'search_people','search_files','get_file_text','get_sync_status','get_file_occurrences','get_file_segments','resolve_reference','preview_message','send_message','get_send_status',
                     'list_messenger_operations','preview_messenger_operation','execute_messenger_operation','get_messenger_operation',
                     'create_subscription','list_subscriptions','get_subscription','update_subscription','get_subscription_events'}

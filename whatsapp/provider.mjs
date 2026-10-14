@@ -8,6 +8,7 @@ import {DiskCapture,event,asId,chatId,allows,cursor,compare,readPolicy} from './
 import {download} from './media.mjs';
 import {cachedSenderNames,cachedOwnerIds} from './sender.mjs';
 import {readPage} from './history.mjs';
+import {cachedDialogs} from './read-state.mjs';
 import {createPageBounds,PageEvaluationStalled} from './bounds.mjs';
 import {CONNECTION_ERRORS,connectClient,writeFailure} from './transport-state.mjs';
 import {IdentityCache,cachedIdentityObservations} from './identity.mjs';
@@ -91,9 +92,7 @@ async function start(initialPolicy) {
   return {ready:true};
 }
 async function dialogs(limit) {
-  return client.pupPage.evaluate(limit=>window.require('WAWebCollections').Chat.getModelsArray()
-    .filter(c=>/^[a-zA-Z0-9_.:-]{1,140}@(c.us|g.us|lid)$/.test(c.id?._serialized || ''))
-    .slice(0,limit).map(c=>[c.id._serialized,c.id.server==='g.us'?'chat':'user',c.formattedTitle || c.name || c.id._serialized]),limit);
+  return client.pupPage.evaluate(cachedDialogs,{limit,ownerIds});
 }
 async function page(chat,limit,before) {
   if(!allows(currentPolicy(),chat))throw new Error('chat_excluded');

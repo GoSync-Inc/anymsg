@@ -374,7 +374,8 @@ class WhatsAppCollector(TelegramCollector):
         await asyncio.to_thread(self.state.inventory,dialogs,None)
         dialogs=await asyncio.to_thread(self.state.scan_order,dialogs)
         seen=set();gap=False;unavailable=False
-        for chat,kind,title in dialogs:
+        for dialog in dialogs:
+            chat,kind,title=dialog[:3]
             if not self.state.allows(self.policy,chat): continue
             try:gap=await self.sync_chat(chat,kind,title) or gap;seen.add(chat)
             except (ProviderOperationError,ProviderUnavailable):
