@@ -1,0 +1,42 @@
+# Roadmap
+
+This library stays focused on messenger collection and an agent interface.
+Task/project management is outside the archive. Sending is not in 0.9.8 and
+remains a separate, explicitly approved action boundary.
+
+The 0.9.8 baseline already includes per-chat evidence, explicit collector errors,
+verified WhatsApp identity observations, file-text indexing, morphology search,
+bounded downloads, byte-level deduplication and optional enrichment adapters.
+These capabilities do not imply that every source history or file is available.
+
+Next work, in order:
+
+1. **History recovery:** durable fair scheduling across chats, selectable setup
+   depth (new only or a historical period), and waves from a week through a month,
+   quarter and year. The current planner is a preview; execution, checkpoint
+   recovery and provider backoff still need implementation and live acceptance.
+2. **Storage lifecycle:** retain extracted text/evidence while optionally evicting
+   cold originals; configurable pin/recent/frequent-access rules and byte budgets.
+   Demand re-download must verify the original digest and explicitly report
+   expired or unavailable provider references. Never promise rehydration of a
+   source that no longer exists. SHA-256 blob deduplication is already implemented.
+3. **File understanding:** preserve full text/segments and separate descriptions,
+   titles and structured analysis as versioned artifacts. Reuse analysis for exact
+   duplicates with matching model/profile/version, keep source links and expose
+   partial/truncated results. Local CPU and API adapters remain configurable;
+   Codex CLI is optional, must be explicitly authorized and is not activated by
+   installing the package. Measure cost/quality on synthetic or owner-approved files.
+4. **Connector evaluation:** test whatsmeow separately before considering a
+   WhatsApp transport replacement. No session migration or production switch is
+   implied. Continue testing identity mappings, reconnect and history gaps.
+5. **Retrieval and performance:** benchmark a bounded hybrid search experiment
+   against the existing PostgreSQL baseline, including Russian queries, people
+   and file descriptions. Measure SQL, REST/MCP and client-connector latency
+   separately; improve only demonstrated bottlenecks.
+6. **Sending:** design a scoped draft/approval/outbox path with idempotency,
+   retries and audit evidence after the owner defines approval requirements.
+
+Every stage needs regression tests, resource/coverage diagnostics and explicit
+release notes. Separate owners should use separate deployments; true tenancy is
+not part of the present security model. The package is experimental, with source
+and installation guides intended for operator-managed deployments.

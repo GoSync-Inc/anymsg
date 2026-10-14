@@ -27,8 +27,10 @@ wheel = root/'dist'/f'anymsg-{version}-py3-none-any.whl'
 sdist = root/'dist'/f'anymsg-{version}.tar.gz'
 with zipfile.ZipFile(wheel) as z:
     safe(z.namelist())
-    for path in (root/'messaging_service').rglob('*.sql'):
-        assert z.read(path.relative_to(root).as_posix()) == path.read_bytes()
+    for folder in ('messaging_service','anymsg'):
+        for path in (root/folder).rglob('*'):
+            if path.suffix in ('.sql','.py'):
+                assert z.read(path.relative_to(root).as_posix()) == path.read_bytes()
 with tarfile.open(sdist) as t:
     safe(t.getnames())
     for required in ('Dockerfile','media_benchmark.py','LICENSE','SETUP.md','licenses/age-LICENSE'):

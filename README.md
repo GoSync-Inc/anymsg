@@ -87,6 +87,7 @@ See [ACCESS.md](ACCESS.md), [SEARCH.md](SEARCH.md), [FILE_INDEX.md](FILE_INDEX.m
 [COLLECTORS.md](COLLECTORS.md), [MEDIA_STORAGE.md](MEDIA_STORAGE.md),
 [ENRICHMENT.md](ENRICHMENT.md) and [BACKUP_STREAMING.md](BACKUP_STREAMING.md).
 Run synthetic tests only: [CONTRIBUTING.md](CONTRIBUTING.md).
+Planned work and scope: [ROADMAP.md](ROADMAP.md).
 
 ## License and security
 
