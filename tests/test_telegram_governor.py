@@ -135,6 +135,20 @@ def test_connect_flood_is_persisted_and_retried_without_false_pairing_failure():
         collector.provider=provider;collector.connect_timeout=1
         await collector.connect_provider()
         assert calls==[0,10] and state.until==10
+        assert provider.verified_self.id==42
+    asyncio.run(scenario())
+
+
+def test_connect_does_not_retain_verified_owner_after_identity_mismatch():
+    async def scenario():
+        async def connect():pass
+        async def me():return NS(id=99)
+        async def catch_up():raise AssertionError('identity must be checked first')
+        provider=TelethonProvider.__new__(TelethonProvider)
+        provider.client=NS(connect=connect,get_me=me,catch_up=catch_up)
+        provider.expected_user_id=42;provider.verified_self=NS(id=42)
+        with pytest.raises(RuntimeError,match='telegram_identity_mismatch'):await provider.connect()
+        assert provider.verified_self is None
     asyncio.run(scenario())
 
 

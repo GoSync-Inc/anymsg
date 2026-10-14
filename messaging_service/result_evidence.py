@@ -2,6 +2,29 @@
 from .file_index import file_response_fields
 
 
+def send_provenance(c,rows):
+    """Already authorized message rows only; never expose credentials/request IDs."""
+    if not rows:return
+    ids=list({r.get('id') or r['message'] for r in rows})
+    sends=c.execute('''SELECT DISTINCT ON(m.id) m.id AS message_id,o.id AS send_id,o.principal,o.body,
+        count(*) OVER(PARTITION BY m.id) AS candidate_count
+        FROM messages m JOIN outgoing_messages o ON o.account=m.account AND o.chat=m.chat
+            AND o.provider_message_id=m.provider_id AND o.status='sent'
+        WHERE m.id=ANY(%s) AND m.direction='outgoing'
+        ORDER BY m.id,o.finished_at DESC,o.id''',(ids,)).fetchall()
+    sent={r['message_id']:r for r in sends}
+    for row in rows:
+        action=sent.get(row.get('id') or row['message'])
+        if action is None:continue
+        if action['candidate_count']!=1:
+            row['agent_send']={'basis':'ambiguous_outbox_receipts','candidate_count':action['candidate_count'],
+                'owner_approval_verified_by_server':False}
+        else:
+            row['agent_send']={'send_id':action['send_id'],'principal':action['principal'],
+                'basis':'confirmed_outbox_receipt','body_matches_sent_text':row.get('body')==action['body'],
+                'owner_approval_verified_by_server':False}
+
+
 def decorate(c,rows):
     if not rows:return rows
     ids=list({r['id'] for r in rows})
@@ -47,6 +70,7 @@ def decorate(c,rows):
         max(observed_at) AS last_conflict_at FROM message_conflicts
         WHERE message=ANY(%s) GROUP BY message''',(ids,))}
     current={r['id']:r['revision'] for r in c.execute('SELECT id,revision FROM messages WHERE id=ANY(%s)',(ids,))}
+    send_provenance(c,rows)
     for row in rows:
         row['attachments']=grouped.get(row['id'],[])
         conflict=conflicts.get(row['id'],{'active_conflicts':0,'historical_conflicts':0,'last_conflict_at':None})

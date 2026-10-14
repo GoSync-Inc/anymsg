@@ -59,6 +59,43 @@ def test_message_identity_cannot_change_on_edit(archive):
     assert s.search(key)['items'][0]['sender']=='42'
 
 
+def test_authenticated_private_sender_completion_preserves_revisions_and_conflicts(archive):
+    ar,s,key,_=archive
+    original=event(sender='',direction='outgoing',metadata={'chat_type':'private'})
+    mid=ar.ingest(original)['message']
+    correct={**original,'sender':'42','sender_profile':{'display_name':'Synthetic Owner'},
+        'metadata':{'chat_type':'private','sender_identity_basis':'authenticated_self'}}
+    # Ordinary identity changes conflict until authenticated-self evidence is supplied.
+    assert ar.ingest({**correct,'metadata':{'chat_type':'private'}})['outcome']=='conflict'
+    assert ar.ingest({**correct,'body':'unrelated conflicting text'})['outcome']=='conflict'
+    assert ar.ingest({**correct,'updated_at':'2026-10-01T12:01:00Z'})['outcome']=='conflict'
+    assert ar.ingest(correct)['outcome']=='edited'
+    assert ar.ingest(correct)['outcome']=='duplicate'
+    message=s.get_context(key,mid)['message']
+    assert message['sender']=='42' and message['revision']==2
+    assert message['sender_name']=='Synthetic Owner'
+    assert message['sender_identity_basis']=='authenticated_self'
+    assert message['evidence']['active_conflicts']==2
+    with s.pool.connection() as c:
+        snapshots=c.execute('SELECT snapshot FROM message_revisions WHERE message=%s ORDER BY revision',(mid,)).fetchall()
+        assert [r['snapshot']['sender'] for r in snapshots]==['','42']
+        assert len({r['snapshot']['updated_at'] for r in snapshots})==1
+    assert [r['revision'] for r in s.get_updates(key,'identity-completion')['items']]==[1,2]
+
+
+@pytest.mark.parametrize('change',[
+    {'metadata':{'chat_type':'group','sender_identity_basis':'authenticated_self'}},
+    {'direction':'incoming'}, {'body':'changed content'},
+    {'updated_at':'2026-10-01T12:01:00Z'}, {'deleted':True}])
+def test_sender_completion_does_not_overwrite_uncertain_content(archive,change):
+    ar,s,key,_=archive
+    original=event(sender='',direction='outgoing',metadata={'chat_type':'private'})
+    mid=ar.ingest(original)['message']
+    candidate={**original,'sender':'42','metadata':{'chat_type':'private','sender_identity_basis':'authenticated_self'},**change}
+    assert ar.ingest(candidate)['outcome']=='conflict'
+    assert s.get_context(key,mid)['message']['sender']==''
+
+
 def test_delete_tombstone_does_not_resurrect_and_search_hides(archive):
     ar,s,key,_=archive
     mid=ar.ingest(event())['message']

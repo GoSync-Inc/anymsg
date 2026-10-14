@@ -84,6 +84,8 @@ def get_updates(store,c,p,consumer,limit=20,*,accounts=None,chats=None,senders=N
     for event,named in zip(public_events,names):
         for field in ('sender_name','username','chat_title','chat_type'):
             event[field]=named.get(field)
+    from .result_evidence import send_provenance
+    send_provenance(c,public_events)
     shape_messages(public_events,compact=compact,body_chars=cap)
     if order=='sent_at':public_events.sort(key=lambda e:(date_bound(e['sent_at']),e['event_sequence']))
     targets(p,[e['message'] for e in public_events])

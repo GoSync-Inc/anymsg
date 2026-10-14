@@ -16,7 +16,7 @@ def timestamp(value):
     return value
 
 
-def telegram_message(account,message,*,chat_title='',origin='live'):
+def telegram_message(account,message,*,chat_title='',origin='live',verified_self=None):
     """Telethon Message-shaped object. No entity/network lookups during capture."""
     media=[]
     file=getattr(message,'file',None)
@@ -34,8 +34,20 @@ def telegram_message(account,message,*,chat_title='',origin='live'):
     # NewMessage can belong to a chat absent from the last dialog discovery.
     # Use only the entity already attached to this message, and verify its peer.
     from telethon import types,utils
+    sender_id=message.sender_id
+    identity_basis=None
+    # UpdateShortSentMessage has no from_id. The provider supplies only the
+    # self entity it has already authenticated against the configured owner ID.
+    # A missing group/channel sender may be anonymous: never infer it there.
+    if isinstance(verified_self,types.User) and verified_self.is_self:
+        if not sender_id and message.out and isinstance(getattr(message,'peer_id',None),types.PeerUser):
+            sender_id=verified_self.id
+            identity_basis='authenticated_self'
+        if sender_id==verified_self.id and entity is None:
+            entity=verified_self
     chat_entity=getattr(message,'chat',None)
-    observed_type=None;observed_title=''
+    observed_type='private' if isinstance(getattr(message,'peer_id',None),types.PeerUser) else None
+    observed_title=''
     if isinstance(chat_entity,(types.User,types.Chat,types.ChatForbidden,types.Channel,types.ChannelForbidden)) and utils.get_peer_id(chat_entity)==message.chat_id:
         if isinstance(chat_entity,types.User):
             observed_type='private'
@@ -59,11 +71,12 @@ def telegram_message(account,message,*,chat_title='',origin='live'):
     return validate({'account':account,'platform':'telegram','chat':str(message.chat_id),
         'chat_title':(chat_title if chat_title and chat_title!=str(message.chat_id) else observed_title) or str(message.chat_id),
         'provider_id':str(message.id),
-        'sender':str(message.sender_id or ''),'body':message.message or '',
+        'sender':str(sender_id or ''),'body':message.message or '',
         'sent_at':timestamp(message.date),'updated_at':timestamp(message.edit_date or message.date),
         'deleted':False,'direction':'outgoing' if message.out else 'incoming','origin':origin,'media':media,
         'sender_profile':profile,'metadata':{
             'chat_type':observed_type,
+            'sender_identity_basis':identity_basis,
             'sender_is_bot':getattr(entity,'bot',None) if isinstance(entity,types.User) else None,
             'reply_to_provider_id':reply_id,
             'mentions_owner':getattr(message,'mentioned',None),

@@ -46,6 +46,24 @@ implemented. Reply to an already archived message is supported. Provider chat
 permissions still apply. Reads and WhatsApp sends do not explicitly mark chats
 read; WhatsApp uses `sendSeen: false`.
 
+## Sender identity and provenance (0.9.12)
+
+Telegram private short-send receipts may omit the sender. The collector uses its
+cached, authenticated self entity after checking the configured owner ID; it
+makes no extra entity lookup. Anonymous group/channel senders are never inferred.
+Legacy receipts are repaired only with matching confirmed outbox evidence and
+identical content/time, using a new revision rather than rewriting old snapshots.
+The optional `sender_identity_basis` makes this completion explicit.
+
+Messages expose `agent_send` with the sending principal and receipt ID, including
+compact responses. It proves a server-dispatched action, not owner approval.
+An edited body can differ from the original text; ambiguous duplicate provider
+receipts do not guess an actor. The originating principal's `get_send_status`
+also includes its credential ID, request ID and acting-agent approval mode.
+Credential/request IDs are not exposed in message provenance to other readers.
+No provider read receipts are collected yet: `sent` still means provider acceptance.
+See [MESSAGE_ACTIONS.md](MESSAGE_ACTIONS.md) for the remaining stages.
+
 ## Operator setup
 
 Only the private owner CLI can change permissions. Use each agent's own account

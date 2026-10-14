@@ -109,8 +109,15 @@ class Archive:
                       (cid,aid,e['chat_title'],e['chat'],chat_type,e['chat'],e['chat']))
             old=c.execute('SELECT * FROM messages WHERE id=%s FOR UPDATE',(mid,)).fetchone()
             content=fingerprint(e); updated=datetime.fromisoformat(e['updated_at']); outcome='created'
+            sender_completed=bool(old and not old['sender'] and e['sender'] and not old['deleted']
+                and not e['deleted'] and e['platform']=='telegram' and e['direction']=='outgoing'
+                and e.get('metadata',{}).get('chat_type')=='private'
+                and e.get('metadata',{}).get('sender_identity_basis')=='authenticated_self'
+                and old['provider_updated_at']==updated
+                and fingerprint({**e,'sender':''})==old['content_hash'])
             if old:
                 if old['deleted'] and not e['deleted']: outcome='tombstoned'
+                elif sender_completed:outcome='edited'
                 elif (old['sent_at']!=datetime.fromisoformat(e['sent_at']) or old['direction']!=e['direction']
                       or old['sender']!=e['sender']): outcome='conflict'
                 elif old['content_hash']==content: outcome='unchanged'
@@ -180,6 +187,19 @@ class Archive:
                     resolved_revision=(SELECT revision FROM messages WHERE id=%s)
                     WHERE message=%s AND resolved_at IS NULL AND candidate_updated_at<%s''',
                     (mid,mid,updated))
+                if sender_completed:
+                    # Only competing copies of this exact content are resolved.
+                    # Unrelated equal-version contradictions stay visible.
+                    candidates=c.execute('''SELECT mc.receipt_digest,mc.candidate_updated_at,r.envelope FROM message_conflicts mc
+                        JOIN ingest_receipts r ON r.digest=mc.receipt_digest
+                        WHERE mc.message=%s AND mc.resolved_at IS NULL
+                        ORDER BY mc.observed_at,mc.receipt_digest LIMIT 100''',(mid,)).fetchall()
+                    equivalent=[r['receipt_digest'] for r in candidates
+                        if r['candidate_updated_at']<=updated
+                        and fingerprint(validate(r['envelope'])) in (content,old['content_hash'])]
+                    if equivalent:c.execute('''UPDATE message_conflicts SET resolved_at=clock_timestamp(),
+                        resolved_revision=%s WHERE message=%s AND receipt_digest=ANY(%s) AND resolved_at IS NULL''',
+                        (revision,mid,equivalent))
             c.execute("""UPDATE source_status SET last_ingest_at=clock_timestamp(),status='receiving',
                 detail_code=CASE WHEN detail_code='version_conflict' THEN detail_code ELSE %s END WHERE account=%s""",
                       ('version_conflict' if outcome=='conflict' else 'coverage_not_reconciled',aid))

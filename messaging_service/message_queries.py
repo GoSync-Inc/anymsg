@@ -21,7 +21,8 @@ META = '''nullif(sp.display_name,'') AS sender_name,nullif(sp.username,'') AS us
       THEN (coalesce(mm.metadata,mr.snapshot->'metadata')->>'mentions_owner')::boolean END AS mentions_owner,
     CASE WHEN jsonb_typeof(coalesce(mm.metadata,mr.snapshot->'metadata')->'reply_to_owner')='boolean'
       THEN (coalesce(mm.metadata,mr.snapshot->'metadata')->>'reply_to_owner')::boolean END AS reply_to_owner,
-    coalesce(mm.metadata,mr.snapshot->'metadata')->>'media_kind' AS media_kind'''
+    coalesce(mm.metadata,mr.snapshot->'metadata')->>'media_kind' AS media_kind,
+    coalesce(mm.metadata,mr.snapshot->'metadata')->>'sender_identity_basis' AS sender_identity_basis'''
 BASE = 'm.id,m.account,m.chat,m.sender,m.body,m.sent_at,m.revision,m.direction'
 
 

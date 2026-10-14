@@ -37,6 +37,9 @@ def result(row):
             if row['provider_message_id'] else None,
         'created_at':row['created_at'],'expires_at':row['expires_at'],
         'finished_at':row['finished_at'],'error_code':row['error_code'],
+        'agent_send':{'principal':row['principal'],'credential_id':row['key_id'],
+            'request_id':row['request_id'],'approval_mode':'acting_agent',
+            'owner_approval_verified_by_server':False},
         'recipient_delivery_confirmed':False,'automatic_retry':False,
         'next_action':'get_send_status' if row['status'] in ('queued','dispatching') else
             'verify_history_before_any_new_send' if row['status']=='unknown' else 'none',

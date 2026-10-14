@@ -16,6 +16,44 @@ def test_telegram_without_network_and_with_original_metadata():
     assert e['media'][0]['provider_id']=='123456' and e['media'][0]['bytes']==32*1024**2
 
 
+def test_telegram_short_send_receipt_uses_verified_self_without_mutating_message():
+    from telethon import types
+    owner=types.User(id=42,is_self=True,first_name='Synthetic',last_name='Owner',username='fixture_owner')
+    message=types.Message(id=19,peer_id=types.PeerUser(100),out=True,message='approved fixture',
+        date=datetime(2026,10,1,tzinfo=timezone.utc))
+    assert message.sender_id is None
+    e=telegram_message('tg-owner',message,verified_self=owner)
+    assert e['sender']=='42'
+    assert e['sender_profile']=={'display_name':'Synthetic Owner','username':'fixture_owner'}
+    assert e['metadata']['chat_type']=='private'
+    assert e['metadata']['sender_identity_basis']=='authenticated_self'
+    assert message.sender_id is None and message.from_id is None
+
+
+@pytest.mark.parametrize('peer,out,sender',[
+    ('user',False,None),('chat',True,None),('channel',True,None),('user',True,99)])
+def test_verified_self_does_not_guess_other_or_anonymous_senders(peer,out,sender):
+    from telethon import types
+    owner=types.User(id=42,is_self=True,first_name='Synthetic')
+    peers={'user':types.PeerUser(100),'chat':types.PeerChat(100),'channel':types.PeerChannel(100)}
+    message=types.Message(id=19,peer_id=peers[peer],out=out,message='fixture',
+        from_id=types.PeerUser(sender) if sender else None,date=datetime(2026,10,1,tzinfo=timezone.utc))
+    expected=str(message.sender_id or '')
+    e=telegram_message('tg-owner',message,verified_self=owner)
+    assert e['sender']==expected
+    assert e['metadata'].get('sender_identity_basis')!='authenticated_self'
+
+
+def test_verified_self_can_supply_profile_for_explicit_owner_id():
+    from telethon import types
+    owner=types.User(id=42,is_self=True,first_name='Synthetic',username='fixture_owner')
+    message=types.Message(id=19,peer_id=types.PeerChat(100),out=True,from_id=types.PeerUser(42),
+        message='fixture',date=datetime(2026,10,1,tzinfo=timezone.utc))
+    e=telegram_message('tg-owner',message,verified_self=owner)
+    assert e['sender']=='42' and e['sender_profile']['username']=='fixture_owner'
+    assert e['metadata'].get('sender_identity_basis')!='authenticated_self'
+
+
 def test_telegram_webpage_document_metadata_does_not_use_preview_photo():
     from telethon import types,utils
     now=datetime(2026,10,13,tzinfo=timezone.utc)

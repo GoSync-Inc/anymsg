@@ -98,6 +98,9 @@ def test_worker_sends_once_and_rechecks_revocation(sender):
     receipt = s.get_send_status(key, result['send_id'])
     assert receipt['status'] == 'sent' and receipt['provider_message_id'] == '42'
     assert receipt['recipient_delivery_confirmed'] is False
+    assert receipt['agent_send']['principal']=='send-agent'
+    assert receipt['agent_send']['request_id']=='synthetic-request-0001'
+    assert receipt['agent_send']['owner_approval_verified_by_server'] is False
     assert submit(s, key)['send_id'] == result['send_id']
     assert len(calls) == 1
     queued = s.send_message(key, account='send-fixture', chat_id=result['chat_id'],
@@ -108,6 +111,45 @@ def test_worker_sends_once_and_rechecks_revocation(sender):
     with s.pool.connection() as c:
         assert c.execute('SELECT status FROM outgoing_messages WHERE id=%s',
             (queued['send_id'],)).fetchone()['status'] == 'cancelled'
+
+
+def test_agent_send_provenance_is_scoped_and_bounded_in_compact_reads(sender):
+    from messaging_service.outgoing import OutgoingWorker
+    from messaging_service.presentation import render
+    s,archive,key,_,state=sender
+    action=submit(s,key)
+    async def provider(job):return {'provider_message_id':'42'}
+    asyncio.run(OutgoingWorker(state,provider).once())
+    mid=archive.ingest(event(account='send-fixture',provider_id='42',direction='outgoing',
+        body='Exact synthetic text'))['message']
+    reader=s.issue_key('scoped-reader',['send-fixture'],chats=[stable_id('chat','send-fixture','100')])
+    result=s.get_context(reader,mid,before_count=0,after_count=0)
+    compact=render('get_context',result,'compact')['message']
+    assert compact['agent_send']=={'send_id':action['send_id'],'principal':'send-agent',
+        'basis':'confirmed_outbox_receipt','body_matches_sent_text':True,'owner_approval_verified_by_server':False}
+    assert 'key_id' not in str(compact['agent_send']) and 'request_id' not in compact['agent_send']
+    assert next(r for r in render('search',s.search(reader),'compact')['items'] if r['id']==mid)['agent_send']['send_id']==action['send_id']
+    updates=render('get_updates',s.get_updates(reader,'send-provenance'),'compact')['items']
+    assert next(r for r in updates if r['message']==mid)['agent_send']['send_id']==action['send_id']
+    archive.ingest(event(account='send-fixture',provider_id='42',direction='outgoing',
+        body='edited synthetic text',updated_at='2026-10-01T12:01:00Z'))
+    assert not s.get_context(reader,mid)['message']['agent_send']['body_matches_sent_text']
+    s.set_access('scoped-reader',chats=[])
+    with pytest.raises(APIError,match='not_found'):s.get_context(reader,mid)
+
+
+def test_duplicate_provider_receipts_do_not_attribute_an_agent_by_guessing(sender):
+    from messaging_service.outgoing import OutgoingWorker
+    s,archive,key,_,state=sender
+    submit(s,key)
+    s.send_message(key,account='send-fixture',chat_id=stable_id('chat','send-fixture','100'),
+        text='Second fixture',request_id='second-synthetic-request')
+    async def provider(job):return {'provider_message_id':'42'}
+    worker=OutgoingWorker(state,provider)
+    asyncio.run(worker.once());asyncio.run(worker.once())
+    mid=archive.ingest(event(account='send-fixture',provider_id='42',direction='outgoing',body='Exact synthetic text'))['message']
+    assert s.get_context(key,mid)['message']['agent_send']=={'basis':'ambiguous_outbox_receipts',
+        'candidate_count':2,'owner_approval_verified_by_server':False}
 
 
 def test_ambiguous_provider_failure_never_retries(sender):

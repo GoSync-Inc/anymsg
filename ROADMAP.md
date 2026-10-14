@@ -1,7 +1,10 @@
 # Roadmap
 
 This library stays focused on messenger collection and an agent interface.
-Task/project management is outside the archive. Version 0.9.11 separates the
+Task/project management is outside the archive. Version 0.9.12 completes missing
+Telegram private-send identities and exposes confirmed agent-send provenance.
+[MESSAGE_ACTIONS.md](MESSAGE_ACTIONS.md) tracks receipt/reaction/action follow-up.
+Version 0.9.11 separates the
 WhatsApp sending lane from background history/media in the same authenticated
 collector. Version 0.9.10 adds opt-in text
 sending as a separate, explicitly approved action boundary.

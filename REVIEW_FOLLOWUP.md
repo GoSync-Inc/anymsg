@@ -53,3 +53,8 @@ Live deployment and provider acceptance must be recorded separately from these t
 Confirmed text sending is now implemented as an opt-in outbox: [SENDING.md](SENDING.md).
 The acting agent obtains exact owner approval; a server approval workflow is future
 work. Task extraction and project management remain outside this module.
+
+The post-send feedback is tracked in [MESSAGE_ACTIONS.md](MESSAGE_ACTIONS.md):
+private short-receipt sender completion and send provenance first, followed by
+delivery/read observations, reactions and expanded actions. Server approval
+remains optional future work; a report does not change the owner's chosen mode.

@@ -6,7 +6,7 @@ Collect messages and attachments once, then let agents search and read them thro
 MCP or HTTP with separate credentials and account/chat permissions. Original files
 use SHA-256 deduplication; references to every source message stay separate.
 
-Development version: **0.9.11 — experimental**, PostgreSQL schema 22.
+Development version: **0.9.12 — experimental**, PostgreSQL schema 22.
 Published npm/PyPI release: **0.9.9**; sending and independent WhatsApp IPC lanes
 require the development source until the next package release.
 

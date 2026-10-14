@@ -99,6 +99,7 @@ class TelethonProvider:
             flood_sleep_threshold=0,raise_last_call_error=True,base_logger=logger,
             catch_up=False,receive_updates=receive_updates)
         self.expected_user_id=auth['expected_user_id']
+        self.verified_self=None
         self.governor=None
 
     def bind_state(self,state): self.governor=RequestGovernor(state)
@@ -114,6 +115,7 @@ class TelethonProvider:
         self.client.add_event_handler(deleted,events.MessageDeleted())
 
     async def connect(self):
+        self.verified_self=None
         await self.rpc(self.client.connect,'provider_connect')
         # is_user_authorized() catches every RPCError, including FloodWait, and
         # caches False. get_me() catches only UnauthorizedError: required waits
@@ -121,6 +123,7 @@ class TelethonProvider:
         me=await self.rpc(self.client.get_me,'provider_connect')
         if me is None:raise RuntimeError('telegram_pairing_required')
         if me.id!=self.expected_user_id: raise RuntimeError('telegram_identity_mismatch')
+        self.verified_self=me
         await self.rpc(self.client.catch_up,'provider_connect')
 
     async def disconnect(self): await self.client.disconnect()
@@ -248,7 +251,7 @@ class TelegramCollector:
         if self.capture_count>=16: self.fail('capture_overload'); return
         self.capture_count+=1
         try:
-            e=telegram_message(self.account,event.message)
+            e=telegram_message(self.account,event.message,verified_self=getattr(self.provider,'verified_self',None))
             if not self.state.allows(self.policy,e['chat']): return
             await asyncio.to_thread(self.spool.put,{'kind':'message','peer_kind':peer_kind(event.message),'envelope':e,
                 'captured_at':datetime.now(timezone.utc).isoformat()})
@@ -271,7 +274,8 @@ class TelegramCollector:
         ids=[]
         for message in messages:
             if str(message.chat_id)!=chat: raise RuntimeError('provider_chat_mismatch')
-            e=telegram_message(self.account,message,chat_title=title,origin=origin)
+            e=telegram_message(self.account,message,chat_title=title,origin=origin,
+                verified_self=getattr(self.provider,'verified_self',None))
             item={'kind':'message','peer_kind':kind,'envelope':e}
             await asyncio.to_thread(self.spool.put,item)
             await asyncio.to_thread(self.state.apply,item)
@@ -359,6 +363,9 @@ class TelegramCollector:
 
     async def reconcile_loop(self):
         from telethon.errors import FloodWaitError
+        from .telegram_identity import repair_sent_senders
+        await asyncio.to_thread(repair_sent_senders,self.archive,self.account,self.state.lease,
+            getattr(self.provider,'verified_self',None))
         while True:
             try: await self.sync_once()
             except (FloodWaitError,ProviderRateLimited) as exc:
