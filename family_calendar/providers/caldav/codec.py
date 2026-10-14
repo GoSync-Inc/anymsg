@@ -127,10 +127,17 @@ def _timezone_offsets(component):
         return None
     if not 0 < len(component.subcomponents) <= 64:
         return None
+    for item in [component, *component.subcomponents]:
+        if any(
+            getattr(value, "params", {})
+            for values in item.values()
+            for value in (values if isinstance(values, list) else [values])
+        ):
+            return None
     transitions = {}
     try:
         for observance in component.subcomponents:
-            if observance.name not in {"STANDARD", "DAYLIGHT"} or set(observance) - {
+            if observance.subcomponents or observance.name not in {"STANDARD", "DAYLIGHT"} or set(observance) - {
                 "DTSTART", "TZOFFSETFROM", "TZOFFSETTO", "TZNAME", "RRULE", "RDATE"
             }:
                 return None

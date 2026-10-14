@@ -255,3 +255,12 @@ def test_unknown_timezone_extension_is_preserved_in_comparison():
     observed = Calendar.from_ical(desired)
     observed.walk("VTIMEZONE")[0].add("X-OPAQUE-ZONE", "keep")
     assert semantic_hash(desired) != semantic_hash(observed.to_ical())
+
+
+def test_unknown_timezone_parameter_is_preserved_in_comparison():
+    from family_calendar.providers.caldav.codec import semantic_hash
+
+    desired = weekly()
+    observed = Calendar.from_ical(desired)
+    observed.walk("VTIMEZONE")[0]["TZID"].params["X-OPAQUE"] = "keep"
+    assert semantic_hash(desired) != semantic_hash(observed.to_ical())
