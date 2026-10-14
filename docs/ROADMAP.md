@@ -1,8 +1,14 @@
 # Доставка сервиса
 
+## Текущий MVP v0.2
+
+Реализованы Google/iCloud connections, PostgreSQL, family/agent grants, роли, bindings, обязанности с версиями, agenda/slots, durable workers/leases/locks, MCP/REST и локальный owner CLI. Live CRUD отдельных событий проверен на тестовых календарях Google и iCloud. Исходный iCloud core/future pilot имеет отдельные приватные receipts и визуальные наблюдения.
+
+Это часть этапов 2–6, а не принятие всех gates. Ещё нужны второй независимый Google аккаунт, guardians/assignment rules, Google recurrence parity, incremental cursors, activity-linked проекции/компенсация, отдельные OS identities, deployment и проверенный backup/restore. Обновление источников — bounded polling; unknown не считается свободным временем. [Текущий контракт](SERVICE.md).
+
 ## Этап 1: iCloud pilot
 
-Код локального harness реализован. Live Gate A ожидает подключения Apple Account и server/client проверки. Итог зависит от фактической совместимости; текущие tests используют synthetic fixtures и mock transport.
+Код локального harness реализован; матрица ниже сохраняется как история этапа. Live результаты находятся в приватных отчётах владельца; normal tests используют synthetic fixtures и mock transport.
 
 | Задача | Реализация | Что ещё проверить live |
 |---|---|---|
@@ -23,4 +29,4 @@ Fault injection (timeouts, revocation, conflicts) выполняется на mo
 6. Единый MCP + REST и интерфейс владельца для подключения, прав и разбора conflicts.
 7. Deployment, backup/restore и E2E семейный сценарий Google+iCloud.
 
-Этап 2 требует Gate A core; future включается после своего PASS. Производственная работа агентов с несколькими календарями и автоматические семейные переносы пока не включены.
+Future включается после своего PASS. Несколько календарей уже доступны через локальный MCP в явной области разрешений; автоматические переносы связанных семейных занятий и проекций пока не включены.

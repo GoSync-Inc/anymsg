@@ -25,6 +25,8 @@ def parser():
     add = connection.add_parser("add-icloud", help="Enter Apple Account and app-specific password locally")
     add.add_argument("--id", required=True)
     connection.add_parser("list")
+    service = sub.add_parser("service", help="Multi-account owner CLI, REST/MCP gateway and worker")
+    service.add_argument("arguments", nargs=argparse.REMAINDER)
     pilot = sub.add_parser("pilot").add_subparsers(dest="provider", required=True)
     icloud = pilot.add_parser("icloud").add_subparsers(dest="action", required=True)
     for action in ("discover", "allow-write", "disable-write", "run"):
@@ -157,7 +159,11 @@ def main(argv=None):
     try:
         args = parser().parse_args(argv)
         registry = Registry(args.home)
-        if args.command == "connection":
+        if args.command == "service":
+            from .service.cli import run
+
+            output(run(args.arguments, args.home))
+        elif args.command == "connection":
             if args.action == "list":
                 output({"connections": registry.list_connections()})
             else:

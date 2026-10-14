@@ -203,7 +203,9 @@ def test_equivalent_timezone_history_does_not_make_readback_unknown(zone):
     desired = create_event("zone@family.invalid", start, start + timedelta(hours=1), "Synthetic")
     observed = Calendar.from_ical(desired)
     observed.subcomponents = [c for c in observed.subcomponents if c.name != "VTIMEZONE"]
-    full = Timezone.from_tzinfo(gettz(zone), tzid=zone, first_date=date(1900, 1, 1), last_date=date(2040, 1, 1))
+    full = Timezone.from_tzinfo(
+        gettz(zone), tzid=zone, first_date=date(1900, 1, 1), last_date=date(2040, 1, 1)
+    )
     full.pop("COMMENT", None)
     full.add("X-LIC-LOCATION", zone)
     observed.add_component(full)

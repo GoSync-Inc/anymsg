@@ -1,4 +1,4 @@
-name: Pilot checks
+name: Calendar service checks
 on:
   push:
   pull_request:
@@ -8,6 +8,20 @@ jobs:
   synthetic:
     runs-on: ubuntu-latest
     timeout-minutes: 10
+    services:
+      postgres:
+        image: postgres:18
+        env:
+          POSTGRES_USER: fcs_test
+          POSTGRES_PASSWORD: synthetic_ci_only
+          POSTGRES_DB: fcs_test
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U fcs_test -d fcs_test"
+          --health-interval 5s --health-timeout 5s --health-retries 10
+    env:
+      FCS_TEST_DSN: postgresql://fcs_test:synthetic_ci_only@127.0.0.1:5432/fcs_test
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
         with:
@@ -17,7 +31,7 @@ jobs:
           version: '0.9.26'
           python-version: '3.13'
       - run: uv sync --locked
-      - run: uv run pytest tests/unit tests/contract
+      - run: uv run pytest
       - run: uv run ruff check .
       - run: uv run ruff format --check .
       - run: uv build

@@ -88,8 +88,10 @@ def create_event(uid, start, end, summary, *, rrule=None):
         # dateutil resolves the gap to the new offset and emits RFC onsets.
         cal.add_component(
             Timezone.from_tzinfo(
-                gettz(start.tzinfo.key), tzid=start.tzinfo.key,
-                first_date=date(2020, 1, 1), last_date=date(2035, 1, 1)
+                gettz(start.tzinfo.key),
+                tzid=start.tzinfo.key,
+                first_date=date(2020, 1, 1),
+                last_date=date(2035, 1, 1),
             )
         )
     cal.add_component(event)
@@ -137,9 +139,11 @@ def _timezone_offsets(component):
     transitions = {}
     try:
         for observance in component.subcomponents:
-            if observance.subcomponents or observance.name not in {"STANDARD", "DAYLIGHT"} or set(observance) - {
-                "DTSTART", "TZOFFSETFROM", "TZOFFSETTO", "TZNAME", "RRULE", "RDATE"
-            }:
+            if (
+                observance.subcomponents
+                or observance.name not in {"STANDARD", "DAYLIGHT"}
+                or set(observance) - {"DTSTART", "TZOFFSETFROM", "TZOFFSETTO", "TZNAME", "RRULE", "RDATE"}
+            ):
                 return None
             start = observance.decoded("DTSTART")
             if not isinstance(start, datetime) or start.tzinfo is not None:

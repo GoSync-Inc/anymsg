@@ -1,5 +1,7 @@
 # Pilot contract v1
 
+Для сервиса v0.2 действует [SERVICE.md](docs/SERVICE.md): PostgreSQL, opaque refs, отдельные principals/grants, официальный MCP и REST с общим policy layer. Targets/credentials не входят в агентский API. Pilot harness ниже остаётся отдельным контрактом; его future/series write не включены в MCP.
+
 `family_calendar/contracts.py` фиксирует `EventRef(connection_id, calendar_id, resource_id, occurrence_key)`, `Scope=single|future|series` и `WriteReceipt`. Verified receipt требует evidence hash; для подтверждённого удаления используется `absent`. Журнал хранит более подробное внутреннее представление шага, включая payload и фактический read-back, и не является публичным агентским API.
 
 `providers/base.py` — account-bound Protocol текущего пилота: `discover`, `read`, `read_window`, conditional `put` и `delete`. Adapter создаётся с фиксированным connection ID и отдельным транспортом. Credentials не выбираются через глобальный «текущий аккаунт».
