@@ -344,11 +344,19 @@ class Archive:
                 digest=excluded.digest,bytes=excluded.bytes,active=true''',
                 (job['id'],job['message'],blob.digest,d['filename'],d['mime'],blob.bytes))
             c.execute("UPDATE media_jobs SET state='ready',error_code=NULL,lease_until=NULL WHERE id=%s",(job['id'],))
-            origin=c.execute('''SELECT r.snapshot->>'origin' AS origin FROM messages m
+            source=c.execute('''SELECT m.revision,r.snapshot->>'origin' AS origin FROM messages m
                 JOIN message_revisions r ON r.message=m.id AND r.revision=m.revision WHERE m.id=%s''',
-                (job['message'],)).fetchone()['origin'] or 'reconcile'
-            self.store.append_event(c,job['account'],job['message'],'attachment.ready',origin,
-                                    stable_id('event',job['id'],blob.digest,str(job['lease_epoch'])))
+                (job['message'],)).fetchone()
+            # Original readiness is independent from OCR/model readiness. The
+            # opaque version is salted with its occurrence, never a blob hash.
+            version='original_'+hashlib.sha256(canonical(
+                [job['id'],source['revision'],blob.digest])).hexdigest()
+            self.store.append_event(c,job['account'],job['message'],'attachment.ready',
+                source['origin'] or 'reconcile',
+                stable_id('event',job['id'],blob.digest,str(job['lease_epoch'])),
+                snapshot_metadata={'processing':{'attachment_id':job['id'],'stage':'original',
+                    'state':'ready','artifact_version':version,'basis':'downloaded',
+                    'source_revision':source['revision']}})
             from .storage_admission import StorageAdmission
             StorageAdmission.release(c,job)
 

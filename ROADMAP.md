@@ -24,6 +24,14 @@ verified WhatsApp identity observations, file-text indexing, morphology search,
 bounded downloads, byte-level deduplication and optional enrichment adapters.
 These capabilities do not imply that every source history or file is available.
 
+Version 0.9.16 implements the [durable subscription core](SUBSCRIPTIONS.md):
+explicit chat/channel sets and account-scoped senders, persistent lifecycle,
+restart-safe matching, passive event pages and independent file readiness.
+Next: scoped subscription ACKs, dispatch/batching, reply/mention presets and a
+verified host receiver with notification transport. Push and agent wake-up are
+not available in this slice. Existing history, storage and file-understanding
+work remains below.
+
 Next work, in order:
 
 1. **History recovery:** durable fair scheduling across chats, selectable setup

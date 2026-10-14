@@ -200,7 +200,10 @@ class Store:
             accounts = c.execute('SELECT id,platform,label,synthetic FROM accounts WHERE id=ANY(%s) ORDER BY id',
                                  ([r['id'] for r in dataset['sources']],)).fetchall()
             features={'read':['search','history','context','updates','reviews','search_people','search_files','get_file_text','get_file_occurrences','get_sync_status','get_file_segments','resolve_reference','preview_message'], 'download':['attachment'], 'cursor-write':['ack'], 'send':['send_message','get_send_status']}
-            if 'read' in p['permissions']:features['review-write']=['record_review']
+            if 'read' in p['permissions']:
+                features['review-write']=['record_review']
+                features['read'].extend(['list_subscriptions','get_subscription','get_subscription_events'])
+                features['subscription-write']=['create_subscription','update_subscription']
             available=[feature for permission,names in features.items() if permission in p['permissions'] for feature in names]
             operation_tools=['list_messenger_operations','preview_messenger_operation',
                              'execute_messenger_operation','get_messenger_operation']
@@ -241,6 +244,15 @@ class Store:
                     'chat_coverage':True,'provider_id_lookup':'resolve_reference',
                     'empty_result_diagnostics':True,'message_conflicts':'scoped_active_and_historical'},
                 'available':available,
+                'subscriptions':{'implemented':True,'definitions':True,'passive_events':True,
+                    'source_selection':'frozen_explicit_chats_and_account_scoped_sender_ids',
+                    'event_selection':'structural_exact_revision','origin_default':'live',
+                    'mutation_permission':'subscription-write','read_permission_required':True,
+                    'ownership':'originating_credential_and_principal','new_permission_inherited':False,
+                    'source_scope_change':'masked_access_changed_recreate_required',
+                    'ack':False,'push':False,'verified_host':False,'native_reply_preset':False,
+                    'provider_polling':False,'start_boundary':'committed_archive_frontier',
+                    'existing_update_consumers_unchanged':True},
                 'sending':{'implemented':True,'approval_mode':'acting_agent_obtains_exact_owner_confirmation',
                     'server_approval_gate':False,'text_only':False,'legacy_send_message_text_only':True,
                     'request_id_required':True,
@@ -578,6 +590,34 @@ class Store:
                 exclude_channels=exclude_channels,order=order,reset_filters=reset_filters,
                 expected_ack_version=expected_ack_version)
 
+    def create_subscription(self, token, chat_ids, *, sender_ids=None, kinds=None,
+                            direction='incoming', origins=None, label='', expires_at=None):
+        from .subscriptions import create_subscription
+        with self.authorized(token, 'create_subscription') as (c, p):
+            return create_subscription(self, c, p, chat_ids, sender_ids=sender_ids, kinds=kinds,
+                direction=direction, origins=origins, label=label, expires_at=expires_at)
+
+    def list_subscriptions(self, token, *, limit=50):
+        from .subscriptions import list_subscriptions
+        with self.authorized(token, 'list_subscriptions') as (c, p):
+            return list_subscriptions(self, c, p, limit=limit)
+
+    def get_subscription(self, token, subscription_id):
+        from .subscriptions import get_subscription
+        with self.authorized(token, 'get_subscription') as (c, p):
+            return get_subscription(self, c, p, subscription_id)
+
+    def update_subscription(self, token, subscription_id, version, *, action, resume_policy='catch_up'):
+        from .subscriptions import update_subscription
+        with self.authorized(token, 'update_subscription') as (c, p):
+            return update_subscription(self, c, p, subscription_id, version,
+                action=action, resume_policy=resume_policy)
+
+    def get_subscription_events(self, token, subscription_id, *, after=0, limit=50):
+        from .subscriptions import get_subscription_events
+        with self.authorized(token, 'get_subscription_events') as (c, p):
+            return get_subscription_events(self, c, p, subscription_id, after=after, limit=limit)
+
     def ack_updates(self, token, consumer, receipt, expected_version):
         with self.authorized(token,'ack_updates') as (c, p):
             if not isinstance(expected_version,int) or isinstance(expected_version,bool) or expected_version<0:
@@ -609,8 +649,8 @@ class Store:
             c.execute("SET LOCAL statement_timeout='180s'")
             c.execute(Path(__file__).with_name('schema.sql').read_text())
             version=int(c.execute("SELECT value FROM probe_metadata WHERE name='schema_version'").fetchone()['value'])
-            if version>25: raise RuntimeError('database_newer_than_runtime')
-            for target,name in [(2,'002_archive.sql'),(3,'003_collectors.sql'),(4,'004_whatsapp.sql'),(5,'005_access.sql'),(6,'006_reviews.sql'),(7,'007_search_indexes.sql'),(8,'008_people.sql'),(9,'009_file_index.sql'),(10,'010_search_audit.sql'),(11,'011_telegram_window.sql'),(12,'012_search.sql'),(13,'013_file_search.sql'),(14,'014_collector_health.sql'),(15,'015_enrichment.sql'),(16,'016_file_content.sql'),(17,'017_chat_evidence.sql'),(18,'018_collector_operations.sql'),(19,'019_whatsapp_identities.sql'),(20,'020_processing_admission.sql'),(21,'021_media_storage.sql'),(22,'022_outgoing.sql'),(23,'023_receipts.sql'),(24,'024_formatting.sql'),(25,'025_operations.sql')]:
+            if version>26: raise RuntimeError('database_newer_than_runtime')
+            for target,name in [(2,'002_archive.sql'),(3,'003_collectors.sql'),(4,'004_whatsapp.sql'),(5,'005_access.sql'),(6,'006_reviews.sql'),(7,'007_search_indexes.sql'),(8,'008_people.sql'),(9,'009_file_index.sql'),(10,'010_search_audit.sql'),(11,'011_telegram_window.sql'),(12,'012_search.sql'),(13,'013_file_search.sql'),(14,'014_collector_health.sql'),(15,'015_enrichment.sql'),(16,'016_file_content.sql'),(17,'017_chat_evidence.sql'),(18,'018_collector_operations.sql'),(19,'019_whatsapp_identities.sql'),(20,'020_processing_admission.sql'),(21,'021_media_storage.sql'),(22,'022_outgoing.sql'),(23,'023_receipts.sql'),(24,'024_formatting.sql'),(25,'025_operations.sql'),(26,'026_subscriptions.sql')]:
                 migration=Path(__file__).with_name('migrations')/name
                 sha=hashlib.sha256(migration.read_bytes()).hexdigest()
                 if version<target:
@@ -721,11 +761,17 @@ class Store:
                 ORDER BY occurred_at DESC,id DESC LIMIT %s''',(principal,principal,limit)).fetchall())
 
     @staticmethod
-    def append_event(c, account, message, kind='message.created', origin='fixture', event_key=None):
+    def append_event(c, account, message, kind='message.created', origin='fixture', event_key=None,
+                     snapshot_metadata=None):
         from psycopg.types.json import Jsonb
-        row=c.execute('''SELECT id AS message,account,chat,body,revision,sent_at,deleted,direction
+        row=c.execute('''SELECT id AS message,account,chat,sender,provider_id,body,revision,sent_at,deleted,direction
             FROM messages WHERE id=%s AND account=%s''',(message,account)).fetchone()
         if not row: raise ValueError('invalid_event_message')
+        if snapshot_metadata is not None:
+            if (not isinstance(snapshot_metadata,dict) or set(snapshot_metadata)-{'processing'} or
+                    len(json.dumps(snapshot_metadata,ensure_ascii=False).encode())>16384):
+                raise ValueError('invalid_event_metadata')
+            row.update(snapshot_metadata)
         from .result_evidence import formatting_evidence
         formatting_evidence(c,[row])
         value = c.execute('UPDATE feed_counter SET value=value+1 WHERE id=1 RETURNING value').fetchone()['value']

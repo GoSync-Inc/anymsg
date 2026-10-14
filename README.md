@@ -6,7 +6,7 @@ Collect messages and attachments once, then let agents search and read them thro
 MCP or HTTP with separate credentials and account/chat permissions. Original files
 use SHA-256 deduplication; references to every source message stay separate.
 
-Development version: **0.9.15 — experimental**, PostgreSQL schema 25.
+Development version: **0.9.16 — experimental**, PostgreSQL schema 26.
 
 The expanded live-operation catalog covers messages, registered attachments,
 reactions, groups, contacts and profile fields. Access requires explicit per-key
@@ -25,6 +25,9 @@ require the development source until the next package release.
 - Scoped agent keys, independent acknowledgements, immutable review records and revision evidence.
 - Durable collection queues, storage admission, processing budgets and a shared heavy-job lock.
 - Encrypted streaming backup with integrity checks and quarantine restore tools.
+- Persistent subscriptions to explicit chats and people, with passive event inspection
+  and separate original/text/transcript/description readiness events.
+  See [SUBSCRIPTIONS.md](SUBSCRIPTIONS.md); host push and event ACK are the next block.
 
 Text sending through existing collectors is available with separate `send` rights
 and explicit account opt-in. The acting agent obtains exact owner confirmation;

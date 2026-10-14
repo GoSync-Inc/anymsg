@@ -13,3 +13,7 @@ GRANT SELECT,INSERT,UPDATE ON processing_profiles TO messaging_enricher;
 
 GRANT SELECT,INSERT,UPDATE ON processing_resource_leases TO messaging_enricher;
 GRANT SELECT,INSERT,UPDATE ON processing_budget,processing_control TO messaging_enricher;
+-- Occurrence-scoped readiness publication; no subscription or key access.
+GRANT SELECT ON message_metadata,message_revisions,events TO messaging_enricher;
+GRANT SELECT,UPDATE(value) ON feed_counter TO messaging_enricher;
+GRANT INSERT ON events TO messaging_enricher;

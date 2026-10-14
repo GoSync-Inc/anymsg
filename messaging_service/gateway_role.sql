@@ -35,3 +35,8 @@ GRANT SELECT ON messenger_commands TO messaging_gateway;
 GRANT INSERT(principal,key_id,scope_version,key_permission_version,request_id,request_hash,
     account,chat,message,expected_revision,operation,permission,mutation,payload,preview_digest)
     ON messenger_commands TO messaging_gateway;
+-- Definitions are credential-bound in the shared application authorization.
+-- Matching is a separate least-privilege worker, never a gateway write path.
+GRANT SELECT,INSERT,UPDATE ON subscriptions TO messaging_gateway;
+GRANT SELECT,INSERT ON subscription_sources TO messaging_gateway;
+GRANT SELECT ON subscription_matches TO messaging_gateway;

@@ -103,6 +103,14 @@ Native OCR, transcription, Chromium sandboxing, quotas and encrypted backups nee
 their own host acceptance checks. A health response is not proof of complete source
 history or a restorable backup. The adapter docs describe the remaining checks.
 
+## Optional durable subscription worker
+
+Version 0.9.16 adds an opt-in matcher with a separate DB role and five scoped
+API/MCP tools. It does not start on installation or inherit permissions from
+existing keys. See [SUBSCRIPTIONS.md](SUBSCRIPTIONS.md) for schema/grants, the
+Compose overlay, bounds and the distinction between passive event pages and
+future push/ACK delivery.
+
 ## TLS and remote MCP
 
 Use `deploy/Caddyfile.example` as a template with your domain and an API upstream

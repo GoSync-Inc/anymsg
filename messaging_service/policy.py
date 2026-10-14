@@ -7,7 +7,8 @@ LEGACY_PERMISSIONS = frozenset((*DEFAULT_PERMISSIONS, 'review-write', 'send'))
 MESSENGER_PERMISSIONS = frozenset(('read-live', 'contacts-read', 'profile-read', 'groups-read',
     'message-edit', 'message-delete', 'message-react', 'message-pin', 'read-state',
     'chat-manage', 'contacts-manage', 'groups-manage', 'profile-manage'))
-PERMISSIONS = LEGACY_PERMISSIONS | MESSENGER_PERMISSIONS
+SUBSCRIPTION_PERMISSIONS = frozenset(('subscription-write',))
+PERMISSIONS = LEGACY_PERMISSIONS | MESSENGER_PERMISSIONS | SUBSCRIPTION_PERMISSIONS
 
 
 def effective_permissions(principal_permissions, key_permissions):
@@ -27,6 +28,9 @@ OPERATION_PERMISSIONS = {
     'preview_message':'read','send_message':'send','get_send_status':'send',
     'list_messenger_operations':None, 'preview_messenger_operation':None,
     'execute_messenger_operation':None, 'get_messenger_operation':None,
+    'create_subscription':'subscription-write', 'list_subscriptions':'read',
+    'get_subscription':'read', 'update_subscription':'subscription-write',
+    'get_subscription_events':'read',
 }
 AUDIT_OPERATIONS = frozenset(OPERATION_PERMISSIONS) | {
     'issue_key', 'revoke_key', 'set_access', 'http_boundary', 'send_dispatch', 'set_sending',
@@ -48,6 +52,8 @@ AUDIT_CODES = frozenset({
     'lossy_formatting_requires_confirmation','message_too_long','preview_required','preview_mismatch',
     'unsupported_operation','invalid_operation_parameters','operation_disabled','operation_expired',
     'operation_access_changed','operation_result_unknown','operation_target_changed','operation_rejected',
+    'invalid_subscription','subscription_limit','subscription_conflict','subscription_closed',
+    'subscription_access_changed','invalid_subscription_state',
 })
 UNSET = object()
 

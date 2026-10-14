@@ -26,5 +26,11 @@ def payload(error,operation='',request_id=None):
     elif code in ('not_found','forbidden'):
         info['next_action']='check_reference_and_permitted_scope'
     elif code=='cursor_changed':info['next_action']='restart_query_without_cursor'
+    elif code=='subscription_conflict':
+        info['next_action']='get_subscription_then_retry_with_current_version'
+    elif code in ('subscription_access_changed','subscription_closed'):
+        info['next_action']='create_new_subscription_after_checking_scope'
+    elif code=='subscription_limit':
+        info['next_action']='ask_operator_to_review_subscription_budget'
     else:info['next_action']='retry_after_delay' if retry else 'check_parameters'
     return info

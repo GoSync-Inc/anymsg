@@ -64,6 +64,13 @@ def get_updates(store,c,p,consumer,limit=20,*,accounts=None,chats=None,senders=N
     for key,column in [('accounts','m.account'),('chats','m.chat'),('senders','m.sender'),
                        ('origins','e.origin'),('kinds','e.kind')]:
         if key in filters:clauses.append(column+'=ANY(%s)');args.append(filters[key])
+    # An unspecified legacy selection remains the same five event kinds after
+    # the journal gains processing events. Keep the persisted filter binding
+    # unchanged so existing consumers and outstanding ACKs remain valid.
+    if 'kinds' not in filters:
+        clauses.append('e.kind=ANY(%s)')
+        args.append(['message.created','message.edited','message.deleted',
+                     'message.status','attachment.ready'])
     if direction:clauses.append('m.direction=%s');args.append(direction)
     if exclude_channels:
         clauses.append("EXISTS(SELECT 1 FROM chats ch WHERE ch.id=m.chat AND ch.account=m.account AND ch.chat_type IS DISTINCT FROM 'channel')")

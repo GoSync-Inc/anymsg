@@ -114,7 +114,7 @@ def test_operation_default_payload_and_required_action_id():
         'expected_revision': 0, 'parameters': {}})]
 
 
-def test_operation_manifest_has_24_actual_tools_and_truthful_annotations():
+def test_operation_manifest_has_29_actual_tools_and_truthful_annotations():
     store = RecordingStore()
     with TestClient(create_app(store, ['testserver'])) as client:
         response = client.post('/mcp', headers={'Authorization': 'Bearer synthetic-token',
@@ -125,7 +125,7 @@ def test_operation_manifest_has_24_actual_tools_and_truthful_annotations():
             'method': 'initialize', 'params': {'protocolVersion': '2025-11-25',
             'capabilities': {}, 'clientInfo': {'name': 'synthetic', 'version': '1'}}})
     tools = {row['name']: row for row in response.json()['result']['tools']}
-    assert len(tools) == 24 and set(METHODS) <= set(tools)
+    assert len(tools) == 29 and set(METHODS) <= set(tools)
     for method in METHODS:
         assert tools[method]['inputSchema']['additionalProperties'] is False
         annotations = tools[method]['annotations']
