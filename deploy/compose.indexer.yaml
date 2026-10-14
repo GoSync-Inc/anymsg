@@ -1,0 +1,31 @@
+services:
+  indexer:
+    image: anymsg-indexer:${MESSAGING_VERSION:-0.9.8}
+    init: true
+    restart: unless-stopped
+    depends_on:
+      db: {condition: service_healthy}
+    environment:
+      DATABASE_URL_FILE: /run/secrets/database_url
+      PROBE_FILES: /data/files
+      PROCESSING_LOCK_DIR: /processing-locks
+    volumes:
+      - ./private/indexer.dsn:/run/secrets/database_url:ro
+      - files:/data:ro
+      - type: bind
+        source: ./private/processing-locks
+        target: /processing-locks
+        bind: {create_host_path: false}
+    networks: [backend]
+    read_only: true
+    user: "10001:10001"
+    cap_drop: [ALL]
+    security_opt: [no-new-privileges:true]
+    tmpfs: ["/tmp:size=128m,noexec,nosuid"]
+    mem_limit: ${PROBE_INDEXER_MEMORY:-1g}
+    cpu_shares: ${PROBE_INDEXER_CPU_SHARES:-512}
+    pids_limit: 48
+    stop_grace_period: 60s
+    logging:
+      driver: json-file
+      options: {max-size: 5m, max-file: "2"}

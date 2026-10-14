@@ -1,0 +1,11 @@
+# Compose >=2.24.4. Pair only from an owner TTY, as a one-off --rm container.
+# Disable the Docker log driver too: QR contents must not persist in daemon logs.
+services:
+  whatsapp1:
+    logging: !override {driver: none}
+    restart: "no"
+    command: [python, -m, messaging_service.whatsapp_pair, --config, /run/secrets/whatsapp_config]
+  whatsapp2:
+    logging: !override {driver: none}
+    restart: "no"
+    command: [python, -m, messaging_service.whatsapp_pair, --config, /run/secrets/whatsapp_config]

@@ -1,0 +1,99 @@
+name: Build and test
+on:
+  workflow_call:
+    inputs:
+      version:
+        type: string
+        default: ''
+permissions:
+  contents: read
+jobs:
+  verify:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    services:
+      postgres:
+        image: postgres:18-bookworm@sha256:afc7e2d441324c0388fa80c3d24f733b4194a4eb7f47dd8ee2b08eb1a24a647c
+        env:
+          POSTGRES_USER: probe_owner
+          POSTGRES_PASSWORD: synthetic-ci-password
+          POSTGRES_DB: messaging_probe_test
+        ports: ['5432:5432']
+        options: --health-cmd "pg_isready -U probe_owner -d messaging_probe_test" --health-interval 5s --health-timeout 3s --health-retries 12
+    steps:
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
+        with: {persist-credentials: false}
+      - uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1 # v6
+        with: {python-version: '3.13'}
+      - uses: actions/setup-node@249970729cb0ef3589644e2896645e5dc5ba9c38 # v6
+        with: {node-version: '24'}
+      - uses: astral-sh/setup-uv@94527f2e458b27549849d47d273a16bec83a01e9 # v7
+        with: {version: '0.9.26'}
+      - name: Native extraction tools
+        run: sudo apt-get update && sudo apt-get install -y poppler-utils tesseract-ocr tesseract-ocr-eng tesseract-ocr-rus ffmpeg
+      - name: Install pinned dependencies
+        run: uv sync --frozen --group dev
+      - name: Build packages
+        run: |
+          uv build
+          mkdir -p dist
+          cd packages/npm
+          npm pack --pack-destination ../../dist --ignore-scripts
+      - name: Validate release inventory and metadata
+        env:
+          EXPECTED_VERSION: ${{ inputs.version }}
+        run: |
+          if [ -n "$EXPECTED_VERSION" ]; then
+            uv run python scripts/check_release.py "$EXPECTED_VERSION"
+          else
+            uv run python scripts/check_release.py
+          fi
+          uvx --from twine twine check dist/*.whl dist/*.tar.gz
+      - name: Python/PostgreSQL tests
+        env:
+          PROBE_TEST_DSN_FILE: ${{ runner.temp }}/anymsg-test.dsn
+          ANYMSG_TEST_WHEEL: ${{ github.workspace }}/dist/anymsg-0.9.8-py3-none-any.whl
+          ANYMSG_TEST_SDIST: ${{ github.workspace }}/dist/anymsg-0.9.8.tar.gz
+        run: |
+          python - <<'PY'
+          import os
+          from pathlib import Path
+          p=Path(os.environ['PROBE_TEST_DSN_FILE'])
+          p.write_text('postgresql://probe_owner:synthetic-ci-password@127.0.0.1:5432/messaging_probe_test')
+          p.chmod(0o600)
+          PY
+          uv run pytest --tb=short tests
+      - name: Node collector and HTTP client tests
+        run: |
+          node --test whatsapp/tests/*.test.mjs
+          npm test --prefix packages/npm
+      - name: Real synthetic MCP and HTTP with restricted gateway role
+        run: uv run python scripts/smoke.py --dsn-file "$RUNNER_TEMP/anymsg-test.dsn"
+      - name: Installed distributions outside checkout
+        run: |
+          uv venv "$RUNNER_TEMP/anymsg-wheel-env" --python 3.13
+          uv pip install --python "$RUNNER_TEMP/anymsg-wheel-env/bin/python" dist/*.whl
+          cd "$RUNNER_TEMP"
+          anymsg_py="$RUNNER_TEMP/anymsg-wheel-env/bin/python"
+          "$anymsg_py" -m anymsg --version
+          "$RUNNER_TEMP/anymsg-wheel-env/bin/anymsg" --help
+          "$anymsg_py" -m anymsg whatsapp-assets --directory "$RUNNER_TEMP/anymsg-node-assets"
+          mkdir anymsg-npm-install
+          cd anymsg-npm-install
+          npm install --ignore-scripts --no-audit --no-fund "$GITHUB_WORKSPACE/dist/anymsg-0.9.8.tgz"
+          ./node_modules/.bin/anymsg --version
+          node --input-type=module -e "import {AnyMsgClient} from 'anymsg'; if(typeof AnyMsgClient !== 'function')process.exit(1)"
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: python-dist
+          path: |
+            dist/*.whl
+            dist/*.tar.gz
+          if-no-files-found: error
+          retention-days: 7
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: npm-dist
+          path: dist/*.tgz
+          if-no-files-found: error
+          retention-days: 7

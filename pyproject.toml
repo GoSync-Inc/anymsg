@@ -1,0 +1,82 @@
+[build-system]
+requires = ["hatchling>=1.27,<2"]
+build-backend = "hatchling.build"
+
+[project]
+name = "anymsg"
+version = "0.9.8"
+description = "A self-hosted messaging archive and MCP interface for agents"
+readme = "README.md"
+requires-python = ">=3.13,<3.14"
+license = "MIT"
+license-files = ["LICENSE"]
+authors = [{name = "GoSync"}]
+keywords = ["mcp", "telegram", "whatsapp", "messaging", "archive"]
+classifiers = [
+  "Development Status :: 4 - Beta",
+  "Programming Language :: Python :: 3.13",
+  "Operating System :: POSIX",
+  "Topic :: Communications :: Chat",
+]
+dependencies = [
+  "mcp==2.3.0",
+  "psycopg[binary,pool]==3.3.6",
+  "uvicorn==0.54.0",
+  "starlette==1.7.0",
+  "httpx==0.28.1",
+  "telethon==1.45.0",
+]
+
+[project.urls]
+Homepage = "https://github.com/GoSync-Inc/anymsg"
+Repository = "https://github.com/GoSync-Inc/anymsg"
+Issues = "https://github.com/GoSync-Inc/anymsg/issues"
+
+[project.scripts]
+anymsg = "anymsg.cli:main"
+
+[dependency-groups]
+dev = ["pytest==9.1.1"]
+
+[tool.hatch.build.targets.wheel]
+packages = ["anymsg", "messaging_service"]
+exclude = [
+  "**/node_modules/**", "**/__pycache__/**", "**/*.pyc", "**/.venv/**",
+  "**/.local/**", "**/private/**", "**/sessions/**", "**/outputs/**",
+  "**/*.dsn", "**/*.token", "**/auth.json", "**/credentials*.json", "**/*.session", "**/.env",
+]
+
+[tool.hatch.build.targets.wheel.force-include]
+"whatsapp/bounds.mjs" = "messaging_service/whatsapp_assets/bounds.mjs"
+"whatsapp/capture.mjs" = "messaging_service/whatsapp_assets/capture.mjs"
+"whatsapp/history.mjs" = "messaging_service/whatsapp_assets/history.mjs"
+"whatsapp/identity.mjs" = "messaging_service/whatsapp_assets/identity.mjs"
+"whatsapp/media.mjs" = "messaging_service/whatsapp_assets/media.mjs"
+"whatsapp/navigation.mjs" = "messaging_service/whatsapp_assets/navigation.mjs"
+"whatsapp/pair.mjs" = "messaging_service/whatsapp_assets/pair.mjs"
+"whatsapp/pairing.mjs" = "messaging_service/whatsapp_assets/pairing.mjs"
+"whatsapp/provider.mjs" = "messaging_service/whatsapp_assets/provider.mjs"
+"whatsapp/sender.mjs" = "messaging_service/whatsapp_assets/sender.mjs"
+"whatsapp/transport-state.mjs" = "messaging_service/whatsapp_assets/transport-state.mjs"
+"whatsapp/package.json" = "messaging_service/whatsapp_assets/package.json"
+"whatsapp/package-lock.json" = "messaging_service/whatsapp_assets/package-lock.json"
+
+[tool.hatch.build.targets.sdist]
+include = [
+  "/anymsg", "/messaging_service", "/whatsapp", "/tests", "/deploy",
+  "/pyproject.toml", "/README.md", "/LICENSE", "/*.md", "/Dockerfile",
+  "/licenses", "/media_benchmark.py", "/client_check.py", "/.dockerignore",
+  "/uv.lock", "/scripts", "/requirements*.lock", "/requirements*.in", "/enrichment.*.example.json",
+]
+exclude = [
+  "**/node_modules/**", "**/__pycache__/**", "**/*.pyc", "**/.venv/**",
+  "**/.local/**", "**/private/**", "**/sessions/**", "**/outputs/**",
+  "**/*.dsn", "**/*.token", "**/auth.json", "**/credentials*.json", "**/*.session", "**/.env",
+]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+addopts = "-q -p no:cacheprovider"
+
+[tool.uv]
+package = true

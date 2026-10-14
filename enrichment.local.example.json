@@ -1,0 +1,39 @@
+{
+  "enabled": false,
+  "accounts": [
+    "replace-with-account-id"
+  ],
+  "max_jobs_per_day": 20,
+  "profiles": {
+    "audio": {
+      "provider": "faster_whisper",
+      "model": "/models/whisper",
+      "max_audio_seconds": 1800,
+      "timeout_seconds": 600,
+      "memory_limit_mb": 3072
+    },
+    "image": {
+      "provider": "ollama",
+      "model": "replace-with-installed-vision-model",
+      "base_url": "http://127.0.0.1:11434",
+      "local_only_daemon": true,
+      "max_output_tokens": 2000
+    },
+    "document": {
+      "provider": "ollama",
+      "model": "replace-with-installed-text-model",
+      "base_url": "http://127.0.0.1:11434",
+      "local_only_daemon": true,
+      "max_text_chars": 40000,
+      "max_output_tokens": 2000
+    }
+  },
+  "profile_max_jobs_per_day": {
+    "audio": 12,
+    "image": 4,
+    "document": 4
+  },
+  "account_max_jobs_per_day": {
+    "replace-with-account-id": 20
+  }
+}

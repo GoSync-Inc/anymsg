@@ -1,0 +1,51 @@
+# Merge with compose.yaml. All account credentials and volumes are distinct.
+# Browser sandbox smoke must pass on this host before enabling the profile.
+x-whatsapp: &whatsapp
+  image: anymsg-whatsapp:${MESSAGING_VERSION:-0.9.8}
+  labels: {org.anymsg.collector: "true"}
+  profiles: [whatsapp]
+  init: true
+  restart: unless-stopped
+  depends_on:
+    db: {condition: service_healthy}
+  environment:
+    DATABASE_URL_FILE: /run/secrets/database_url
+    PROBE_FILES: /data/files
+  networks: [backend, collector_egress]
+  read_only: true
+  user: "10001:10001"
+  cap_drop: [ALL]
+  security_opt: [no-new-privileges:true, seccomp=./chromium-seccomp.json]
+  tmpfs: ["/tmp:size=256m,noexec,nosuid"]
+  shm_size: 128m
+  mem_limit: ${PROBE_WHATSAPP_MEMORY:-2560m}
+  cpu_shares: ${PROBE_WHATSAPP_CPU_SHARES:-1024}
+  pids_limit: 256
+  stop_grace_period: 25s
+  logging:
+    driver: json-file
+    options: {max-size: 5m, max-file: "2"}
+services:
+  whatsapp1:
+    <<: *whatsapp
+    volumes:
+      - ./private/collector.dsn:/run/secrets/database_url:ro
+      - ./private/whatsapp1.json:/run/secrets/whatsapp_config:ro
+      - ./private/whatsapp1.permit.json:/run/secrets/whatsapp_permit:ro
+      - ./private/whatsapp1-session:/sessions
+      - whatsapp1_spool:/spool
+      - files:/data
+  whatsapp2:
+    <<: *whatsapp
+    volumes:
+      - ./private/collector.dsn:/run/secrets/database_url:ro
+      - ./private/whatsapp2.json:/run/secrets/whatsapp_config:ro
+      - ./private/whatsapp2.permit.json:/run/secrets/whatsapp_permit:ro
+      - ./private/whatsapp2-session:/sessions
+      - whatsapp2_spool:/spool
+      - files:/data
+volumes:
+  whatsapp1_spool: {}
+  whatsapp2_spool: {}
+networks:
+  collector_egress: {}

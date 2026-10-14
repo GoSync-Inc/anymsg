@@ -1,0 +1,30 @@
+{
+  "enabled": false,
+  "accounts": ["replace-with-account-id"],
+  "max_jobs_per_day": 10,
+  "profiles": {
+    "document": {
+      "provider": "codex_cli",
+      "model": "replace-with-your-selected-codex-model",
+      "allow_cloud": true,
+      "isolated_runtime": true,
+      "codex_binary": "/usr/local/bin/codex",
+      "codex_home": "/run/private/codex",
+      "max_text_chars": 40000,
+      "max_input_bytes": 20971520,
+      "timeout_seconds": 300,
+      "memory_limit_mb": 2048
+    },
+    "image": {
+      "provider": "codex_cli",
+      "model": "replace-with-your-selected-codex-model",
+      "allow_cloud": true,
+      "isolated_runtime": true,
+      "codex_binary": "/usr/local/bin/codex",
+      "codex_home": "/run/private/codex",
+      "max_input_bytes": 10485760,
+      "timeout_seconds": 300,
+      "memory_limit_mb": 2048
+    }
+  }
+}

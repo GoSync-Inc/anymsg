@@ -1,0 +1,38 @@
+# Merge with compose.yaml. Explicit profile + private enabled/permit gates required.
+services:
+  telegram:
+    image: anymsg-api:${MESSAGING_VERSION:-0.9.8}
+    labels: {org.anymsg.collector: "true"}
+    profiles: [collectors]
+    command: [python, -m, messaging_service.telegram_collector, --config, /run/secrets/telegram_config]
+    init: true
+    restart: unless-stopped
+    depends_on:
+      db: {condition: service_healthy}
+    environment:
+      DATABASE_URL_FILE: /run/secrets/database_url
+      PROBE_FILES: /data/files
+    volumes:
+      - ./private/collector.dsn:/run/secrets/database_url:ro
+      - ./private/telegram.json:/run/secrets/telegram_config:ro
+      - ./private/telegram.credentials.json:/run/secrets/telegram_credentials:ro
+      - ./private/telegram.permit.json:/run/secrets/telegram_permit:ro
+      - ./private/telegram-session:/sessions
+      - collector_spool:/spool
+      - files:/data
+    networks: [backend, collector_egress]
+    read_only: true
+    user: "10001:10001"
+    cap_drop: [ALL]
+    security_opt: [no-new-privileges:true]
+    tmpfs: ["/tmp:size=32m,noexec,nosuid"]
+    mem_limit: ${PROBE_TELEGRAM_MEMORY:-768m}
+    cpu_shares: ${PROBE_TELEGRAM_CPU_SHARES:-512}
+    pids_limit: 64
+    logging:
+      driver: json-file
+      options: {max-size: 5m, max-file: "2"}
+volumes:
+  collector_spool: {}
+networks:
+  collector_egress: {}

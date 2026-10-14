@@ -1,0 +1,17 @@
+{
+    # Applies to runtime/error logs as well as any future access logs. Temporary
+    # download URLs are credentials: deleting only Authorization is insufficient.
+    log default {
+        format filter {
+            wrap json
+            fields {
+                request delete
+                resp_headers delete
+            }
+        }
+    }
+}
+
+messaging.example.invalid {
+    reverse_proxy api:8080
+}

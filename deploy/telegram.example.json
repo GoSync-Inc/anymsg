@@ -1,0 +1,13 @@
+{
+  "enabled": false,
+  "account": "telegram-primary",
+  "credentials_file": "/run/secrets/telegram_credentials",
+  "session_file": "/sessions/telegram.session",
+  "permit_file": "/run/secrets/telegram_permit",
+  "spool_directory": "/spool/telegram",
+  "batch_size": 100,
+  "scan_interval_seconds": 60,
+  "max_media_bytes": 536870912,
+  "disk_reserve_bytes": 1073741824,
+  "max_dialogs": 2000
+}

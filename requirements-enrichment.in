@@ -1,0 +1,9 @@
+# Optional CPU-only speech inference. No CUDA packages or model weights.
+# Upstream: https://pypi.org/project/faster-whisper/1.2.1/
+# Compile against requirements.lock so the optional layer cannot upgrade the gateway dependencies.
+faster-whisper==1.2.1
+# faster-whisper 1.2.1 calls av.open(metadata_errors=...), removed in PyAV 19.
+# Keep the latest compatible 18.x release; test_audio_native exercises actual
+# faster_whisper.audio.decode_audio on WAV/Opus without model weights.
+# https://pyav.basswood.io/docs/stable/development/changelog.html#v19-0-0
+av==18.1.0

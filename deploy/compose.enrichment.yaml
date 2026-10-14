@@ -1,0 +1,88 @@
+# Explicit opt-in overlay; ordinary `compose up` does not start either worker.
+# Build targets: enricher (native audio + configured API) and enricher-local
+# (also CPU faster-whisper). No model weights are downloaded by either image.
+# Use exactly the intended profile and a private enabled/account-scoped config.
+# Each DSN must use messaging_enricher, never the gateway or migration role.
+x-enrichment-common: &enrichment-common
+  init: true
+  restart: unless-stopped
+  depends_on:
+    db: {condition: service_healthy}
+  environment:
+    DATABASE_URL_FILE: /run/secrets/database_url
+    PROBE_FILES: /data/files
+    PROCESSING_LOCK_DIR: /processing-locks
+  read_only: true
+  user: "10001:10001"
+  cap_drop: [ALL]
+  security_opt: [no-new-privileges:true]
+  tmpfs: ["/tmp:size=128m,noexec,nosuid"]
+  mem_limit: 3g
+  cpus: 2
+  pids_limit: 96
+  # A job may use the configured maximum 600s plus bounded child teardown.
+  stop_grace_period: 630s
+  logging:
+    driver: json-file
+    options: {max-size: 5m, max-file: "2"}
+services:
+  enricher:
+    <<: *enrichment-common
+    profiles: [enrichment-cloud]
+    image: anymsg-enricher:${MESSAGING_VERSION:-0.9.8}
+    build:
+      context: ..
+      target: enricher
+    # Egress is available only in this explicitly selected cloud profile.
+    # Profile configuration must separately opt in with allow_cloud:true.
+    networks: [backend, frontend]
+    volumes:
+      - type: bind
+        source: ./private/enrichment.dsn
+        target: /run/secrets/database_url
+        read_only: true
+        bind: {create_host_path: false}
+      - type: bind
+        source: ./private/enrichment.json
+        target: /run/secrets/enrichment_config
+        read_only: true
+        bind: {create_host_path: false}
+      - type: bind
+        source: ./private/enrichment.keys
+        target: /run/secrets/enrichment-keys
+        read_only: true
+        bind: {create_host_path: false}
+      - files:/data:ro
+      - type: bind
+        source: ./private/processing-locks
+        target: /processing-locks
+        bind: {create_host_path: false}
+  enricher-local:
+    <<: *enrichment-common
+    profiles: [enrichment-local]
+    image: anymsg-enricher-local:${MESSAGING_VERSION:-0.9.8}
+    build:
+      context: ..
+      target: enricher-local
+    networks: [backend]
+    volumes:
+      - type: bind
+        source: ./private/enrichment-local.dsn
+        target: /run/secrets/database_url
+        read_only: true
+        bind: {create_host_path: false}
+      - type: bind
+        source: ./private/enrichment-local.json
+        target: /run/secrets/enrichment_config
+        read_only: true
+        bind: {create_host_path: false}
+      - type: bind
+        source: ./private/enrichment-models
+        target: /models
+        read_only: true
+        bind: {create_host_path: false}
+      - files:/data:ro
+      - type: bind
+        source: ./private/processing-locks
+        target: /processing-locks
+        bind: {create_host_path: false}

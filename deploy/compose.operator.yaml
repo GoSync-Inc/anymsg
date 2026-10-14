@@ -1,0 +1,26 @@
+# Local operator only. No port, no automatic startup. Never expose as an API tool.
+services:
+  operator:
+    image: anymsg-api:${MESSAGING_VERSION:-0.9.8}
+    profiles: [operator]
+    entrypoint: [python, -m, messaging_service]
+    command: [--help]
+    depends_on:
+      db: {condition: service_healthy}
+    environment:
+      DATABASE_URL_FILE: /run/secrets/database_url
+      PROBE_FILES: /data/files
+      PROBE_PUBLIC_URL: ${PROBE_PUBLIC_URL:?Set the base URL}
+    volumes:
+      - ./private/owner.dsn:/run/secrets/database_url:ro
+      - ./private/issued-keys:/operator-private
+      - files:/data
+    networks: [backend]
+    read_only: true
+    user: "10001:10001"
+    cap_drop: [ALL]
+    security_opt: [no-new-privileges:true]
+    tmpfs: ["/tmp:size=32m,noexec,nosuid"]
+    pids_limit: 96
+    mem_limit: 768m
+    logging: {driver: none}

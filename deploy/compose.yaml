@@ -1,0 +1,63 @@
+name: anymsg
+services:
+  db:
+    image: ${POSTGRES_IMAGE:-postgres:18-bookworm@sha256:afc7e2d441324c0388fa80c3d24f733b4194a4eb7f47dd8ee2b08eb1a24a647c}
+    env_file: ./private/postgres.env
+    restart: unless-stopped
+    volumes:
+      - database:/var/lib/postgresql
+    networks: [backend]
+    healthcheck:
+      test: [CMD-SHELL, "pg_isready -U probe_owner -d messaging_probe"]
+      interval: 5s
+      timeout: 3s
+      retries: 12
+    mem_limit: ${PROBE_DB_MEMORY:-2g}
+    cpu_shares: ${PROBE_DB_CPU_SHARES:-2048}
+    logging:
+      driver: json-file
+      options: {max-size: 5m, max-file: "2"}
+  api:
+    image: anymsg-api:${MESSAGING_VERSION:-0.9.8}
+    build:
+      context: ..
+      target: runtime
+      args:
+        PYTHON_IMAGE: ${PYTHON_IMAGE:-python:3.13-slim-bookworm@sha256:a1165e272e578941b84abc79e4ab38a0305cd12803a5c4247979ac7655f4d641}
+    restart: unless-stopped
+    depends_on:
+      db: {condition: service_healthy}
+    environment:
+      DATABASE_URL_FILE: /run/secrets/database_url
+      PROBE_PUBLIC_URL: ${PROBE_PUBLIC_URL:?Set the HTTPS base URL}
+      PROBE_ALLOWED_HOSTS: ${PROBE_ALLOWED_HOSTS:?Set exact allowed Host values}
+      PROBE_FILES: /data/files
+      PROBE_BIND: 0.0.0.0
+      PROBE_PORT: "8080"
+    volumes:
+      - ./private/app.dsn:/run/secrets/database_url:ro
+      - files:/data:ro
+    ports:
+      - "127.0.0.1:18940:8080"
+    networks:
+      backend: {}
+      frontend:
+        aliases: [anymsg-api]
+    read_only: true
+    user: "10001:10001"
+    cap_drop: [ALL]
+    security_opt: [no-new-privileges:true]
+    tmpfs: ["/tmp:size=32m,noexec,nosuid"]
+    mem_limit: ${PROBE_API_MEMORY:-768m}
+    cpu_shares: ${PROBE_API_CPU_SHARES:-2048}
+    pids_limit: 96
+    logging:
+      driver: json-file
+      options: {max-size: 5m, max-file: "2"}
+volumes:
+  database: {}
+  files: {}
+networks:
+  backend:
+    internal: true
+  frontend: {}

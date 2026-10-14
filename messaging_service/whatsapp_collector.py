@@ -1,0 +1,379 @@
+"""WhatsApp supervisor: fenced DB ownership + durable Node events + bounded private IPC."""
+import asyncio
+import base64
+from contextlib import suppress
+import json
+import os
+from pathlib import Path
+import re
+import secrets
+import signal
+import stat
+import time
+
+from psycopg.types.json import Jsonb
+
+from .archive import Archive
+from .blobs import BlobWriter
+from .collector_state import CaptureSpool,CollectorState,session_lock,validate_capture
+from .store import Store
+from .telegram_collector import TelegramCollector,ProviderUnavailable,private_json
+from .operational import CONNECTION_ERRORS,MEDIA_ERRORS
+from .storage_admission import MEDIA_RESERVE_BYTES
+
+
+class ProviderOperationError(RuntimeError): pass
+
+
+def clear_browser_runtime_locks(session):
+    """Only call while holding this account's session_lock, before Node starts."""
+    try:fd=os.open(Path(session)/'session',os.O_RDONLY|os.O_DIRECTORY|os.O_NOFOLLOW)
+    except FileNotFoundError:return
+    try:
+        names=('SingletonLock','SingletonSocket','SingletonCookie')
+        present=[]
+        for name in names:
+            try:info=os.stat(name,dir_fd=fd,follow_symlinks=False)
+            except FileNotFoundError:continue
+            if not stat.S_ISLNK(info.st_mode):raise ValueError('invalid_browser_lock')
+            present.append(name)
+        for name in present:os.unlink(name,dir_fd=fd)
+        if present:os.fsync(fd)
+    finally:os.close(fd)
+
+
+def configuration(path):
+    cfg=private_json(path)
+    fields={'enabled','account','expected_wid','permit_file','session_directory','events_directory',
+        'pages_directory','chromium_executable','node_executable','batch_size','scan_interval_seconds',
+        'max_media_bytes','disk_reserve_bytes','media_disk_reserve_bytes','max_dialogs'}
+    if not isinstance(cfg,dict) or set(cfg)-fields: raise ValueError('invalid_collector_config')
+    if cfg.get('enabled') is not True: raise RuntimeError('collector_disabled')
+    if not re.fullmatch(r'[a-zA-Z0-9_.-]{1,64}',cfg.get('account','')): raise ValueError('invalid_account')
+    if not re.fullmatch(r'[0-9]{5,20}@c.us',cfg.get('expected_wid','')): raise ValueError('invalid_whatsapp_identity')
+    for name in ['permit_file','session_directory','events_directory','pages_directory','chromium_executable','node_executable']:
+        if not isinstance(cfg.get(name),str) or not Path(cfg[name]).is_absolute(): raise ValueError('invalid_private_path')
+    private=[Path(cfg[name]).resolve() for name in ['session_directory','events_directory','pages_directory']]
+    if any(a==b or a in b.parents or b in a.parents for i,a in enumerate(private) for b in private[i+1:]):
+        raise ValueError('collector_directories_overlap')
+    for name,default,lo,hi in [('batch_size',50,1,100),('scan_interval_seconds',60,10,3600),
+            ('max_media_bytes',512*1024**2,1,4*1024**3),('disk_reserve_bytes',1024**3,1024**3,100*1024**3),
+            ('max_dialogs',2000,1,10000)]:
+        value=cfg.setdefault(name,default)
+        if type(value) is not int or not lo<=value<=hi: raise ValueError('invalid_'+name)
+    value=cfg.setdefault('media_disk_reserve_bytes',max(MEDIA_RESERVE_BYTES,cfg['disk_reserve_bytes']))
+    if type(value) is not int or not cfg['disk_reserve_bytes']<=value<=100*1024**3:
+        raise ValueError('invalid_media_disk_reserve_bytes')
+    permit=private_json(cfg['permit_file'])
+    if not isinstance(permit,dict) or permit.get('account')!=cfg['account'] or permit.get('expected_wid')!=cfg['expected_wid'] or permit.get('prior_clients_stopped') is not True:
+        raise RuntimeError('session_handover_not_confirmed')
+    return cfg
+
+
+def position(event):
+    if type(event.get('timestamp')) is not int or not isinstance(event.get('messageId'),str):
+        raise ValueError('invalid_whatsapp_position')
+    return [event['timestamp'],event['messageId']]
+
+
+class WhatsAppState(CollectorState):
+    def progress(self,chat,kind):
+        self.chat(chat,kind)
+        with self.archive.store.pool.connection() as c:
+            self.archive.fence(c,self.account,self.lease)
+            c.execute('INSERT INTO whatsapp_checkpoints(account,provider_chat) VALUES(%s,%s) ON CONFLICT DO NOTHING',
+                (self.account,chat))
+            return c.execute('SELECT progress FROM whatsapp_checkpoints WHERE account=%s AND provider_chat=%s',
+                (self.account,chat)).fetchone()['progress']
+
+    def begin_attempt(self,chat,kind):
+        self.progress(chat,kind)
+        with self.archive.store.pool.connection() as c:
+            self.archive.fence(c,self.account,self.lease)
+            # Separate from successful scan/cursors; survives a browser crash.
+            return c.execute("""UPDATE whatsapp_checkpoints SET progress=jsonb_set(progress,
+                '{last_attempt_at}',to_jsonb(extract(epoch FROM clock_timestamp())))
+                WHERE account=%s AND provider_chat=%s RETURNING progress""",(self.account,chat)).fetchone()['progress']
+
+    def scan_order(self,dialogs):
+        with self.archive.store.pool.connection() as c:
+            self.archive.fence(c,self.account,self.lease)
+            rows=c.execute("SELECT provider_chat,progress FROM whatsapp_checkpoints WHERE account=%s",(self.account,)).fetchall()
+        attempted={r['provider_chat']:r['progress'].get('last_attempt_at',0) for r in rows}
+        return sorted(dialogs,key=lambda d:attempted.get(d[0],0))
+
+    def checkpoint_wa(self,chat,progress):
+        with self.archive.store.pool.connection() as c:
+            self.archive.fence(c,self.account,self.lease)
+            c.execute('UPDATE whatsapp_checkpoints SET progress=%s,last_scan_at=clock_timestamp() WHERE account=%s AND provider_chat=%s',
+                (Jsonb(progress),self.account,chat))
+            c.execute('UPDATE collector_chats SET last_error_code=NULL WHERE account=%s AND provider_chat=%s',
+                (self.account,chat))
+            if not progress.get('gap') and not progress.get('catchup_before'):
+                c.execute('UPDATE collector_chats SET last_head_scan_at=clock_timestamp() '
+                    'WHERE account=%s AND provider_chat=%s',(self.account,chat))
+
+
+def whatsapp_asset(name):
+    """Installed wheels bundle Node sources; legacy checkout layout still works."""
+    if name not in ('provider.mjs','pair.mjs'):
+        raise ValueError('invalid_whatsapp_asset')
+    override=os.environ.get('ANYMSG_WHATSAPP_ASSETS_DIR')
+    if override:
+        root=Path(override)
+        if not root.is_absolute() or not stat.S_ISDIR(root.lstat().st_mode):
+            raise ValueError('invalid_whatsapp_asset_directory')
+        asset=root/name
+        if not stat.S_ISREG(asset.lstat().st_mode):raise ValueError('invalid_whatsapp_asset')
+        return asset
+    package=Path(__file__).resolve().parent
+    bundled=package/'whatsapp_assets'/name
+    if bundled.is_file():return bundled
+    legacy=package.parent/'whatsapp'/name
+    if legacy.is_file():return legacy
+    raise RuntimeError('whatsapp_assets_missing')
+
+
+class NodeProvider:
+    def __init__(self,cfg,config_path,lock_fd,*,script=None):
+        self.cfg,self.config_path,self.lock_fd=cfg,str(config_path),lock_fd
+        self.script=script or whatsapp_asset('provider.mjs')
+        self.process=None; self.lock=asyncio.Lock(); self.counter=0; self.policy=None
+    def subscribe(self,*_): pass # Node writes callbacks to its own disk queue, never RAM polling.
+    async def connect(self):
+        if self.cfg.get('session_directory'):clear_browser_runtime_locks(self.cfg['session_directory'])
+        if self.cfg.get('events_directory'):
+            directory=Path(self.cfg['events_directory']);directory.mkdir(mode=0o700,parents=True,exist_ok=True)
+            (directory/'.transport-failure').unlink(missing_ok=True)
+        self.process=await asyncio.create_subprocess_exec(self.cfg['node_executable'],str(self.script),self.config_path,
+            stdin=asyncio.subprocess.PIPE,stdout=asyncio.subprocess.PIPE,stderr=asyncio.subprocess.DEVNULL,
+            limit=1024*1024+1,pass_fds=(self.lock_fd,),start_new_session=True)
+        await self.call('start',{'policy':self.policy})
+    async def disconnect(self):
+        if not self.process:return
+        if self.process.returncode is None:
+            self.process.terminate()
+            try:await asyncio.wait_for(self.process.wait(),12)
+            except TimeoutError:
+                with suppress(ProcessLookupError): os.killpg(self.process.pid,signal.SIGKILL)
+                await self.process.wait()
+        # Chromium descendants belong to this dedicated process group only.
+        with suppress(ProcessLookupError): os.killpg(self.process.pid,signal.SIGTERM)
+    def failure_code(self):
+        try:
+            value=private_json(Path(self.cfg['events_directory'])/'.transport-failure')
+            code=value.get('code') if isinstance(value,dict) else None
+            return code if isinstance(code,str) and code in CONNECTION_ERRORS else 'provider_disconnected'
+        except (OSError,ValueError,KeyError):return 'provider_disconnected'
+    async def wait_disconnected(self):
+        await self.process.wait()
+        raise RuntimeError(self.failure_code())
+    async def request(self,method,params):
+        if not self.process or self.process.returncode is not None: raise RuntimeError(self.failure_code())
+        self.counter+=1
+        payload=json.dumps({'id':self.counter,'method':method,'params':params},separators=(',',':')).encode()+b'\n'
+        if len(payload)>1024*1024: raise ValueError('provider_request_too_large')
+        self.process.stdin.write(payload); await self.process.stdin.drain()
+        return self.counter
+    async def reply(self,request,timeout=90):
+        line=await asyncio.wait_for(self.process.stdout.readline(),timeout)
+        if not line or len(line)>1024*1024: raise RuntimeError(self.failure_code())
+        result=json.loads(line)
+        if not isinstance(result,dict) or result.get('id')!=request: raise RuntimeError('provider_protocol_error')
+        if 'error' in result:
+            code=result['error']
+            if isinstance(code,str) and code in CONNECTION_ERRORS:raise RuntimeError(code)
+            if code in ('media_unavailable','media_reference_changed','unsupported_media_type'): raise ProviderUnavailable(code)
+            safe=MEDIA_ERRORS|{'provider_operation_failed','chat_excluded'}
+            raise ProviderOperationError(code if isinstance(code,str) and code in safe else 'provider_operation_failed')
+        return result
+    async def call(self,method,params):
+        async with self.lock:
+            request=await self.request(method,params)
+            try:
+                reply=await self.reply(request,timeout=300 if method=='start' else 90)
+                if set(reply)!={'id','result'}: raise RuntimeError('provider_protocol_error')
+                return reply['result']
+            except (ProviderUnavailable,ProviderOperationError):
+                raise # Complete error frame; pipe is still synchronized.
+            except BaseException:
+                # After cancellation/partial response, never reuse a desynchronized pipe.
+                await self.disconnect(); raise
+    async def set_policy(self,policy):
+        self.policy={k:policy[k] for k in ('discover_chats','include_chats','exclude_chats')}
+        # Separate control file: a long media response must not delay exclusions
+        # or lease liveness. Node fails closed when this short-lived policy expires.
+        def save():
+            directory=Path(self.cfg['events_directory']);directory.mkdir(mode=0o700,parents=True,exist_ok=True)
+            temporary=directory/('.policy-'+secrets.token_hex(8))
+            try:
+                fd=os.open(temporary,os.O_WRONLY|os.O_CREAT|os.O_EXCL|os.O_NOFOLLOW,0o600)
+                with os.fdopen(fd,'w') as out:
+                    json.dump({'expires_at':time.time()+45,'policy':self.policy},out);out.flush();os.fsync(out.fileno())
+                os.replace(temporary,directory/'.policy')
+            finally:temporary.unlink(missing_ok=True)
+        await asyncio.to_thread(save)
+    async def dialogs(self,limit): return await self.call('dialogs',{'limit':limit})
+    async def page(self,chat,*,limit,before=None): return await self.call('page',{'chat':chat,'limit':limit,'before':before})
+    async def chunks(self,source,descriptor):
+        complete=False
+        async with self.lock:
+            request=await self.request('media',{'chat':source['provider_chat'],'message':source['provider_id'],'descriptor':descriptor})
+            try:
+                while True:
+                    result=await self.reply(request)
+                    if 'chunk' in result:
+                        if set(result)!={'id','chunk'} or len(result['chunk'])>87384: raise RuntimeError('provider_protocol_error')
+                        chunk=base64.b64decode(result['chunk'],validate=True)
+                        if len(chunk)>65536: raise RuntimeError('provider_protocol_error')
+                        yield chunk
+                    else:
+                        if result.get('result')!={'verified':True}: raise RuntimeError('provider_protocol_error')
+                        complete=True;return
+            except (ProviderUnavailable,RuntimeError) as exc:
+                # A complete error response is synchronized and safe for the next job.
+                if str(exc) in MEDIA_ERRORS|{'provider_operation_failed','chat_excluded'}:complete=True
+                raise
+            finally:
+                if not complete: await self.disconnect()
+
+
+class WhatsAppCollector(TelegramCollector):
+    state_class=WhatsAppState
+    coverage_code='whatsapp_history_partial'
+    connect_timeout=300
+    retry_connect=True
+    def __init__(self,*args,events_spool,**kwargs):
+        kwargs.setdefault('max_dialogs',2000)
+        super().__init__(*args,**kwargs); self.events_spool=events_spool
+    async def heartbeat(self):
+        while True:
+            await asyncio.sleep(self.heartbeat_interval)
+            await asyncio.to_thread(self.archive.renew,self.account,self.owner,self.state.lease[1],self.lease_ttl)
+            self.policy=await asyncio.to_thread(self.state.policy)
+            await self.provider.set_policy(self.policy)
+    async def commit_page_wa(self,page,chat,title,origin):
+        if not isinstance(page,dict) or set(page)!={'messages','exhausted','pending'} or not isinstance(page['messages'],list) or len(page['messages'])>self.batch_size:
+            raise RuntimeError('invalid_whatsapp_page')
+        points=[]
+        from datetime import datetime,timezone
+        for e in page['messages']:
+            if e.get('chatId')!=chat: raise RuntimeError('provider_chat_mismatch')
+            item={'kind':'whatsapp_event','account':self.account,'event':{**e,'chatName':title},
+                  'change':'message','observed_at':datetime.now(timezone.utc).isoformat(),'origin':origin}
+            await asyncio.to_thread(self.spool.put,item)
+            await asyncio.to_thread(self.state.apply,item)
+            points.append(position(e))
+        return sorted(points)
+    async def sync_chat(self,chat,kind,title):
+        progress=await asyncio.to_thread(self.state.begin_attempt,chat,kind)
+        head=progress.get('head')
+        if not head:
+            page=await self.provider.page(chat,limit=self.batch_size)
+            points=await self.commit_page_wa(page,chat,title,'backfill')
+            if points: progress.update(head=points[-1],history_before=points[0])
+            progress['history_exhausted']=page['exhausted'] and not page['pending']
+        else:
+            before=progress.get('catchup_before')
+            page=await self.provider.page(chat,limit=self.batch_size,before=before)
+            points=await self.commit_page_wa(page,chat,title,'reconcile')
+            target=progress.get('catchup_head') or (max(head,points[-1]) if points else head)
+            reached=bool(points and points[0]<=head)
+            if reached or (page['exhausted'] and not page['pending']):
+                progress['head']=target
+                if not reached and target>head: progress['gap']=True
+                progress.pop('catchup_before',None);progress.pop('catchup_head',None)
+            elif points:
+                progress['catchup_before']=points[0];progress['catchup_head']=target
+            if not progress.get('catchup_before') and not progress.get('history_exhausted') and progress.get('history_before'):
+                old=await self.provider.page(chat,limit=self.batch_size,before=progress['history_before'])
+                old_points=await self.commit_page_wa(old,chat,title,'backfill')
+                if old_points:progress['history_before']=min(progress['history_before'],old_points[0])
+                progress['history_exhausted']=old['exhausted'] and not old['pending']
+        # A failure during any page above leaves the last committed checkpoint.
+        await asyncio.to_thread(self.state.checkpoint_wa,chat,progress)
+        return bool(progress.get('gap'))
+    async def sync_once(self):
+        await asyncio.to_thread(self.state.phase,'history','scanning','history_scan')
+        self.policy=await asyncio.to_thread(self.state.policy)
+        await self.provider.set_policy(self.policy)
+        dialogs=await self.provider.dialogs(self.max_dialogs)
+        # Catalog entries exist even before a chat's first message page is saved.
+        await asyncio.to_thread(self.state.inventory,dialogs,None)
+        dialogs=await asyncio.to_thread(self.state.scan_order,dialogs)
+        seen=set();gap=False;unavailable=False
+        for chat,kind,title in dialogs:
+            if not self.state.allows(self.policy,chat): continue
+            try:gap=await self.sync_chat(chat,kind,title) or gap;seen.add(chat)
+            except (ProviderOperationError,ProviderUnavailable):
+                unavailable=True
+                await asyncio.to_thread(self.state.failed,chat,'provider_unavailable')
+        missing=set(self.policy['include_chats'])-set(self.policy['exclude_chats'])-seen
+        code='whatsapp_catchup_gap' if gap else ('configured_chat_unavailable' if missing else
+            ('whatsapp_chat_unavailable' if unavailable else
+             ('dialog_discovery_limited' if len(dialogs)>=self.max_dialogs else self.coverage_code)))
+        await asyncio.to_thread(self.state.status,'degraded' if gap or missing or unavailable else 'receiving',code)
+        await asyncio.to_thread(self.state.phase,'history','waiting','history_scan_finished')
+    async def reconcile_loop(self):
+        while True:
+            try:await self.sync_once()
+            except (ProviderOperationError,ProviderUnavailable):
+                await asyncio.to_thread(self.state.status,'degraded','provider_temporarily_unavailable')
+                await asyncio.to_thread(self.state.phase,'history','error','provider_temporarily_unavailable')
+            await asyncio.sleep(self.interval)
+    async def drain_loop(self):
+        import psycopg
+        from psycopg_pool import PoolTimeout
+        while True:
+            try:
+                await self.drain_captures([self.events_spool,self.spool])
+                await asyncio.to_thread(self.state.apply_tombstones)
+            except (psycopg.OperationalError,PoolTimeout): await asyncio.sleep(1)
+            await asyncio.sleep(.25)
+    async def run(self):
+        # Initial policy is read only; actual ownership and enabled check in super.run.
+        with self.archive.store.pool.connection() as c:
+            policy=c.execute('SELECT * FROM account_policies WHERE account=%s',(self.account,)).fetchone()
+        await self.provider.set_policy(policy)
+        await super().run()
+
+
+async def run_config(path):
+    cfg=configuration(path)
+    session=Path(cfg['session_directory'])
+    if not session.is_dir() or session.is_symlink() or session.stat().st_mode&0o077:
+        raise RuntimeError('private_session_required')
+    if not (session/'session'/'Default').is_dir(): raise RuntimeError('whatsapp_pairing_required')
+    with session_lock(session) as lock_fd:
+        clear_browser_runtime_locks(session)
+        store=Store(Path(os.environ['DATABASE_URL_FILE']).read_text().strip(),Path(os.environ['PROBE_FILES']),'http://collector.invalid')
+        try:
+            with store.pool.connection() as c:
+                row=c.execute('SELECT platform,synthetic FROM accounts WHERE id=%s',(cfg['account'],)).fetchone()
+                if not row or row['platform']!='whatsapp' or row['synthetic']:raise RuntimeError('live_account_required')
+            worker=WhatsAppCollector(Archive(store),cfg['account'],NodeProvider(cfg,path,lock_fd),
+                CaptureSpool(cfg['pages_directory'],reserve_bytes=cfg['disk_reserve_bytes']),
+                events_spool=CaptureSpool(cfg['events_directory'],reserve_bytes=cfg['disk_reserve_bytes']),
+                batch_size=cfg['batch_size'],interval=cfg['scan_interval_seconds'],max_dialogs=cfg['max_dialogs'],
+                owner='whatsapp-'+secrets.token_hex(12),
+                writer=BlobWriter(store.files,max_bytes=cfg['max_media_bytes'],reserve_bytes=cfg['media_disk_reserve_bytes']))
+            loop=asyncio.get_running_loop()
+            for sig in [signal.SIGTERM,signal.SIGINT]: loop.add_signal_handler(sig,worker.stopping.set)
+            await worker.run()
+        finally:store.close()
+
+
+def main():
+    import argparse
+    parser=argparse.ArgumentParser(description=__doc__);parser.add_argument('--config',type=Path,required=True)
+    args=parser.parse_args();os.umask(0o077)
+    try:asyncio.run(run_config(args.config))
+    except Exception as exc:
+        safe={'collector_disabled','session_handover_not_confirmed','whatsapp_pairing_required','whatsapp_identity_mismatch',
+            'private_session_required','live_account_required','collector_already_owned','session_already_owned',
+            'collector_lease_lost','collection_disabled','provider_disconnected'}
+        print(json.dumps({'status':'stopped','code':str(exc) if str(exc) in safe else 'collector_failed'}),flush=True)
+        raise SystemExit(1) from None
+
+
+if __name__=='__main__':main()

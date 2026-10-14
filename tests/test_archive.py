@@ -1,0 +1,242 @@
+from copy import deepcopy
+from datetime import datetime,timezone,timedelta
+import hashlib
+from pathlib import Path
+
+import pytest
+
+from messaging_service.archive import Archive
+from messaging_service.blobs import Blob,BlobWriter
+from messaging_service.envelope import stable_id,validate
+from messaging_service.spool import DurableSpool
+from messaging_service.store import APIError
+
+
+def event(**changes):
+    value={'account':'archive-test','platform':'telegram','chat':'100','chat_title':'Fixture room',
+           'provider_id':'17','sender':'42','body':'Первый текст lighthouse','sent_at':'2026-10-01T12:00:00+00:00',
+           'updated_at':'2026-10-01T12:00:00+00:00','deleted':False,'direction':'incoming','origin':'live','media':[]}
+    value.update(changes); return value
+
+
+@pytest.fixture()
+def archive(seeded):
+    s,a,b=seeded
+    archive=Archive(s); archive.register('archive-test','telegram','Synthetic archive',include_chats=['100'])
+    key=s.issue_key('archive-reader',['archive-test'])
+    return archive,s,key,b
+
+
+def test_idempotent_ingest_revision_and_snapshot_history(archive):
+    ar,s,key,_=archive
+    result=ar.ingest(event()); mid=result['message']
+    assert ar.ingest(event())['outcome']=='duplicate'
+    assert ar.ingest(event(body='Вторая версия',updated_at='2026-10-01T12:01:00Z'))['outcome']=='edited'
+    assert ar.ingest(event(origin='backfill'))['outcome']=='stale'
+    assert len(s.search(key)['items'])==1
+    changes=s.get_updates(key,'history')['items']
+    assert [x['revision'] for x in changes]==[1,2]
+    assert changes[0]['body']=='Первый текст lighthouse'
+    assert changes[1]['body']=='Вторая версия'
+    with s.pool.connection() as c:
+        assert c.execute('SELECT count(*) AS n FROM message_revisions WHERE message=%s',(mid,)).fetchone()['n']==2
+
+
+def test_same_version_conflict_is_explicit_no_overwrite(archive):
+    ar,s,key,_=archive
+    ar.ingest(event())
+    assert ar.ingest(event(body='contradiction'))['outcome']=='conflict'
+    assert s.search(key)['items'][0]['body']=='Первый текст lighthouse'
+    assert s.capabilities(key)['sources'][0]['detail_code']=='version_conflict'
+    ar.ingest(event(provider_id='18'))
+    assert s.capabilities(key)['sources'][0]['detail_code']=='version_conflict'
+
+
+def test_message_identity_cannot_change_on_edit(archive):
+    ar,s,key,_=archive
+    ar.ingest(event())
+    assert ar.ingest(event(sender='another-person',updated_at='2026-10-01T12:01:00Z'))['outcome']=='conflict'
+    assert s.search(key)['items'][0]['sender']=='42'
+
+
+def test_delete_tombstone_does_not_resurrect_and_search_hides(archive):
+    ar,s,key,_=archive
+    mid=ar.ingest(event())['message']
+    ar.ingest(event(deleted=True,updated_at='2026-10-01T12:02:00Z'))
+    assert s.search(key)['items']==[]
+    assert s.get_context(key,mid)['message']['deleted']
+    assert ar.ingest(event(body='late backfill',updated_at='2026-10-02T12:00:00Z',origin='backfill'))['outcome']=='tombstoned'
+    assert len(s.get_updates(key,'main')['items'])==2
+
+
+def test_account_policy_and_historical_label(archive):
+    ar,s,key,_=archive
+    assert ar.ingest(event(chat='excluded'))['outcome']=='excluded'
+    ar.ingest(event(origin='backfill'))
+    assert s.get_updates(key,'main')['items'][0]['historical'] is True
+    ar.register('archive-test','telegram','Synthetic archive',discover=True,exclude_chats=['excluded'])
+    assert ar.ingest(event(chat='new-chat'))['outcome']=='created'
+    assert ar.ingest(event(chat='excluded'))['outcome']=='excluded'
+    with s.pool.connection() as c: c.execute("UPDATE account_policies SET enabled=false WHERE account='archive-test'")
+    with pytest.raises(ValueError,match='collection_disabled'): ar.ingest(event(provider_id='99'))
+
+
+def test_scopes_also_cover_ingested_refs_and_counts(archive):
+    ar,s,key,other=archive
+    mid=ar.ingest(event())['message']
+    assert s.search(other,'lighthouse')['items']  # Existing independent synthetic file caption.
+    assert all(m['account']!='archive-test' for m in s.search(other)['items'])
+    with pytest.raises(APIError): s.get_context(other,mid)
+    assert len(s.capabilities(key)['sources'])==1
+    assert s.capabilities(key)['coverage']=='partial_or_unknown'
+
+
+def test_collector_lease_fencing(archive):
+    ar,s,key,_=archive
+    epoch=ar.acquire('archive-test','worker-a')
+    with pytest.raises(RuntimeError,match='already_owned'): ar.acquire('archive-test','worker-b')
+    ar.renew('archive-test','worker-a',epoch)
+    ar.ingest(event(),lease=('worker-a',epoch))
+    with s.pool.connection() as c: c.execute("UPDATE collector_leases SET expires_at=now()-interval '1 second'")
+    newer=ar.acquire('archive-test','worker-b'); assert newer>epoch
+    with pytest.raises(RuntimeError,match='lease_lost'): ar.ingest(event(provider_id='99'),lease=('worker-a',epoch))
+    with pytest.raises(RuntimeError,match='lease_lost'): ar.renew('archive-test','worker-a',epoch)
+    assert len(s.search(key)['items'])==1
+
+
+def test_spool_survives_db_failure_restart_and_commit_before_delete(archive,tmp_path):
+    ar,s,key,_=archive
+    queue=DurableSpool(tmp_path/'spool',reserve_bytes=0)
+    first=queue.put(event()); assert queue.put(event())==first
+    def crash(_): raise RuntimeError('db_down')
+    with pytest.raises(RuntimeError): queue.drain(crash)
+    assert (queue.path/first).exists()
+    def committed_then_crashed(value):
+        ar.ingest(value); raise RuntimeError('crash_after_commit')
+    with pytest.raises(RuntimeError): queue.drain(committed_then_crashed)
+    restarted=DurableSpool(queue.path,reserve_bytes=0)
+    assert restarted.drain(ar.ingest)==1
+    assert restarted.drain(ar.ingest)==0
+    assert len(s.get_updates(key,'main')['items'])==1
+
+
+def test_spool_quota_and_corruption_fail_closed(tmp_path):
+    queue=DurableSpool(tmp_path/'spool',max_entries=1,reserve_bytes=0)
+    name=queue.put(event())
+    with pytest.raises(RuntimeError,match='spool_full'): queue.put(event(provider_id='18'))
+    (queue.path/name).write_text('{}')
+    with pytest.raises(RuntimeError,match='spool_corrupt'): queue.drain(lambda _:None)
+    assert (queue.path/name).exists()
+
+
+@pytest.mark.parametrize('change',[{'sent_at':'2026-10-01'},{'body':'a'*65537},{'direction':'invalid'},
+    {'deleted':'false'},{'media':[{'provider_id':'x','filename':'x','mime':'x\r\nheader','bytes':None}]},
+    {'raw_token':'must_not_store'},{'media':[{'provider_id':'x','filename':'x','mime':'text/plain','bytes':-1}]}])
+def test_envelope_validation(change):
+    with pytest.raises(ValueError): validate(event(**change))
+
+
+def media_event(**changes):
+    return event(media=[{'provider_id':'media-42','filename':'../private\r\n.txt','mime':'text/plain','bytes':4}],**changes)
+
+
+def test_media_ready_only_after_bytes_and_lease_fencing(archive,tmp_path):
+    ar,s,key,other=archive
+    mid=ar.ingest(media_event())['message']
+    item=s.get_context(key,mid)['pending_attachments'][0]
+    assert s.get_attachment(key,item['id'])['status']=='queued'
+    with pytest.raises(APIError): s.get_attachment(other,item['id'])
+    job=ar.claim_media('worker'); assert job
+    assert ar.claim_media('second') is None
+    writer=BlobWriter(s.files,reserve_bytes=0); blob=writer.write([b'data'],expected_bytes=4)
+    # Simulated crash after durable bytes: no ready metadata until retry commits.
+    assert s.get_attachment(key,job['id'])['status']=='leased'
+    with s.pool.connection() as c: c.execute("UPDATE media_jobs SET lease_until=now()-interval '1 second'")
+    newer=ar.claim_media('second')
+    with pytest.raises(RuntimeError,match='media_lease_lost'): ar.finish_media(job,blob,writer)
+    ar.finish_media(newer,blob,writer)
+    attachment=s.get_attachment(key,job['id']); assert attachment['status']=='ready'
+    assert '/' not in attachment['filename'] and '\r' not in attachment['filename']
+    grant=attachment['download_url'].rsplit('/',1)[-1]
+    assert s.download(grant)[1].read_bytes()==b'data'
+    assert [e['kind'] for e in s.get_updates(key,'main')['items']]==['message.created','attachment.ready']
+
+
+def test_media_edit_supersedes_lease_and_old_grant(archive):
+    ar,s,key,_=archive
+    ar.ingest(media_event()); job=ar.claim_media('worker')
+    writer=BlobWriter(s.files,reserve_bytes=0); blob=writer.write([b'data'])
+    ar.finish_media(job,blob,writer)
+    grant=s.get_attachment(key,job['id'])['download_url'].rsplit('/',1)[-1]
+    ar.ingest(event(body='file removed',updated_at='2026-10-01T12:02:00Z'))
+    with pytest.raises(APIError): s.download(grant)
+    with pytest.raises(APIError): s.get_attachment(key,job['id'])
+
+
+def test_media_delete_before_worker_commits(archive):
+    ar,s,key,_=archive
+    ar.ingest(media_event()); job=ar.claim_media('worker')
+    writer=BlobWriter(s.files,reserve_bytes=0); blob=writer.write([b'data'])
+    ar.ingest(event(deleted=True,updated_at='2026-10-01T12:02:00Z'))
+    with pytest.raises(RuntimeError,match='lease_lost'): ar.finish_media(job,blob,writer)
+    with pytest.raises(APIError): s.get_attachment(key,job['id'])
+
+
+def test_media_retry_backoff_and_exhausted_crash(archive):
+    ar,s,key,_=archive
+    ar.ingest(media_event()); job=ar.claim_media('worker')
+    ar.fail_media(job,'network_error')
+    assert ar.claim_media('worker') is None
+    with s.pool.connection() as c: c.execute("UPDATE media_jobs SET next_due=now()-interval '1 second'")
+    job=ar.claim_media('worker'); assert job['attempts']==2
+    with s.pool.connection() as c:
+        c.execute("UPDATE media_jobs SET attempts=5,lease_until=now()-interval '1 second'")
+    assert ar.claim_media('worker') is None
+    assert s.get_attachment(key,job['id'])['status']=='failed'
+
+
+def test_blob_limits_integrity_and_interrupted_stream(tmp_path):
+    writer=BlobWriter(tmp_path/'blobs',max_bytes=8,reserve_bytes=0)
+    with pytest.raises(ValueError,match='size_mismatch'): writer.write([b'a'],expected_bytes=2)
+    with pytest.raises(ValueError,match='size_limit'): writer.write([b'123456789'])
+    with pytest.raises(ValueError,match='hash_mismatch'): writer.write([b'a'],expected_sha256='0'*64)
+    def interrupted():
+        yield b'a'; raise RuntimeError('disconnected')
+    with pytest.raises(RuntimeError): writer.write(interrupted())
+    assert list(writer.root.iterdir())==[]
+    blob=writer.write([b'ab',b'cd']); assert writer.write([b'abcd'])==blob
+    (writer.root/blob.digest).write_bytes(b'xxxx')
+    with pytest.raises(RuntimeError,match='corrupt'): writer.write([b'abcd'])
+
+
+def test_blob_disk_reserve(tmp_path,monkeypatch):
+    import shutil
+    monkeypatch.setattr(shutil,'disk_usage',lambda _:type('Usage',(),{'free':0})())
+    writer=BlobWriter(tmp_path/'blobs',reserve_bytes=1)
+    with pytest.raises(RuntimeError,match='disk_reserve'): writer.write([b'x'])
+    assert list(writer.root.iterdir())==[]
+
+
+@pytest.mark.parametrize('size_mib',[32,256])
+def test_large_original_streaming(size_mib,tmp_path):
+    writer=BlobWriter(tmp_path/'blobs',reserve_bytes=0)
+    chunk=b'lighthouse-42---'*(1024*1024//16)
+    expected=hashlib.sha256()
+    for _ in range(size_mib): expected.update(chunk)
+    blob=writer.write((chunk for _ in range(size_mib)),expected_bytes=size_mib*1024**2,
+                      expected_sha256=expected.hexdigest())
+    assert writer.verify(blob).stat().st_size==size_mib*1024**2
+
+
+def test_migration_checksum_and_restart_preserve_revisions(archive):
+    ar,s,key,_=archive
+    ar.ingest(event()); s.migrate(); s.migrate()
+    assert len(s.get_updates(key,'main')['items'])==1
+    with s.pool.connection() as c:
+        assert c.execute("SELECT value FROM probe_metadata WHERE name='schema_version'").fetchone()['value']=='21'
+        saved=c.execute('SELECT sha256 FROM archive_migrations WHERE version=2').fetchone()['sha256']
+        c.execute("UPDATE archive_migrations SET sha256='wrong' WHERE version=2")
+    try:
+        with pytest.raises(RuntimeError,match='checksum'): s.migrate()
+    finally:
+        with s.pool.connection() as c: c.execute('UPDATE archive_migrations SET sha256=%s WHERE version=2',(saved,))

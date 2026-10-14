@@ -1,0 +1,27 @@
+{
+  "directory": "/opt/anymsg/backups",
+  "project": "anymsg",
+  "network": "anymsg_backend",
+  "image": "anymsg-backup:0.9.8",
+  "delivery_mode": "staged_v1",
+  "files_volume": "anymsg_files",
+  "dsn_file": "/opt/anymsg/private/owner.dsn",
+  "recipient_file": "/opt/anymsg/backup-config/recipient",
+  "mounts": [
+    {"name": "settings", "source": "/opt/anymsg/recovery-settings"}
+  ],
+  "recovery": {
+    "accounts": [],
+    "sources": [
+      {"name": "settings", "kind": "settings", "path": "/sources/settings", "account": null}
+    ]
+  },
+  "transfer": {
+    "host": "backup.example.invalid",
+    "user": "posbackup",
+    "identity_file": "/opt/anymsg/backup-config/delivery_ed25519",
+    "known_hosts_file": "/opt/anymsg/backup-config/known_hosts"
+  },
+  "timeout_seconds": 1800,
+  "keep_local": 2
+}

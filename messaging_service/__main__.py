@@ -1,0 +1,123 @@
+"""Operator CLI: administration remains local/SSH-only, not an MCP tool."""
+import argparse
+import json
+import os
+from pathlib import Path
+
+from .store import Store
+from .policy import PERMISSIONS, UNSET
+
+
+def main():
+    parser=argparse.ArgumentParser()
+    parser.add_argument('command',choices=['serve','init','migrate','issue-key','revoke-key',
+        'replay','snapshot','verify-restore','quarantine-restore','register-account',
+        'set-access','list-keys','audit-tail'])
+    parser.add_argument('--principal')
+    parser.add_argument('--accounts',nargs='+')
+    parser.add_argument('--key-file',type=Path)
+    parser.add_argument('--key-id',help='Public credential UUID; never the token or its hash')
+    group=parser.add_mutually_exclusive_group()
+    group.add_argument('--chats',nargs='*',default=UNSET)
+    group.add_argument('--all-chats',action='store_true')
+    parser.add_argument('--permissions',nargs='*',default=UNSET,choices=sorted(PERMISSIONS))
+    state=parser.add_mutually_exclusive_group()
+    state.add_argument('--enable',action='store_true')
+    state.add_argument('--disable',action='store_true')
+    parser.add_argument('--limit',type=int,default=50)
+    parser.add_argument('--days',type=int,default=7)
+    parser.add_argument('--input',type=Path)
+    parser.add_argument('--spool',type=Path)
+    parser.add_argument('--snapshot-dir',type=Path)
+    parser.add_argument('--dump-command',help='Operator-only JSON argv; never a shell string')
+    parser.add_argument('--recovery-config',type=Path,help='Private operator JSON: quiesced sessions/settings/spools')
+    parser.add_argument('--account')
+    parser.add_argument('--platform',choices=['telegram','whatsapp'])
+    parser.add_argument('--label')
+    parser.add_argument('--include-chats',nargs='*',default=[])
+    parser.add_argument('--exclude-chats',nargs='*',default=[])
+    parser.add_argument('--discover-chats',action='store_true')
+    parser.add_argument('--synthetic',action='store_true')
+    args=parser.parse_args()
+    dsn=Path(os.environ['DATABASE_URL_FILE']).read_text().strip()
+    public_url=os.environ.get('PROBE_PUBLIC_URL','http://127.0.0.1:18940')
+    store=Store(dsn,Path(os.environ.get('PROBE_FILES','./probe-files')),public_url)
+    try:
+        if args.command=='init':
+            store.migrate(); store.seed()
+            print(json.dumps({'initialized':True,'synthetic':True}))
+        elif args.command=='migrate':
+            store.migrate()
+            with store.pool.connection() as c:
+                version=int(c.execute("SELECT value FROM probe_metadata WHERE name='schema_version'").fetchone()['value'])
+            print(json.dumps({'schema_version':version}))
+        elif args.command=='register-account':
+            if not args.account or not args.platform or not args.label:
+                parser.error('register-account requires --account, --platform and --label')
+            from .archive import Archive
+            Archive(store).register(args.account,args.platform,args.label,synthetic=args.synthetic,
+                include_chats=args.include_chats,exclude_chats=args.exclude_chats,discover=args.discover_chats)
+            print(json.dumps({'registered':True,'account':args.account,'provider_connected':False}))
+        elif args.command=='replay':
+            if not args.input or not args.spool: parser.error('replay requires --input and --spool')
+            from .archive import Archive
+            from .spool import DurableSpool
+            from .envelope import MAX_ENVELOPE
+            queue=DurableSpool(args.spool); archive=Archive(store); queued=0
+            with args.input.open('rb') as source:
+                while line:=source.readline(MAX_ENVELOPE+2):
+                    if len(line)>MAX_ENVELOPE+1: raise ValueError('envelope_too_large')
+                    queue.put(json.loads(line)); queued+=1
+                    queue.drain(archive.ingest,limit=100)
+            drained=queue.drain(archive.ingest)
+            print(json.dumps({'queued':queued,'final_drain':drained}))
+        elif args.command in ('snapshot','verify-restore','quarantine-restore'):
+            from .backup import create_snapshot,verify_snapshot,quarantine_restore
+            if args.command=='quarantine-restore':
+                quarantine_restore(store); print(json.dumps({'collectors_disabled':True,'api_keys_revoked':True}))
+            else:
+                if not args.snapshot_dir: parser.error('requires --snapshot-dir')
+                if args.command=='snapshot':
+                    if not args.dump_command: parser.error('snapshot requires --dump-command')
+                    recovery=None
+                    if args.recovery_config:
+                        from .telegram_collector import private_json
+                        recovery=private_json(args.recovery_config)
+                    result=create_snapshot(store,args.snapshot_dir,json.loads(args.dump_command),recovery)
+                else: result=verify_snapshot(store,args.snapshot_dir)
+                print(json.dumps(result))
+        elif args.command=='issue-key':
+            if not args.principal or not args.accounts or not args.key_file:
+                parser.error('issue-key requires --principal, --accounts and --key-file')
+            # Reserve the output first; never silently replace a user's active credential.
+            fd=os.open(args.key_file,os.O_CREAT|os.O_EXCL|os.O_WRONLY,0o600)
+            with os.fdopen(fd,'w') as out:
+                out.write(store.issue_key(args.principal,args.accounts,args.days,
+                    chats=None if args.all_chats else args.chats,permissions=args.permissions)+'\n')
+            print(json.dumps({'issued':True,'principal':args.principal,'key_file':str(args.key_file)}))
+        elif args.command=='revoke-key':
+            if bool(args.key_file)==bool(args.key_id):parser.error('revoke-key requires exactly one of --key-file or --key-id')
+            count=store.revoke(args.key_file.read_text().strip() if args.key_file else None,credential_id=args.key_id)
+            print(json.dumps({'revoked':count}))
+        elif args.command=='set-access':
+            if not args.principal:parser.error('set-access requires --principal')
+            result=store.set_access(args.principal,accounts=args.accounts if args.accounts is not None else UNSET,
+                chats=None if args.all_chats else args.chats,permissions=args.permissions,
+                enabled=True if args.enable else (False if args.disable else UNSET))
+            print(json.dumps(result))
+        elif args.command=='list-keys':
+            if not args.principal:parser.error('list-keys requires --principal')
+            print(json.dumps(store.list_keys(args.principal)))
+        elif args.command=='audit-tail':
+            print(json.dumps(store.audit_tail(args.principal or '',args.limit)))
+        else:
+            import uvicorn
+            from .app import create_app
+            hosts=os.environ.get('PROBE_ALLOWED_HOSTS','127.0.0.1:18940,localhost:18940').split(',')
+            uvicorn.run(create_app(store,hosts),host=os.environ.get('PROBE_BIND','127.0.0.1'),
+                        port=int(os.environ.get('PROBE_PORT','18940')),access_log=False,
+                        proxy_headers=False,log_level='warning',limit_concurrency=32)
+    finally: store.close()
+
+
+if __name__=='__main__': main()

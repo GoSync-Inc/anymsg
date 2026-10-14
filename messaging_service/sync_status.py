@@ -1,0 +1,210 @@
+"""Read-only sync evidence, scoped by the caller's existing archive permissions."""
+from datetime import datetime, timezone
+
+from .envelope import stable_id
+from .policy import scope_filter
+from .status_details import describe,freshness
+from .operational import operations
+
+
+DOWNLOAD_STATES = ('queued', 'leased', 'ready', 'failed', 'superseded')
+EXTRACTION_STATES = ('queued', 'leased', 'ready', 'unsupported', 'failed', 'unknown')
+ENRICHMENT_STATES = ('unconfigured', 'queued', 'leased', 'ready', 'unsupported', 'failed', 'unknown')
+
+
+def _latest(previous, value):
+    return max(previous, value) if previous is not None and value is not None else previous or value
+
+
+def _attempt_time(value):
+    if type(value) not in (int, float):
+        return None
+    try:
+        return datetime.fromtimestamp(value, timezone.utc)
+    except (ValueError, OverflowError, OSError):
+        return None
+
+
+def _history(platform, catalog_ids, rows):
+    """Provider exhaustion is evidence of a traversal, never proof of full history."""
+    checkpoint_ids = {stable_id('chat', row['account'], row['provider_chat']) for row in rows}
+    result = {'observed_chats': len(catalog_ids | checkpoint_ids),
+              'checkpoint_chats': len(rows), 'unknown_chats': len(catalog_ids-checkpoint_ids),
+              'full_history_verified': False, 'last_attempt_at': None, 'last_scan_at': None}
+    if platform == 'telegram':
+        window = {'chats': 0, 'complete': 0, 'in_progress': 0, 'since_min': None, 'since_max': None}
+        unbounded = {'chats': 0, 'provider_exhausted': 0, 'in_progress': 0}
+        result.update(configured_window=window, unbounded_history=unbounded, provider_history_exhausted=0)
+        for row in rows:
+            result['last_attempt_at'] = _latest(result['last_attempt_at'], row['last_attempt_at'])
+            result['last_scan_at'] = _latest(result['last_scan_at'], row['last_scan_at'])
+            result['provider_history_exhausted'] += bool(row['history_exhausted'])
+            since = row['history_since']
+            if since is not None:
+                window['chats'] += 1
+                window['complete' if row['window_complete'] or row['history_exhausted'] else 'in_progress'] += 1
+                window['since_min'] = min(window['since_min'], since) if window['since_min'] else since
+                window['since_max'] = _latest(window['since_max'], since)
+            elif row['initialized']:
+                unbounded['chats'] += 1
+                unbounded['provider_exhausted' if row['history_exhausted'] else 'in_progress'] += 1
+            else:
+                # A live callback also creates collector_chats with a NULL floor;
+                # that alone is not evidence of a configured full-history scan.
+                result['unknown_chats'] += 1
+    elif platform == 'whatsapp':
+        result['checkpoint_chats'] = sum(isinstance(row['wa_progress'], dict) for row in rows)
+        result.update(successful_scan_chats=0, not_scanned_chats=0,
+                      provider_history_exhausted=0, catchup_pending_chats=0, gap_chats=0)
+        for row in rows:
+            progress = row['wa_progress']
+            if not isinstance(progress, dict):
+                result['unknown_chats'] += 1
+                continue
+            result['last_attempt_at'] = _latest(result['last_attempt_at'], _attempt_time(progress.get('last_attempt_at')))
+            # last_scan_at has a DB default even before the first success. Only a
+            # committed page records this boolean, including an empty exhausted page.
+            if type(progress.get('history_exhausted')) is not bool:
+                result['not_scanned_chats'] += 1
+                continue
+            result['successful_scan_chats'] += 1
+            result['last_scan_at'] = _latest(result['last_scan_at'], row['wa_last_scan_at'])
+            result['provider_history_exhausted'] += progress['history_exhausted']
+            result['catchup_pending_chats'] += bool(progress.get('catchup_before'))
+            result['gap_chats'] += progress.get('gap') is True
+    else:
+        result['unknown_chats'] = result['observed_chats']
+    return result
+
+
+def _checkpoints(c, p, allowed_chats):
+    # collector_chats predates archive chat IDs. Resolve only identifiers first,
+    # then fetch checkpoint state exclusively for permitted catalog entries. No
+    # private names, progress or account-wide health are read by this resolution.
+    pairs = [(r['account'], r['provider_chat']) for r in c.execute(
+        'SELECT account,provider_chat FROM collector_chats WHERE account=ANY(%s)', (p['accounts'],))
+        if p['chat_ids'] is None or stable_id('chat', r['account'], r['provider_chat']) in allowed_chats]
+    if not pairs:
+        return {}
+    accounts, chats = zip(*pairs)
+    rows = c.execute('''SELECT cc.*,wa.progress AS wa_progress,wa.last_scan_at AS wa_last_scan_at
+        FROM unnest(%s::text[],%s::text[]) AS permitted(account,provider_chat)
+        JOIN collector_chats cc USING(account,provider_chat)
+        LEFT JOIN whatsapp_checkpoints wa USING(account,provider_chat)''', (list(accounts), list(chats)))
+    grouped = {}
+    for row in rows:
+        grouped.setdefault(row['account'], []).append(row)
+    return grouped
+
+
+def _files(c, p, *, group_by_chat=False):
+    where, args = scope_filter(p, alias='m')
+    key = "m.chat" if group_by_chat else "m.account"
+    downloads = {}
+    for row in c.execute('SELECT '+key+''' AS account,j.state,count(*) AS count FROM media_jobs j
+            JOIN messages m ON m.id=j.message AND m.account=j.account
+            WHERE NOT m.deleted AND '''+where+' GROUP BY '+key+',j.state', args):
+        downloads.setdefault(row['account'], {})[row['state']] = row['count']
+    errors={}
+    for row in c.execute('SELECT '+key+''' AS account,j.error_code,count(*) AS count FROM media_jobs j
+        JOIN messages m ON m.id=j.message AND m.account=j.account WHERE NOT m.deleted
+        AND j.state IN ('queued','leased','failed') AND j.error_code IS NOT NULL AND '''+where+
+        ' GROUP BY '+key+',j.error_code',args):
+        errors.setdefault(row['account'],{})[row['error_code']]=row['count']
+    # Count current occurrences, not global digests. Stale extraction/enrichment
+    # rows must never inflate ready counts or expose another chat's derived state.
+    indexed = c.execute('SELECT '+key+''' AS account,
+            coalesce(f.state,'unknown') AS extraction_state,
+            CASE WHEN e.state='unconfigured' AND EXISTS(SELECT FROM processing_profiles pp
+                WHERE pp.account=m.account AND pp.enabled AND pp.kind=CASE
+                    WHEN a.mime LIKE 'audio/%%' OR a.mime='application/ogg' THEN 'audio'
+                    WHEN a.mime LIKE 'image/%%' THEN 'image' ELSE 'document' END)
+                THEN 'queued' ELSE coalesce(e.state,'unknown') END AS enrichment_state,
+            count(*) AS count,sum(a.bytes) AS bytes,
+            count(*) FILTER (WHERE f.state='ready' AND f.truncated) AS extraction_truncated,
+            count(*) FILTER (WHERE e.state='ready' AND e.truncated) AS enrichment_truncated
+        FROM attachments a JOIN messages m ON m.id=a.message
+        LEFT JOIN attachment_text f ON f.attachment=a.id AND f.source_digest=a.digest
+            AND f.source_revision=m.revision AND f.source_filename=a.filename
+            AND f.source_mime=a.mime AND f.source_bytes=a.bytes AND f.state<>'superseded'
+        LEFT JOIN attachment_enrichment e ON e.attachment=a.id AND e.source_digest=a.digest
+            AND e.source_revision=m.revision AND e.state<>'superseded'
+        WHERE a.active AND NOT m.deleted AND '''+where+'''
+        GROUP BY '''+key+',f.state,enrichment_state', args)
+    files = {}
+    for row in indexed:
+        item = files.setdefault(row['account'], {'stored_files': 0, 'stored_bytes': 0,
+            'extraction': dict.fromkeys(EXTRACTION_STATES, 0),
+            'enrichment': dict.fromkeys(ENRICHMENT_STATES, 0),
+            'extraction_truncated': 0, 'enrichment_truncated': 0})
+        item['stored_files'] += row['count']
+        item['stored_bytes'] += int(row['bytes'])
+        item['extraction'][row['extraction_state']] += row['count']
+        item['enrichment'][row['enrichment_state']] += row['count']
+        item['extraction_truncated'] += row['extraction_truncated']
+        item['enrichment_truncated'] += row['enrichment_truncated']
+    for account in downloads:
+        files.setdefault(account,{'stored_files':0,'stored_bytes':0,
+            'extraction':dict.fromkeys(EXTRACTION_STATES,0),'enrichment':dict.fromkeys(ENRICHMENT_STATES,0),
+            'extraction_truncated':0,'enrichment_truncated':0})['download_errors']=errors.get(account,{})
+    return downloads, files
+
+
+def get_sync_status(c, p):
+    where, args = scope_filter(p, alias='c', chat_column='id')
+    catalog = c.execute('SELECT c.account,c.id,a.platform FROM chats c JOIN accounts a ON a.id=c.account WHERE '+where, args).fetchall()
+    catalogs = {}
+    catalog_ids = {}
+    for row in catalog:
+        item = catalogs.setdefault(row['account'], {'account': row['account'], 'platform': row['platform'], 'catalog_chats': 0})
+        item['catalog_chats'] += 1
+        catalog_ids.setdefault(row['account'], set()).add(row['id'])
+    where, args = scope_filter(p, alias='m')
+    messages = {r['account']: r for r in c.execute('''SELECT m.account,count(*) AS messages,
+        min(m.sent_at) AS oldest_message_at,max(m.sent_at) AS newest_message_at
+        FROM messages m WHERE '''+where+' GROUP BY m.account', args)}
+    scoped = p['chat_ids'] is not None
+    if scoped:
+        # No collector_health/source_status read for a chat-restricted principal.
+        sources = [catalogs[k] for k in sorted(catalogs)]
+    else:
+        sources = c.execute('''SELECT a.id AS account,a.platform,h.status,h.detail_code,h.cooldown_until,
+            h.updated_at,h.discovery_started_at,h.discovery_completed_at,h.discovery_count,h.discovery_limited,h.operations,
+            l.expires_at AS collector_lease_until,
+            s.last_ingest_at,s.detail_code AS archive_detail_code
+            FROM accounts a LEFT JOIN collector_health h ON h.account=a.id
+            LEFT JOIN source_status s ON s.account=a.id
+            LEFT JOIN collector_leases l ON l.account=a.id
+            WHERE a.id=ANY(%s) ORDER BY a.id''', (p['accounts'],)).fetchall()
+        for row in sources:
+            row['catalog_chats'] = catalogs.get(row['account'], {}).get('catalog_chats', 0)
+    if sources:
+        checkpoints = _checkpoints(c, p, {row['id'] for row in catalog})
+        downloads, files = _files(c, p)
+    for row in sources:
+        account = row['account']
+        data = messages.get(account, {})
+        row.update(messages=data.get('messages', 0), oldest_message_at=data.get('oldest_message_at'),
+                   newest_message_at=data.get('newest_message_at'))
+        row['history'] = _history(row['platform'], catalog_ids.get(account, set()), checkpoints.get(account, []))
+        if not scoped:
+            row['detail']=describe(row.get('detail_code'))
+            row['archive_detail']=describe(row.get('archive_detail_code'))
+            row['freshness']=freshness(row['history'].get('last_scan_at'))
+            row['alerts']=[]
+            if row['freshness']['state']=='scan_stale':row['alerts'].append('successful_scan_older_than_5_minutes')
+            if row['history'].get('gap_chats'):row['alerts'].append('provider_history_gaps')
+            if row.get('archive_detail_code')=='version_conflict':row['alerts'].append('archive_version_conflicts')
+        row['files'] = files.get(account, {'stored_files': 0, 'stored_bytes': 0,
+            'extraction': dict.fromkeys(EXTRACTION_STATES, 0),
+            'enrichment': dict.fromkeys(ENRICHMENT_STATES, 0),
+            'extraction_truncated': 0, 'enrichment_truncated': 0})
+        row['files']['download'] = {**dict.fromkeys(DOWNLOAD_STATES, 0), **downloads.get(account, {})}
+        if not scoped:
+            row['operations']=operations(row,row['history'],row['files'])
+            row['processing_profiles']=c.execute('''SELECT kind,provider,model,enabled AS configured,
+                observed_at,expires_at,expires_at>clock_timestamp() AND enabled AS worker_current,
+                pause_reason,paused_until
+                FROM processing_profiles WHERE account=%s ORDER BY kind''',(account,)).fetchall()
+    return {'scope': 'permitted_chats' if scoped else 'permitted_accounts',
+            'coverage': 'partial', 'sources': sources}
