@@ -47,6 +47,31 @@ reviewing the body. File proximity alone is not sufficient. CI does not use
 `test ingest` or rewrite spec links, so future runs preserve existing links.
 The `tiden-receipt` artifact records the run, association and verdict.
 
+## Maintaining the product map
+
+[ARCHITECTURE.md](ARCHITECTURE.md) defines the logical component boundaries.
+They differ from distribution packages and running services. Preserve existing
+spec/test identities when changing component assignments, and retain historical
+source anchors alongside the reviewed revision.
+
+Reverse-engineered specs are candidates for review. Check API arguments, state
+semantics, schema versions and deployment exceptions against the implementation;
+a source-file anchor does not guarantee that every sentence is accurate.
+Implemented baseline contracts use `Active`. New work uses an explicit change
+intent or roadmap; do not confuse `Backlog` with missing test coverage or set
+`Done` merely because a related test passes.
+
+Review spec and test-link changes in the matching Tiden branch before merging
+them to main. A Git merge does not by itself merge the spec branch. After both
+merges, verify the actual main gate and its evidence, rather than using a feature
+branch's projection as the main result. Existing test links survive ordinary CI
+reports; authoritative imports must not silently replace them.
+
+`no_test` means no accepted linked test; `not_run` means linked evidence has not
+met the gate's run/freshness requirements. Neither label alone proves a runtime
+bug. Passing synthetic tests also do not prove live-provider history coverage or
+production infrastructure health. Keep those limits visible.
+
 The original synthetic reports can contain failure diagnostics. Keep artifact
 access and retention appropriate for the repository; never test against live
 messenger sessions or personal archives.
