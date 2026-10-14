@@ -19,6 +19,7 @@ from psycopg.types.json import Jsonb
 
 from .enrichment_providers import ModelError, infer, private_text, profile_hash, validate_profile
 from . import resource_admission
+from . import processing_events
 
 
 def configuration(path):
@@ -147,15 +148,38 @@ class EnrichmentWorker:
                     [(account,kind,profile['provider'],model,enabled,profile['timeout_seconds']+120,
                       account,kind,profile_hash(profile))
                      for account in self.config['accounts']])
+    def _expire_leases(self):
+        # Account/row locks must all precede the publication counter. End this
+        # bounded transaction before a claim examines any other account's rows.
+        with self.connection() as c:
+            c.execute('SELECT pg_advisory_xact_lock(74509139)')
+            expired=c.execute('''SELECT e.attachment,m.account FROM attachment_enrichment e
+                JOIN attachments a ON a.id=e.attachment JOIN messages m ON m.id=a.message
+                WHERE m.account=ANY(%s) AND e.state='leased' AND e.lease_until<clock_timestamp()
+                AND e.attempts>=3 ORDER BY m.account,e.attachment LIMIT 64''',
+                (self.config['accounts'],)).fetchall()
+            for account in sorted({item['account'] for item in expired}):
+                c.execute('SELECT pg_advisory_xact_lock(hashtextextended(%s,0))',
+                          ('archive:'+account,))
+            for item in expired:
+                failed=c.execute('''UPDATE attachment_enrichment e SET state='failed',error_code='retry_exhausted',
+                    lease_token=NULL,lease_until=NULL,next_due=clock_timestamp(),updated_at=clock_timestamp()
+                    FROM attachments a,messages m WHERE e.attachment=%s AND a.id=e.attachment AND m.id=a.message
+                    AND m.account=ANY(%s) AND e.state='leased' AND e.lease_until<clock_timestamp()
+                    AND e.attempts>=3 RETURNING e.*,m.account''',
+                    (item['attachment'],self.config['accounts'])).fetchone()
+                if failed:
+                    processing_events.publish(c,failed,
+                        stage='transcript' if failed['kind']=='audio' else 'description', state='failed',
+                        identity={'profile_hash':failed['profile_hash'],'attempts':failed['attempts'],
+                            'error_code':'retry_exhausted'},basis='model_generated',
+                        provider=failed['provider'],model=failed['model'],error_code='retry_exhausted')
+
     def claim(self):
+        self._expire_leases()
         with resource_admission.transaction(self.connection()) as (c,resources):
             # Serialize claims/budget only, never inference. Failed attempts count.
             c.execute('SELECT pg_advisory_xact_lock(74509139)')
-            c.execute('''UPDATE attachment_enrichment e SET state='failed',error_code='retry_exhausted',
-                lease_token=NULL,lease_until=NULL,next_due=clock_timestamp(),updated_at=clock_timestamp()
-                FROM attachments a,messages m WHERE a.id=e.attachment AND m.id=a.message
-                AND m.account=ANY(%s) AND e.state='leased' AND e.lease_until<clock_timestamp()
-                AND e.attempts>=3''',(self.config['accounts'],))
             c.execute("""INSERT INTO enrichment_budget(day,attempts) VALUES(current_date,0)
                 ON CONFLICT DO NOTHING""")
             used=c.execute('SELECT attempts FROM enrichment_budget WHERE day=current_date FOR UPDATE').fetchone()['attempts']
@@ -215,7 +239,9 @@ class EnrichmentWorker:
                 except BaseException:
                     if resource_lease:resource_lease.close()
                     raise
-                return {**row,'kind':kind,'lease_token':token,'profile_hash':ph,'_resource_lease':resource_lease},profile
+                return {**row,'kind':kind,'provider':profile['provider'],'model':profile['model'],
+                    'attempts':1 if row['profile_hash']!=ph else row['attempts']+1,
+                    'lease_token':token,'profile_hash':ph,'_resource_lease':resource_lease},profile
         return None
     def finish(self,row,result=None,error=None):
         try:return self._finish(row,result,error)
@@ -235,6 +261,10 @@ class EnrichmentWorker:
             # Derived passage vectors for a near-limit transcript need a bounded
             # write budget independent of the gateway's short read timeout.
             c.execute('SET LOCAL statement_timeout=30000')
+            # The archive uses this same account-before-row lock order. Keep
+            # result persistence and event publication on one frozen revision.
+            c.execute('SELECT pg_advisory_xact_lock(hashtextextended(%s,0))',
+                      ('archive:'+row['account'],))
             r=c.execute('''UPDATE attachment_enrichment e SET state=%s,title=%s,summary=%s,text_content=%s,
                 metadata=%s,truncated=%s,error_code=%s,lease_token=NULL,lease_until=NULL,
                 next_due=clock_timestamp()+interval '10 minutes',updated_at=clock_timestamp(),
@@ -243,9 +273,23 @@ class EnrichmentWorker:
                 AND e.lease_until>clock_timestamp() AND a.id=e.attachment AND m.id=a.message
                 AND a.active AND NOT m.deleted AND a.digest=e.source_digest AND m.revision=e.source_revision
                 AND e.source_digest=%s AND e.source_revision=%s RETURNING e.attachment''',
-                ('ready' if result else 'failed',clean['title'],clean['summary'],clean['text'],Jsonb(clean['metadata']),
+                ('ready' if result is not None else 'failed',clean['title'],clean['summary'],clean['text'],Jsonb(clean['metadata']),
                  clean['truncated'],error,result is not None,row['attachment'],row['lease_token'],row['source_digest'],row['source_revision']))
             finished=r.fetchone() is not None
+            if finished:
+                identity={'profile_hash':row['profile_hash'],'artifact':clean}
+                if result is None:
+                    identity.update(lease_token=str(row['lease_token']),error_code=error)
+                processing_events.publish(c,row,
+                    stage='transcript' if row['kind']=='audio' else 'description',
+                    state='ready' if result is not None else 'failed',identity=identity,
+                    basis='model_generated',truncated=clean['truncated'],text_chars=len(clean['text']),
+                    provider=row.get('provider'),model=row.get('model'),error_code=error,
+                    retryable=result is None and row['attempts']<3 and error not in (
+                        'model_auth_failed','codex_private_auth_required','codex_chatgpt_login_required',
+                        'codex_login_check_failed',
+                        'codex_cli_unavailable','codex_upgrade_required','invalid_model_key',
+                        'local_model_not_installed','audio_tools_unavailable','retry_exhausted'))
             resource_admission.release(c,row.get('_resource_lease'))
             if finished and error:resource_admission.pause_profile(c,row['account'],row['kind'],row['profile_hash'],error)
             return finished
@@ -255,7 +299,10 @@ class EnrichmentWorker:
         row,profile=claim
         try:self.finish(row,self.processor(self.files,row,profile))
         except ModelError as exc:self.finish(row,error=exc.code)
-        except Exception:self.finish(row,error='enrichment_failed')
+        except Exception as error:
+            from .telemetry import capture
+            capture(error, 'enrichment_failed')
+            self.finish(row,error='enrichment_failed')
         return True
 
 
@@ -274,6 +321,8 @@ def main():
         except Exception:print(json.dumps({'error':'enrichment_failed'}))
         return
     if not args.config:parser.error('--config required')
+    from .telemetry import configure
+    configure('enricher')
     cfg=configuration(args.config)
     worker=EnrichmentWorker(private_text(os.environ['DATABASE_URL_FILE']).strip(),os.environ['PROBE_FILES'],cfg)
     stop=threading.Event()

@@ -8,6 +8,7 @@ from pathlib import Path
 import re
 import secrets
 import signal
+import socket
 import stat
 import time
 
@@ -139,20 +140,43 @@ class NodeProvider:
         self.cfg,self.config_path,self.lock_fd=cfg,str(config_path),lock_fd
         self.script=script or whatsapp_asset('provider.mjs')
         self.process=None; self.lock=asyncio.Lock(); self.counter=0; self.policy=None
+        self.send_lock=asyncio.Lock();self.disconnect_lock=asyncio.Lock()
+        self.send_reader=None;self.send_writer=None
     def subscribe(self,*_): pass # Node writes callbacks to its own disk queue, never RAM polling.
     async def connect(self):
+        if self.process and self.process.returncode is None:raise RuntimeError('provider_already_connected')
         if self.cfg.get('session_directory'):clear_browser_runtime_locks(self.cfg['session_directory'])
         if self.cfg.get('events_directory'):
             directory=Path(self.cfg['events_directory']);directory.mkdir(mode=0o700,parents=True,exist_ok=True)
             (directory/'.transport-failure').unlink(missing_ok=True)
-        self.process=await asyncio.create_subprocess_exec(self.cfg['node_executable'],str(self.script),self.config_path,
-            stdin=asyncio.subprocess.PIPE,stdout=asyncio.subprocess.PIPE,stderr=asyncio.subprocess.DEVNULL,
-            limit=1024*1024+1,pass_fds=(self.lock_fd,),start_new_session=True)
-        await self.call('start',{'policy':self.policy})
+        # Inherited, anonymous socket: no TCP listener, filesystem endpoint or
+        # second browser. Media backpressure cannot consume the sending pipe.
+        parent,child=socket.socketpair()
+        try:
+            env={**os.environ,'ANYMSG_WHATSAPP_SEND_FD':str(child.fileno())}
+            self.process=await asyncio.create_subprocess_exec(self.cfg['node_executable'],str(self.script),self.config_path,
+                stdin=asyncio.subprocess.PIPE,stdout=asyncio.subprocess.PIPE,stderr=asyncio.subprocess.DEVNULL,
+                limit=1024*1024+1,pass_fds=(self.lock_fd,child.fileno()),env=env,start_new_session=True)
+            child.close()
+            parent.setblocking(False)
+            self.send_reader,self.send_writer=await asyncio.open_connection(sock=parent,limit=1024*1024+1)
+            await self.call('start',{'policy':self.policy})
+        except BaseException:
+            parent.close()
+            await self.disconnect()
+            raise
+        finally:child.close()
     async def disconnect(self):
+        async with self.disconnect_lock:
+            await self._disconnect()
+    async def _disconnect(self):
+        if self.send_writer:
+            self.send_writer.close()
+            with suppress(OSError):await self.send_writer.wait_closed()
+            self.send_writer=None;self.send_reader=None
         if not self.process:return
         if self.process.returncode is None:
-            self.process.terminate()
+            with suppress(ProcessLookupError):self.process.terminate()
             try:await asyncio.wait_for(self.process.wait(),12)
             except TimeoutError:
                 with suppress(ProcessLookupError): os.killpg(self.process.pid,signal.SIGKILL)
@@ -168,39 +192,66 @@ class NodeProvider:
     async def wait_disconnected(self):
         await self.process.wait()
         raise RuntimeError(self.failure_code())
-    async def request(self,method,params):
+    async def request(self,method,params,*,sending=False):
         if not self.process or self.process.returncode is not None: raise RuntimeError(self.failure_code())
         self.counter+=1
-        payload=json.dumps({'id':self.counter,'method':method,'params':params},separators=(',',':')).encode()+b'\n'
+        request_id=self.counter
+        payload=json.dumps({'id':request_id,'method':method,'params':params},separators=(',',':')).encode()+b'\n'
         if len(payload)>1024*1024: raise ValueError('provider_request_too_large')
-        self.process.stdin.write(payload); await self.process.stdin.drain()
-        return self.counter
-    async def reply(self,request,timeout=90):
-        line=await asyncio.wait_for(self.process.stdout.readline(),timeout)
+        writer=self.send_writer if sending else self.process.stdin
+        if writer is None:raise RuntimeError('provider_disconnected')
+        writer.write(payload); await writer.drain()
+        return request_id
+    async def reply(self,request,timeout=90,*,sending=False):
+        reader=self.send_reader if sending else self.process.stdout
+        if reader is None:raise RuntimeError('provider_disconnected')
+        line=await asyncio.wait_for(reader.readline(),timeout)
         if not line or len(line)>1024*1024: raise RuntimeError(self.failure_code())
         result=json.loads(line)
         if not isinstance(result,dict) or result.get('id')!=request: raise RuntimeError('provider_protocol_error')
         if 'error' in result:
             code=result['error']
+            if isinstance(code,str) and code in ('operation_invalid_parameters','operation_disabled','operation_expired',
+                'operation_target_invalid','operation_target_unavailable','operation_unsupported',
+                'operation_query_failed','operation_result_too_large','registered_file_invalid'):
+                from .commands import CommandRejected
+                raise CommandRejected(code)
+            if code in ('send_expired','sending_disabled','send_target_invalid'):
+                from .outgoing import SendRejected
+                raise SendRejected(code)
             if isinstance(code,str) and code in CONNECTION_ERRORS:raise RuntimeError(code)
             if code in ('media_unavailable','media_reference_changed','unsupported_media_type'): raise ProviderUnavailable(code)
             safe=MEDIA_ERRORS|{'provider_operation_failed','chat_excluded'}
             raise ProviderOperationError(code if isinstance(code,str) and code in safe else 'provider_operation_failed')
         return result
+    @property
+    def send_gate(self): return self.send_lock
+
     async def call(self,method,params):
+        if method in ('send_text','messenger_operation'):raise RuntimeError('send_gate_required')
         async with self.lock:
-            request=await self.request(method,params)
-            try:
-                reply=await self.reply(request,timeout=300 if method=='start' else 90)
-                if set(reply)!={'id','result'}: raise RuntimeError('provider_protocol_error')
-                return reply['result']
-            except (ProviderUnavailable,ProviderOperationError):
-                raise # Complete error frame; pipe is still synchronized.
-            except BaseException:
-                # After cancellation/partial response, never reuse a desynchronized pipe.
-                await self.disconnect(); raise
+            return await self._call_unlocked(method,params)
+
+    async def _call_unlocked(self,method,params,*,sending=False):
+        try:
+            request=await self.request(method,params,sending=sending)
+            reply=await self.reply(request,timeout=300 if method=='start' else 90,sending=sending)
+            if set(reply)!={'id','result'}: raise RuntimeError('provider_protocol_error')
+            return reply['result']
+        except (ProviderUnavailable,ProviderOperationError):
+            raise # Complete error frame; pipe is still synchronized.
+        except Exception as exc:
+            from .outgoing import SendRejected
+            from .commands import CommandRejected
+            if isinstance(exc,(SendRejected,CommandRejected)):raise
+            await self.disconnect(); raise
+        except BaseException:
+            # After cancellation/partial response, never reuse a desynchronized pipe.
+            await self.disconnect(); raise
     async def set_policy(self,policy):
         self.policy={k:policy[k] for k in ('discover_chats','include_chats','exclude_chats')}
+        self.policy.update(enabled=policy.get('enabled',True),send_enabled=policy.get('send_enabled',False))
+        self.policy['operations_enabled']=policy.get('operations_enabled',[])
         # Separate control file: a long media response must not delay exclusions
         # or lease liveness. Node fails closed when this short-lived policy expires.
         def save():
@@ -215,6 +266,24 @@ class NodeProvider:
         await asyncio.to_thread(save)
     async def dialogs(self,limit): return await self.call('dialogs',{'limit':limit})
     async def page(self,chat,*,limit,before=None): return await self.call('page',{'chat':chat,'limit':limit,'before':before})
+    async def send_text(self,job):
+        # OutgoingWorker holds send_gate before claiming a queued job.
+        if not self.send_lock.locked():raise RuntimeError('send_gate_required')
+        from .outgoing import dispatch_payload
+        payload=dispatch_payload(job,'whatsapp')
+        if job.get('_preflight') is not None:await job['_preflight']()
+        return await self._call_unlocked('send_text',{'chat':job['provider_chat'],'text':payload['text'],
+            'link_preview':payload['link_preview'],
+            'reply_provider_id':job.get('reply_provider_id'),'expires_at':job['expires_at']},sending=True)
+    async def execute_operation(self,job):
+        if not self.send_lock.locked():raise RuntimeError('send_gate_required')
+        if job.get('_preflight') is not None:await job['_preflight']()
+        # Internal callable/DB metadata never enters the subprocess protocol.
+        payload={key:value for key,value in job.items() if key in (
+            'operation','parameters','provider_chat','provider_message_id','expires_at',
+            'source_provider_chat','source_provider_message','registered_file_path','trusted_blob_directory',
+            'file_digest','file_bytes','file_mime','file_name')}
+        return await self._call_unlocked('messenger_operation',payload,sending=True)
     async def chunks(self,source,descriptor):
         complete=False
         async with self.lock:
@@ -239,6 +308,9 @@ class NodeProvider:
 
 
 class WhatsAppCollector(TelegramCollector):
+    async def send_outgoing(self,job):
+        # Node durable message_create + explicit capture owns this observation.
+        return await self.provider.send_text(job)
     state_class=WhatsAppState
     coverage_code='whatsapp_history_partial'
     connect_timeout=300
@@ -365,10 +437,13 @@ async def run_config(path):
 
 def main():
     import argparse
+    from .telemetry import configure, capture
+    configure('whatsapp')
     parser=argparse.ArgumentParser(description=__doc__);parser.add_argument('--config',type=Path,required=True)
     args=parser.parse_args();os.umask(0o077)
     try:asyncio.run(run_config(args.config))
     except Exception as exc:
+        capture(exc, 'collector_failed')
         safe={'collector_disabled','session_handover_not_confirmed','whatsapp_pairing_required','whatsapp_identity_mismatch',
             'private_session_required','live_account_required','collector_already_owned','session_already_owned',
             'collector_lease_lost','collection_disabled','provider_disconnected'}

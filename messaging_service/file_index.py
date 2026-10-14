@@ -24,6 +24,7 @@ from .file_extract import (Extraction, MAX_INPUT_BYTES, MAX_TEXT_CHARS, PROCESSO
                           extraction_profile, valid_metadata)
 from .policy import scope_filter, targets
 from . import resource_admission
+from . import processing_events
 from .search_query import compile_query, cursor_binding, encode_cursor, decode_cursor
 
 
@@ -469,13 +470,37 @@ class FileIndexer:
         return psycopg.connect(self.dsn, row_factory=dict_row, connect_timeout=5,
             options='-c statement_timeout=5000 -c timezone=UTC')
 
+    def _expire_leases(self):
+        # Finish all failure publication before the independent queue claim.
+        # Otherwise a held feed_counter could be followed by another account
+        # or candidate-row lock held by ingestion waiting on that same counter.
+        with self.connection() as c:
+            c.execute('SELECT pg_advisory_xact_lock(74509139)')
+            expired = c.execute('''SELECT f.attachment,m.account FROM attachment_text f
+                JOIN attachments a ON a.id=f.attachment JOIN messages m ON m.id=a.message
+                WHERE f.state='leased' AND f.lease_until<clock_timestamp() AND f.attempts>=%s
+                ORDER BY m.account,f.attachment LIMIT 64''', (self.max_attempts,)).fetchall()
+            for account in sorted({item['account'] for item in expired}):
+                c.execute('SELECT pg_advisory_xact_lock(hashtextextended(%s,0))',
+                          ('archive:' + account,))
+            for item in expired:
+                failed = c.execute('''UPDATE attachment_text f SET state='failed',error_code='retry_exhausted',
+                    lease_token=NULL,lease_until=NULL,updated_at=clock_timestamp()
+                    FROM attachments a,messages m WHERE f.attachment=%s AND a.id=f.attachment
+                    AND m.id=a.message AND f.state='leased' AND f.lease_until<clock_timestamp()
+                    AND f.attempts>=%s RETURNING f.*,m.account''',
+                    (item['attachment'], self.max_attempts)).fetchone()
+                if failed:
+                    processing_events.publish(c, failed, stage='text', state='failed',
+                        identity={'processor_version': PROCESSOR_VERSION,
+                            'profile': self.profile(failed), 'attempts': failed['attempts'],
+                            'error_code': 'retry_exhausted'}, basis='extracted',
+                        extractor=failed['extractor'], error_code='retry_exhausted')
+
     def claim(self):
+        self._expire_leases()
         with resource_admission.transaction(self.connection()) as (c,resources):
             c.execute('SELECT pg_advisory_xact_lock(74509139)')
-            c.execute("""UPDATE attachment_text SET state='failed',error_code='retry_exhausted',
-                lease_token=NULL,lease_until=NULL,updated_at=clock_timestamp()
-                WHERE state='leased' AND lease_until<clock_timestamp() AND attempts>=%s""",
-                (self.max_attempts,))
             rows = c.execute('''SELECT f.*,a.message,m.account FROM attachment_text f
                 JOIN attachments a ON a.id=f.attachment JOIN messages m ON m.id=a.message
                 WHERE ''' + CURRENT + ''' AND f.attempts<%s AND
@@ -545,6 +570,18 @@ class FileIndexer:
                  result.extractor, result.error_code, state, self.retry_seconds, PROCESSOR_VERSION,
                  self.profile(job), display_name(job['source_filename']),
                  Jsonb({**result.metadata, 'text_char_limit': self.text_char_limit}), job['attachment']))
+            if state == 'ready' or result.state == 'failed':
+                identity = {'processor_version': PROCESSOR_VERSION, 'profile': self.profile(job),
+                    'text': result.text if state == 'ready' else '', 'extractor': result.extractor,
+                    'metadata': result.metadata, 'truncated': result.truncated,
+                    'error_code': result.error_code}
+                if result.state == 'failed':
+                    identity['attempts'] = job['attempts']
+                processing_events.publish(c, job, stage='text',
+                    state='ready' if state == 'ready' else 'failed', identity=identity,
+                    basis='extracted', truncated=result.truncated if state == 'ready' else False,
+                    text_chars=len(result.text) if state == 'ready' else 0,
+                    extractor=result.extractor, error_code=result.error_code, retryable=retry)
             resource_admission.release(c,job.get('_resource_lease'))
             return 'retry' if retry else state
 
@@ -598,6 +635,8 @@ class FileIndexer:
 
 
 def main():
+    from .telemetry import configure, capture
+    configure('indexer')
     parser = argparse.ArgumentParser(description='Index already archived immutable files locally')
     parser.add_argument('--dsn-file', default=os.environ.get('DATABASE_URL_FILE'))
     parser.add_argument('--files', default=os.environ.get('PROBE_FILES', '/data/files'))
@@ -620,7 +659,8 @@ def main():
             result = worker.run_once()
             if result['claimed']:
                 print(json.dumps({'status': result['status'], 'error_code': result['error_code']}), flush=True)
-        except Exception:
+        except Exception as error:
+            capture(error, 'indexer_failed')
             # The operator can inspect DB queue state. Never log DSN/SQL/paths
             # or arbitrary parser/database error strings in this background loop.
             print('{"status":"error","error_code":"indexer_failed"}', flush=True)

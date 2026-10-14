@@ -145,20 +145,20 @@ def test_commit_order_and_rollback_do_not_skip_events(seeded):
     def second():
         with s.pool.connection() as c:
             started.set()
-            return s.append_event(c,'telegram-demo','demo-tg-2','test.second')
+            return s.append_event(c,'telegram-demo','demo-tg-2','message.edited')
     with ThreadPoolExecutor(1) as pool:
         with s.pool.connection() as first:
-            first_id=s.append_event(first,'telegram-demo','demo-tg-1','test.first')
+            first_id=s.append_event(first,'telegram-demo','demo-tg-1','message.created')
             later=pool.submit(second); assert started.wait(2)
             during=s.get_updates(a,'main')
             assert during['items']==[]
             assert not later.done()
         second_id=later.result(timeout=6)
     assert second_id==first_id+1
-    assert [e['kind'] for e in s.get_updates(a,'main')['items']]==['test.first','test.second']
+    assert [e['kind'] for e in s.get_updates(a,'main')['items']]==['message.created','message.edited']
     with pytest.raises(RuntimeError):
         with s.pool.connection() as c:
-            s.append_event(c,'telegram-demo','demo-tg-1','test.rollback')
+            s.append_event(c,'telegram-demo','demo-tg-1','message.deleted')
             raise RuntimeError('rollback')
     assert len(s.get_updates(a,'main')['items'])==2
 
@@ -209,7 +209,9 @@ def test_legacy_mcp_wire_protocol_and_scopes(seeded):
         assert init.status_code==200
         assert init.json()['result']['serverInfo']['version']==s.capabilities(b)['version']
         tools=rpc('tools/list').json()['result']['tools']
-        assert len(tools)==17 and not any('send' in t['name'] for t in tools)
+        assert len(tools)==29
+        send=next(t for t in tools if t['name']=='send_message')
+        assert send['annotations']['readOnlyHint'] is False and send['annotations']['openWorldHint'] is True
         value=rpc('tools/call',{'name':'search','arguments':{'query':'Atlas'}}).json()['result']
         assert not value.get('isError')
         assert value['structuredContent']['items']==[]

@@ -38,7 +38,7 @@ def validate(data):
     if not isinstance(data, dict): raise ValueError('invalid_envelope')
     if len(canonical(data))>MAX_ENVELOPE: raise ValueError('envelope_too_large')
     allowed={'account','platform','chat','chat_title','provider_id','sender','body','sent_at',
-             'updated_at','deleted','direction','origin','media','sender_profile','metadata'}
+             'updated_at','deleted','direction','origin','media','sender_profile','metadata','formatting'}
     if set(data)-allowed: raise ValueError('unknown_envelope_fields')
     result={k:text(data.get(k),n,k,empty=k in ('body','sender','chat_title')) for k,n in
             [('account',64),('chat',160),('chat_title',512),('provider_id',256),('sender',160),('body',65536)]}
@@ -63,15 +63,19 @@ def validate(data):
         result['sender_profile']['username']=result['sender_profile']['username'].lstrip('@')
     if 'metadata' in data:
         metadata=data['metadata']
-        if not isinstance(metadata,dict) or set(metadata)-{'reply_to_provider_id','forwarded','media_kind','mentions_owner','reply_to_owner'}:
+        if not isinstance(metadata,dict) or set(metadata)-{'reply_to_provider_id','forwarded','media_kind','mentions_owner','reply_to_owner','sender_is_bot','chat_type','sender_identity_basis'}:
             raise ValueError('invalid_metadata')
         result['metadata']={}
         for key,value in metadata.items():
-            if key in ('forwarded','mentions_owner','reply_to_owner'):
+            if key in ('forwarded','mentions_owner','reply_to_owner','sender_is_bot'):
                 if value is not None and type(value) is not bool:raise ValueError('invalid_metadata')
             elif value is not None:
                 text(value,256 if key=='reply_to_provider_id' else 32,key)
                 if key=='media_kind' and value not in ('photo','video','audio','voice','document','sticker','animation','other'):
+                    raise ValueError('invalid_metadata')
+                if key=='chat_type' and value not in ('private','group','channel','unknown'):
+                    raise ValueError('invalid_metadata')
+                if key=='sender_identity_basis' and value!='authenticated_self':
                     raise ValueError('invalid_metadata')
             result['metadata'][key]=value
     seen=set()
@@ -90,6 +94,13 @@ def validate(data):
         mime=text(item.get('mime'),127,'mime')
         if not re.fullmatch(r'[\w.+-]+/[\w.+-]+',mime): raise ValueError('invalid_mime')
         result['media'].append({'provider_id':mid,'filename':name,'mime':mime,'bytes':size})
+    if 'formatting' in data:
+        from .incoming_formatting import validate as validate_formatting, unknown as unknown_formatting
+        # Deleted captures can carry the retained revision's old wire proof.
+        # It no longer describes current content and must be cleared before
+        # validating offsets/hash against a deliberately empty tombstone body.
+        result['formatting']=unknown_formatting() if result['deleted'] else \
+            validate_formatting(data['formatting'],result['body'],result['platform'])
     if result['deleted']:
         result['body']=''; result['media']=[]
     return result
@@ -97,5 +108,5 @@ def validate(data):
 
 def fingerprint(data):
     # A retry/backfill observation does not itself create a new message revision.
-    content={k:v for k,v in data.items() if k not in ('origin','updated_at','chat_title','sender_profile','metadata')}
+    content={k:v for k,v in data.items() if k not in ('origin','updated_at','chat_title','sender_profile','metadata','formatting')}
     return hashlib.sha256(canonical(content)).hexdigest()

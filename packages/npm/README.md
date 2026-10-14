@@ -28,7 +28,10 @@ npx anymsg search --url https://messages.example.com --token-file /private/agent
 
 Keep token files private (`chmod 600`); do not put tokens in command arguments.
 Use `call('operation', arguments)` for any of the 17 current HTTP operations.
-No send operation exists in this release. MCP clients connect directly to the
+Confirmed text sending uses `sendMessage` and `getSendStatus`, separate send rights
+and account opt-in. The acting agent must obtain exact owner confirmation; the
+server has no approval gate yet. Reuse the same action ID after a lost response;
+never automatically resend an unknown result. MCP clients connect directly to the
 server's `/mcp` endpoint; this package is not a stdio MCP bridge.
 
 Server, source and Python package: https://github.com/GoSync-Inc/anymsg.

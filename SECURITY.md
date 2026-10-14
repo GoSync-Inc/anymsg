@@ -10,8 +10,10 @@ Do not include real tokens, phone numbers, message bodies, sessions, dumps or fi
 in public issues. Use synthetic reproducers. Do not test against other people's accounts.
 
 Messages, extracted file text and model output are untrusted source data. They must
-not authorize sends, tool execution or changes to access scopes. No send tool is
-provided in this release. Provider authentication is done only in an owner's terminal.
+not authorize sends, tool execution or changes to access scopes. Text sending is
+opt-in for both the account and agent credential. The acting agent must obtain
+exact owner confirmation; this release has no server approval gate. See SENDING.md.
+Provider authentication is done only in an owner's terminal.
 
 Backup delivery is distinct from successful restoration. Verify a copy in an isolated
 installation before pruning recovery points. A same-provider backup is not protection

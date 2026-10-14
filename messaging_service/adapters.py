@@ -7,6 +7,7 @@ from datetime import datetime,timezone
 import re
 
 from .envelope import validate
+from .incoming_formatting import telegram as telegram_formatting, unknown as unknown_formatting
 
 
 def timestamp(value):
@@ -16,7 +17,7 @@ def timestamp(value):
     return value
 
 
-def telegram_message(account,message,*,chat_title='',origin='live'):
+def telegram_message(account,message,*,chat_title='',origin='live',verified_self=None):
     """Telethon Message-shaped object. No entity/network lookups during capture."""
     media=[]
     file=getattr(message,'file',None)
@@ -31,6 +32,32 @@ def telegram_message(account,message,*,chat_title='',origin='live'):
         media.append({'provider_id':str(provider_media.id),'filename':file.name or f'{message.id}{file.ext or ".bin"}',
                       'mime':file.mime_type or 'application/octet-stream','bytes':file.size})
     entity=getattr(message,'sender',None)  # Telethon's cached entity; never get_sender()/network here.
+    # NewMessage can belong to a chat absent from the last dialog discovery.
+    # Use only the entity already attached to this message, and verify its peer.
+    from telethon import types,utils
+    sender_id=message.sender_id
+    identity_basis=None
+    # UpdateShortSentMessage has no from_id. The provider supplies only the
+    # self entity it has already authenticated against the configured owner ID.
+    # A missing group/channel sender may be anonymous: never infer it there.
+    if isinstance(verified_self,types.User) and verified_self.is_self:
+        if not sender_id and message.out and isinstance(getattr(message,'peer_id',None),types.PeerUser):
+            sender_id=verified_self.id
+            identity_basis='authenticated_self'
+        if sender_id==verified_self.id and entity is None:
+            entity=verified_self
+    chat_entity=getattr(message,'chat',None)
+    observed_type='private' if isinstance(getattr(message,'peer_id',None),types.PeerUser) else None
+    observed_title=''
+    if isinstance(chat_entity,(types.User,types.Chat,types.ChatForbidden,types.Channel,types.ChannelForbidden)) and utils.get_peer_id(chat_entity)==message.chat_id:
+        if isinstance(chat_entity,types.User):
+            observed_type='private'
+            observed_title=' '.join(x for x in (chat_entity.first_name,chat_entity.last_name) if isinstance(x,str))
+        else:
+            observed_title=chat_entity.title or ''
+            if isinstance(chat_entity,(types.Chat,types.ChatForbidden)):observed_type='group'
+            elif getattr(chat_entity,'megagroup',False):observed_type='group'
+            elif getattr(chat_entity,'broadcast',False):observed_type='channel'
     name=' '.join(x for x in [getattr(entity,'first_name',None),getattr(entity,'last_name',None)] if isinstance(x,str))
     profile={'display_name':(name or getattr(entity,'title','') or '')[:512],
              'username':(getattr(entity,'username','') or '')[:128]}
@@ -43,11 +70,16 @@ def telegram_message(account,message,*,chat_title='',origin='live'):
         from telethon.utils import get_peer_id
         if get_peer_id(reply_peer)!=message.chat_id:reply_id=None
     return validate({'account':account,'platform':'telegram','chat':str(message.chat_id),
-        'chat_title':chat_title or str(message.chat_id),'provider_id':str(message.id),
-        'sender':str(message.sender_id or ''),'body':message.message or '',
+        'chat_title':(chat_title if chat_title and chat_title!=str(message.chat_id) else observed_title) or str(message.chat_id),
+        'provider_id':str(message.id),
+        'sender':str(sender_id or ''),'body':message.message or '',
+        'formatting':telegram_formatting(message.message or '',getattr(message,'entities',None)),
         'sent_at':timestamp(message.date),'updated_at':timestamp(message.edit_date or message.date),
         'deleted':False,'direction':'outgoing' if message.out else 'incoming','origin':origin,'media':media,
         'sender_profile':profile,'metadata':{
+            'chat_type':observed_type,
+            'sender_identity_basis':identity_basis,
+            'sender_is_bot':getattr(entity,'bot',None) if isinstance(entity,types.User) else None,
             'reply_to_provider_id':reply_id,
             'mentions_owner':getattr(message,'mentioned',None),
             'forwarded':getattr(message,'fwd_from',None) is not None,
@@ -77,6 +109,7 @@ def whatsapp_message(account,event,*,origin='live',change='message',observed_at=
     return validate({'account':account,'platform':'whatsapp','chat':event['chatId'],
         'chat_title':event.get('chatName') or event['chatId'],'provider_id':event['messageId'],
         'sender':event.get('senderId') or '','body':event.get('body') or '',
+        'formatting':event.get('formatting',unknown_formatting()),
         'sent_at':timestamp(event['timestamp']),'updated_at':timestamp(updated or event['timestamp']),
         'deleted':change=='delete','direction':'outgoing' if event.get('fromMe') else 'incoming',
         'origin':origin,'media':media,'sender_profile':{'display_name':event.get('senderName') or '',

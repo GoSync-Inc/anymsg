@@ -4,7 +4,7 @@ build-backend = "hatchling.build"
 
 [project]
 name = "anymsg"
-version = "0.9.9"
+version = "0.9.16"
 description = "A self-hosted messaging archive and MCP interface for agents"
 readme = "README.md"
 requires-python = ">=3.13,<3.14"
@@ -25,6 +25,7 @@ dependencies = [
   "starlette==1.7.0",
   "httpx==0.28.1",
   "telethon==1.45.0",
+  "markdown-it-py==4.2.0",
 ]
 
 [project.urls]
@@ -32,11 +33,14 @@ Homepage = "https://github.com/GoSync-Inc/anymsg"
 Repository = "https://github.com/GoSync-Inc/anymsg"
 Issues = "https://github.com/GoSync-Inc/anymsg/issues"
 
+[project.optional-dependencies]
+telemetry = ["tiden-telemetry==0.1.0"]
+
 [project.scripts]
 anymsg = "anymsg.cli:main"
 
 [dependency-groups]
-dev = ["pytest==9.1.1"]
+dev = ["pytest==9.1.1", "tiden-telemetry==0.1.0"]
 
 [tool.hatch.build.targets.wheel]
 packages = ["anymsg", "messaging_service"]
@@ -51,12 +55,16 @@ exclude = [
 "whatsapp/capture.mjs" = "messaging_service/whatsapp_assets/capture.mjs"
 "whatsapp/history.mjs" = "messaging_service/whatsapp_assets/history.mjs"
 "whatsapp/identity.mjs" = "messaging_service/whatsapp_assets/identity.mjs"
+"whatsapp/ipc.mjs" = "messaging_service/whatsapp_assets/ipc.mjs"
 "whatsapp/media.mjs" = "messaging_service/whatsapp_assets/media.mjs"
 "whatsapp/navigation.mjs" = "messaging_service/whatsapp_assets/navigation.mjs"
 "whatsapp/pair.mjs" = "messaging_service/whatsapp_assets/pair.mjs"
 "whatsapp/pairing.mjs" = "messaging_service/whatsapp_assets/pairing.mjs"
 "whatsapp/provider.mjs" = "messaging_service/whatsapp_assets/provider.mjs"
 "whatsapp/sender.mjs" = "messaging_service/whatsapp_assets/sender.mjs"
+"whatsapp/outgoing.mjs" = "messaging_service/whatsapp_assets/outgoing.mjs"
+"whatsapp/receipts.mjs" = "messaging_service/whatsapp_assets/receipts.mjs"
+"whatsapp/operations.mjs" = "messaging_service/whatsapp_assets/operations.mjs"
 "whatsapp/transport-state.mjs" = "messaging_service/whatsapp_assets/transport-state.mjs"
 "whatsapp/package.json" = "messaging_service/whatsapp_assets/package.json"
 "whatsapp/package-lock.json" = "messaging_service/whatsapp_assets/package-lock.json"

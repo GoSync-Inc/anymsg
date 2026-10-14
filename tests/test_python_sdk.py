@@ -8,6 +8,18 @@ import pytest
 from anymsg import AnyMsgError, Client
 
 
+def test_send_helpers_do_not_retry_after_transport_failure():
+    calls=[]
+    def handler(request):
+        calls.append(request)
+        raise httpx.ReadTimeout('synthetic private diagnostic')
+    with Client('https://archive.example','synthetic-token',transport=httpx.MockTransport(handler)) as client:
+        with pytest.raises(AnyMsgError,match='request_failed'):
+            client.send_message(account='fixture',chat_id='fixture-chat',text='Approved synthetic',
+                request_id='synthetic-request-0001')
+    assert len(calls)==1 and str(calls[0].url).endswith('/v1/send_message')
+
+
 @pytest.mark.parametrize('url',[
     'http://public.example', 'https://user:pass@example.test',
     'https://example.test?q=token', 'https://example.test/#fragment',

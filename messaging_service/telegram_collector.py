@@ -39,7 +39,8 @@ def configuration(path):
     cfg=private_json(path)
     fields={'enabled','account','credentials_file','session_file','permit_file','spool_directory',
             'batch_size','scan_interval_seconds','max_media_bytes','disk_reserve_bytes',
-            'media_disk_reserve_bytes','max_dialogs','history_since'}
+            'media_disk_reserve_bytes','media_live_disk_reserve_bytes','media_live_max_bytes',
+            'media_live_window_seconds','max_dialogs','history_since'}
     if not isinstance(cfg,dict) or set(cfg)-fields: raise ValueError('invalid_collector_config')
     if cfg.get('enabled') is not True: raise RuntimeError('collector_disabled')
     if not re.fullmatch(r'[a-zA-Z0-9_.-]{1,64}',cfg.get('account','')): raise ValueError('invalid_account')
@@ -54,6 +55,15 @@ def configuration(path):
     value=cfg.setdefault('media_disk_reserve_bytes',max(MEDIA_RESERVE_BYTES,cfg['disk_reserve_bytes']))
     if type(value) is not int or not cfg['disk_reserve_bytes']<=value<=100*1024**3:
         raise ValueError('invalid_media_disk_reserve_bytes')
+    value=cfg.setdefault('media_live_disk_reserve_bytes',None)
+    if value is not None and (type(value) is not int or
+            not cfg['disk_reserve_bytes']<=value<=cfg['media_disk_reserve_bytes']):
+        raise ValueError('invalid_media_live_disk_reserve_bytes')
+    for key,default,lo,hi in [
+            ('media_live_max_bytes',min(32*1024**2,cfg['max_media_bytes']),1,cfg['max_media_bytes']),
+            ('media_live_window_seconds',86400,600,7*86400)]:
+        value=cfg.setdefault(key,default)
+        if type(value) is not int or not lo<=value<=hi: raise ValueError('invalid_'+key)
     maximum=cfg.setdefault('max_dialogs',None)
     if maximum is not None and (type(maximum) is not int or not 1<=maximum<=10000):
         raise ValueError('invalid_max_dialogs')
@@ -88,6 +98,7 @@ def peer_kind(message):
 
 
 class TelethonProvider:
+    supports_receipts=True
     def __init__(self,cfg,auth,*,receive_updates=True):
         from telethon import TelegramClient
         # Do not let library diagnostics log payloads or credentials.
@@ -95,10 +106,11 @@ class TelethonProvider:
         redact_library_logs()
         logger=logging.getLogger('personal_os.telegram.transport')
         self.client=TelegramClient(cfg['session_file'],auth['api_id'],auth['api_hash'],
-            request_retries=2,connection_retries=3,auto_reconnect=True,
+            request_retries=0,connection_retries=3,auto_reconnect=True,
             flood_sleep_threshold=0,raise_last_call_error=True,base_logger=logger,
             catch_up=False,receive_updates=receive_updates)
         self.expected_user_id=auth['expected_user_id']
+        self.verified_self=None
         self.governor=None
 
     def bind_state(self,state): self.governor=RequestGovernor(state)
@@ -107,13 +119,16 @@ class TelethonProvider:
         governor=getattr(self,'governor',None)
         return await governor.call(operation,phase) if governor else await operation()
 
-    def subscribe(self,capture,deleted):
-        from telethon import events
+    def subscribe(self,capture,deleted,receipts=None):
+        from telethon import events,types
         self.client.add_event_handler(capture,events.NewMessage())
         self.client.add_event_handler(capture,events.MessageEdited())
         self.client.add_event_handler(deleted,events.MessageDeleted())
+        if receipts is not None:
+            self.client.add_event_handler(receipts,events.Raw(types.UpdateReadHistoryOutbox))
 
     async def connect(self):
+        self.verified_self=None
         await self.rpc(self.client.connect,'provider_connect')
         # is_user_authorized() catches every RPCError, including FloodWait, and
         # caches False. get_me() catches only UnauthorizedError: required waits
@@ -121,11 +136,47 @@ class TelethonProvider:
         me=await self.rpc(self.client.get_me,'provider_connect')
         if me is None:raise RuntimeError('telegram_pairing_required')
         if me.id!=self.expected_user_id: raise RuntimeError('telegram_identity_mismatch')
+        self.verified_self=me
         await self.rpc(self.client.catch_up,'provider_connect')
 
     async def disconnect(self): await self.client.disconnect()
 
     async def wait_disconnected(self): await self.client.disconnected
+
+    async def send_text(self,job):
+        from .outgoing import SendRejected,dispatch_payload
+        from telethon import types
+        payload=dispatch_payload(job,'telegram')
+        options={'parse_mode':None,'link_preview':payload['link_preview'],
+            'reply_to':int(job['reply_provider_id']) if job.get('reply_provider_id') else None,
+            'clear_draft':False}
+        if job.get('render_artifact') is not None:
+            constructors={'bold':types.MessageEntityBold,'italic':types.MessageEntityItalic,
+                'strikethrough':types.MessageEntityStrike,'underline':types.MessageEntityUnderline,
+                'spoiler':types.MessageEntitySpoiler,'code':types.MessageEntityCode,
+                'pre':types.MessageEntityPre,'blockquote':types.MessageEntityBlockquote,
+                'text_link':types.MessageEntityTextUrl}
+            entities=[]
+            for entity in payload['entities']:
+                arguments={'offset':entity['offset'],'length':entity['length']}
+                if entity['type']=='text_link':arguments['url']=entity['url']
+                elif entity['type']=='pre':arguments['language']=entity.get('language','')
+                entities.append(constructors[entity['type']](**arguments))
+            options['formatting_entities']=entities
+        async def send():
+            # Recheck after waiting for the shared rate/cooldown gate.
+            if datetime.now(timezone.utc).timestamp()>=job['expires_at']:
+                raise SendRejected('send_expired')
+            if job.get('_preflight') is not None:await job['_preflight']()
+            message=await self.client.send_message(int(job['provider_chat']),payload['text'],**options)
+            if not message or str(message.chat_id)!=job['provider_chat']:
+                raise RuntimeError('send_receipt_mismatch')
+            return {'provider_message_id':str(message.id),'message':message}
+        return await self.rpc(send,'provider_send')
+
+    async def execute_operation(self,job):
+        from .telegram_operations import execute
+        return await execute(self.client,job,verified_self=self.verified_self,governor=self.governor)
 
     async def dialogs(self,limit):
         result=[]
@@ -212,11 +263,13 @@ class TelegramCollector:
     connect_timeout=60
     retry_connect=False
     def __init__(self,archive,account,provider,spool,*,batch_size=100,interval=60,max_dialogs=None,
-                 writer=None,owner=None,lease_ttl=60,heartbeat_interval=15,history_since=None):
+                 writer=None,owner=None,lease_ttl=60,heartbeat_interval=15,history_since=None,
+                 live_writer=None,live_window_seconds=86400):
         self.archive,self.account,self.provider,self.spool=archive,account,provider,spool
         self.batch_size,self.interval,self.max_dialogs=batch_size,interval,max_dialogs
         self.history_since=history_since
         self.writer=writer or BlobWriter(archive.store.files,reserve_bytes=MEDIA_RESERVE_BYTES)
+        self.live_writer,self.live_window_seconds=live_writer,live_window_seconds
         self.owner=owner or 'telegram-'+secrets.token_hex(12)
         self.lease_ttl,self.heartbeat_interval=lease_ttl,heartbeat_interval
         self.state=None; self.stopping=asyncio.Event(); self.failed=asyncio.Event()
@@ -233,7 +286,7 @@ class TelegramCollector:
         if self.capture_count>=16: self.fail('capture_overload'); return
         self.capture_count+=1
         try:
-            e=telegram_message(self.account,event.message)
+            e=telegram_message(self.account,event.message,verified_self=getattr(self.provider,'verified_self',None))
             if not self.state.allows(self.policy,e['chat']): return
             await asyncio.to_thread(self.spool.put,{'kind':'message','peer_kind':peer_kind(event.message),'envelope':e,
                 'captured_at':datetime.now(timezone.utc).isoformat()})
@@ -252,11 +305,31 @@ class TelegramCollector:
         except Exception: self.fail('durable_capture_failed')
         finally: self.capture_count-=1
 
+    async def receipt(self,event):
+        if self.stopping.is_set() or self.failed.is_set(): return
+        pending=False
+        try:
+            from .telegram_receipts import telegram_receipt
+            capture=telegram_receipt(self.account,event,
+                verified_self=getattr(self.provider,'verified_self',None),
+                expected_user_id=getattr(self.provider,'expected_user_id',None))
+            if capture is None: return
+            if not self.policy or self.policy.get('account')!=self.account: return
+            if getattr(self.state,'account',self.account)!=self.account: return
+            if not self.state.allows(self.policy,capture['chat']): return
+            if self.capture_count>=16: self.fail('capture_overload'); return
+            self.capture_count+=1; pending=True
+            await asyncio.to_thread(self.spool.put,capture)
+        except Exception: self.fail('durable_capture_failed')
+        finally:
+            if pending:self.capture_count-=1
+
     async def commit_page(self,messages,chat,title,kind,origin):
         ids=[]
         for message in messages:
             if str(message.chat_id)!=chat: raise RuntimeError('provider_chat_mismatch')
-            e=telegram_message(self.account,message,chat_title=title,origin=origin)
+            e=telegram_message(self.account,message,chat_title=title,origin=origin,
+                verified_self=getattr(self.provider,'verified_self',None))
             item={'kind':'message','peer_kind':kind,'envelope':e}
             await asyncio.to_thread(self.spool.put,item)
             await asyncio.to_thread(self.state.apply,item)
@@ -344,6 +417,9 @@ class TelegramCollector:
 
     async def reconcile_loop(self):
         from telethon.errors import FloodWaitError
+        from .telegram_identity import repair_sent_senders
+        await asyncio.to_thread(repair_sent_senders,self.archive,self.account,self.state.lease,
+            getattr(self.provider,'verified_self',None))
         while True:
             try: await self.sync_once()
             except (FloodWaitError,ProviderRateLimited) as exc:
@@ -374,6 +450,8 @@ class TelegramCollector:
             nonlocal last,count
             self.state.apply(item);last=item;count+=1
         for spool in spools:await asyncio.to_thread(spool.drain,apply,100)
+        publish=getattr(self.state,'publish_receipts',None)
+        if callable(publish):await asyncio.to_thread(publish,limit=100)
         if count or time.monotonic()>=getattr(self,'_next_capture_status',0):
             pending=await asyncio.to_thread(lambda:sum(sum(1 for _ in s.path.glob('*.json')) for s in spools))
             await asyncio.to_thread(self.state.capture_progress,last,count,min(20000,pending))
@@ -388,9 +466,12 @@ class TelegramCollector:
     async def media_once(self):
         governor=getattr(self.provider,'governor',None)
         if governor:await governor.wait()
+        priority=({'live_writer':self.live_writer,'live_window_seconds':self.live_window_seconds}
+                  if self.live_writer is not None else {})
         job=await asyncio.to_thread(self.archive.claim_media,self.owner,account=self.account,
-                                    collector_lease=self.state.lease,since=self.history_since,writer=self.writer)
+                                    collector_lease=self.state.lease,since=self.history_since,writer=self.writer,**priority)
         if not job: return False
+        writer=self.live_writer if job.get('_live_media') else self.writer
         async def renew():
             while True:
                 await asyncio.sleep(30)
@@ -399,7 +480,7 @@ class TelegramCollector:
             source=await asyncio.to_thread(self.archive.media_source,job,collector_lease=self.state.lease)
             stream=self.provider.chunks(source,job['descriptor'])
             try:
-                return await self.writer.write_async(stream,expected_bytes=job['descriptor']['bytes'],
+                return await writer.write_async(stream,expected_bytes=job['descriptor']['bytes'],
                     reservation=job.get('_storage_reservation'))
             finally:
                 if hasattr(stream,'aclose'): await stream.aclose()
@@ -409,7 +490,7 @@ class TelegramCollector:
             if not done: raise TimeoutError('media_timeout')
             if renewal in done: renewal.result()
             blob=await download
-            await asyncio.to_thread(self.archive.finish_media,job,blob,self.writer,collector_lease=self.state.lease)
+            await asyncio.to_thread(self.archive.finish_media,job,blob,writer,collector_lease=self.state.lease)
         except (ProviderUnavailable,ProviderRateLimited,OSError,ValueError,RuntimeError,TimeoutError) as exc:
             if str(exc)=='media_lease_lost': return True
             if str(exc)=='collector_lease_lost': raise
@@ -448,7 +529,9 @@ class TelegramCollector:
             self.policy=await asyncio.to_thread(self.state.policy)
             await asyncio.to_thread(self.state.status,'starting',self.coverage_code)
             if hasattr(self.provider,'bind_state'):self.provider.bind_state(self.state)
-            self.provider.subscribe(self.capture,self.deleted)
+            if getattr(self.provider,'supports_receipts',False) is True:
+                self.provider.subscribe(self.capture,self.deleted,self.receipt)
+            else:self.provider.subscribe(self.capture,self.deleted)
             # Renew ownership and honor shutdown during a slow network connect.
             tasks=[asyncio.create_task(self.heartbeat()),asyncio.create_task(self.stopping.wait())]
             connecting=asyncio.create_task(self.connect_provider())
@@ -459,7 +542,7 @@ class TelegramCollector:
             if connecting not in done: raise RuntimeError('collector_lease_lost')
             tasks.remove(connecting)
             tasks.extend(asyncio.create_task(coro) for coro in
-                [self.drain_loop(),self.reconcile_loop(),self.media_loop(),
+                [self.drain_loop(),self.reconcile_loop(),self.media_loop(),self.outgoing_loop(),
                  self.provider.wait_disconnected(),self.failed.wait()])
             done,_=await asyncio.wait(tasks,return_when=asyncio.FIRST_COMPLETED)
             for task in done: task.result()
@@ -482,6 +565,33 @@ class TelegramCollector:
                         await asyncio.to_thread(self.state.phase,'live_capture','stopped','collector_shutdown')
             with suppress(Exception): await asyncio.to_thread(self.state.status,'stopped','requires_reconciliation')
             with suppress(Exception): await asyncio.to_thread(self.archive.release,self.account,self.owner,epoch)
+
+    async def outgoing_loop(self):
+        from .outgoing import OutgoingWorker
+        from .commands import CommandWorker
+        worker=OutgoingWorker(self.state,self.send_outgoing,getattr(self.provider,'send_gate',None))
+        commands=CommandWorker(self.state,self.execute_operation,getattr(self.provider,'send_gate',None))
+        while True:
+            active=await worker.once()
+            # Text sends get the first opportunity; only one foreground job is
+            # dispatched on the existing account session at a time.
+            active=await commands.once() or active
+            await asyncio.sleep(.25 if active else 1)
+
+    async def execute_operation(self,job):
+        job['_policy']=await asyncio.to_thread(self.state.policy)
+        return await self.provider.execute_operation(job)
+
+    async def send_outgoing(self,job):
+        receipt=await self.provider.send_text(job)
+        # Send receipt is independent of archive commit. A capture failure must
+        # never cause another send; reconciliation can recover the observation.
+        try:
+            from types import SimpleNamespace
+            await self.capture(SimpleNamespace(message=receipt['message']))
+        except Exception:
+            self.fail('durable_capture_failed')
+        return receipt
 
     async def connect_provider(self):
         # A persisted provider pause is not a hung connection: honor it outside
@@ -524,9 +634,13 @@ async def run_config(path):
                 row=c.execute('SELECT platform,synthetic FROM accounts WHERE id=%s',(cfg['account'],)).fetchone()
                 if not row or row['platform']!='telegram' or row['synthetic']: raise RuntimeError('live_account_required')
             spool=CaptureSpool(cfg['spool_directory'],reserve_bytes=cfg['disk_reserve_bytes'])
+            live_writer=(BlobWriter(store.files,max_bytes=cfg['media_live_max_bytes'],
+                reserve_bytes=cfg['media_live_disk_reserve_bytes'])
+                if cfg['media_live_disk_reserve_bytes'] is not None else None)
             worker=TelegramCollector(archive,cfg['account'],TelethonProvider(cfg,auth),spool,
                 batch_size=cfg['batch_size'],interval=cfg['scan_interval_seconds'],max_dialogs=cfg['max_dialogs'],
                 history_since=cfg['history_since'],
+                live_writer=live_writer,live_window_seconds=cfg['media_live_window_seconds'],
                 writer=BlobWriter(store.files,max_bytes=cfg['max_media_bytes'],reserve_bytes=cfg['media_disk_reserve_bytes']))
             loop=asyncio.get_running_loop()
             for sig in [signal.SIGTERM,signal.SIGINT]: loop.add_signal_handler(sig,worker.stopping.set)
@@ -536,12 +650,15 @@ async def run_config(path):
 
 def main():
     import argparse
+    from .telemetry import configure, capture
+    configure('telegram')
     parser=argparse.ArgumentParser(description=__doc__)
     parser.add_argument('--config',type=Path,required=True)
     args=parser.parse_args()
     os.umask(0o077)
     try: asyncio.run(run_config(args.config))
     except Exception as exc:
+        capture(exc, 'collector_failed')
         # Exception strings from providers can contain private requests. Emit
         # only this service's fixed error vocabulary to the supervisor.
         safe={'collector_disabled','session_handover_not_confirmed','telegram_pairing_required',

@@ -8,8 +8,13 @@ import zipfile
 import pytest
 
 from anymsg import __version__
-from anymsg.assets import ASSET_NAMES,export_whatsapp_assets
+from anymsg.assets import ASSET_NAMES,export_whatsapp_assets,source_directory
 from messaging_service.whatsapp_collector import whatsapp_asset
+
+
+def test_receipt_provider_dependency_is_exported():
+    assert 'receipts.mjs' in ASSET_NAMES
+    assert (source_directory()/'receipts.mjs').is_file()
 
 
 def test_facade_help_and_version_require_no_database_configuration(capsys,monkeypatch):

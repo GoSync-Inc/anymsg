@@ -6,7 +6,13 @@ Collect messages and attachments once, then let agents search and read them thro
 MCP or HTTP with separate credentials and account/chat permissions. Original files
 use SHA-256 deduplication; references to every source message stay separate.
 
-Current version: **0.9.9 — experimental**, PostgreSQL schema 21.
+Development version: **0.9.16 — experimental**, PostgreSQL schema 26.
+
+The expanded live-operation catalog covers messages, registered attachments,
+reactions, groups, contacts and profile fields. Access requires explicit per-key
+grants and account opt-in; see [MESSENGER_OPERATIONS.md](MESSENGER_OPERATIONS.md).
+Published npm/PyPI release: **0.9.9**; sending and independent WhatsApp IPC lanes
+require the development source until the next package release.
 
 ## What works
 
@@ -19,8 +25,13 @@ Current version: **0.9.9 — experimental**, PostgreSQL schema 21.
 - Scoped agent keys, independent acknowledgements, immutable review records and revision evidence.
 - Durable collection queues, storage admission, processing budgets and a shared heavy-job lock.
 - Encrypted streaming backup with integrity checks and quarantine restore tools.
+- Persistent subscriptions to explicit chats and people, with passive event inspection
+  and separate original/text/transcript/description readiness events.
+  See [SUBSCRIPTIONS.md](SUBSCRIPTIONS.md); host push and event ACK are the next block.
 
-Message sending is **not implemented** in this release. Reads do not mark messages
+Text sending through existing collectors is available with separate `send` rights
+and explicit account opt-in. The acting agent obtains exact owner confirmation;
+there is no server approval gate yet. See [SENDING.md](SENDING.md). Reads do not mark messages
 as read in Telegram or WhatsApp. Empty search results do not prove complete history.
 Durable history-wave execution, cold-file eviction/rehydration and independent
 AI artifact reuse are planned. Optional cloud processing is off until explicitly configured.
@@ -96,6 +107,8 @@ See [ACCESS.md](ACCESS.md), [SEARCH.md](SEARCH.md), [FILE_INDEX.md](FILE_INDEX.m
 [ENRICHMENT.md](ENRICHMENT.md) and [BACKUP_STREAMING.md](BACKUP_STREAMING.md).
 Run synthetic tests only: [CONTRIBUTING.md](CONTRIBUTING.md).
 Planned work and scope: [ROADMAP.md](ROADMAP.md).
+Agent review status and the current candidate: [REVIEW_FOLLOWUP.md](REVIEW_FOLLOWUP.md).
+Optional runtime diagnostics: [TELEMETRY.md](TELEMETRY.md).
 
 ## License and security
 

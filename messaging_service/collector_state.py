@@ -15,6 +15,9 @@ from .spool import DurableSpool
 
 def validate_capture(value):
     if not isinstance(value,dict) or len(canonical(value))>MAX_ENVELOPE: raise ValueError('invalid_capture')
+    if value.get('kind')=='message_receipt':
+        from .receipts import validate_capture as validate_receipt
+        return validate_receipt(value)
     if value.get('kind')=='message':
         if not {'kind','peer_kind','envelope'}<=set(value) or set(value)-{'kind','peer_kind','envelope','captured_at','identity_observations'} or value.get('peer_kind') not in ('user','chat','channel'):
             raise ValueError('invalid_capture')
@@ -29,7 +32,7 @@ def validate_capture(value):
         event=value['event']
         if not isinstance(event,dict) or set(event)-{'chatId','chatName','messageId','senderId','body',
                 'timestamp','fromMe','hasMedia','filename','mimetype','filesize','editedTimestampMs',
-                'senderName','senderUsername','replyToId','forwarded','mediaKind','mentionsOwner','replyToOwner','identityObservations'}:
+                'senderName','senderUsername','replyToId','forwarded','mediaKind','mentionsOwner','replyToOwner','identityObservations','formatting'}:
             raise ValueError('invalid_whatsapp_event')
         envelope=whatsapp_message(value['account'],event,change=value['change'],
             observed_at=utc(value['observed_at']),origin=value['origin'])
@@ -138,7 +141,8 @@ class CollectorState:
                 extra['last_commit']={'captured_at':observed.isoformat() if observed else None,'committed_by':now.isoformat(),
                     'capture_to_commit_seconds':round(max(0,(now-observed).total_seconds()),3) if observed else None,
                     'provider_age_at_capture_seconds':round((observed-sent).total_seconds(),3) if sent and observed else None,
-                    'origin':envelope['origin'] if envelope else 'deletion',
+                    'origin':envelope['origin'] if envelope else
+                        'receipt' if capture['kind']=='message_receipt' else 'deletion',
                     'mcp_available_after_commit':True,'measurement':'upper_bound_after_archive_commit' if observed else 'capture_time_not_recorded'}
             self._phase(value,'live_capture','backlogged' if pending else 'receiving',
                 'capture_draining' if pending else 'capture_ready',now,**extra)
@@ -294,6 +298,20 @@ class CollectorState:
         if capture['account']!=self.account: raise ValueError('foreign_capture')
         chat=capture['chat']
         if chat and not self.allows(self.policy(),chat): return {'outcome':'excluded'}
+        if capture['kind']=='message_receipt':
+            from .receipts import record
+            with self.archive.store.pool.connection() as c:
+                c.execute('SELECT pg_advisory_xact_lock(hashtextextended(%s,0))',('archive:'+self.account,))
+                self.archive.fence(c,self.account,self.lease)
+                policy=c.execute('''SELECT p.*,a.platform FROM account_policies p JOIN accounts a ON a.id=p.account
+                    WHERE p.account=%s AND p.enabled''',(self.account,)).fetchone()
+                if not policy or policy['platform']!=capture['platform']:raise RuntimeError('collection_disabled')
+                if not self.allows(policy,chat):return {'outcome':'excluded'}
+                result=record(c,capture)
+            # Drain loops publish once after captures commit. A burst of captures
+            # cannot multiply the per-loop publication budget; jobs survive an
+            # interrupted publication even after the disk captures are removed.
+            return result
         with self.archive.store.pool.connection() as c:
             c.execute('SELECT pg_advisory_xact_lock(hashtextextended(%s,0))',('archive:'+self.account,))
             self.archive.fence(c,self.account,self.lease)
@@ -306,6 +324,16 @@ class CollectorState:
         # applies it if the process dies before publishing these revisions.
         self.apply_tombstones()
         return {'outcome':'deletions_recorded'}
+
+    def publish_receipts(self,limit=100):
+        from .receipts import publish
+        if type(limit) is not int or not 1<=limit<=100:raise ValueError('invalid_receipt_limit')
+        with self.archive.store.pool.connection() as c:
+            c.execute('SELECT pg_advisory_xact_lock(hashtextextended(%s,0))',('archive:'+self.account,))
+            self.archive.fence(c,self.account,self.lease)
+            policy=c.execute('SELECT * FROM account_policies WHERE account=%s AND enabled',(self.account,)).fetchone()
+            if not policy:raise RuntimeError('collection_disabled')
+            return publish(c,self.account,limit=limit)
 
     def apply_tombstones(self,limit=100):
         with self.archive.store.pool.connection() as c:
@@ -322,6 +350,9 @@ class CollectorState:
             e.pop('message',None); e.pop('revision',None)
             e.update(deleted=True,body='',media=[],origin='reconcile',
                      updated_at=max(row['deleted_at'],datetime.fromisoformat(e['updated_at'])).isoformat())
+            if 'formatting' in e:
+                from .incoming_formatting import unknown
+                e['formatting']=unknown()
             result=self.archive.ingest(e,lease=self.lease)
             applied+=result['outcome']=='deleted'
         return applied

@@ -1,0 +1,360 @@
+"""Bounded key-owned subscriptions over the committed archive journal.
+
+This module does not dispatch hints, ACK events, poll providers or run agents.
+Definitions and exact journal references are durable; the independent matcher
+advances each checkpoint in the same transaction as its matching references.
+"""
+from __future__ import annotations
+
+from datetime import timedelta
+import json
+import os
+from uuid import UUID
+
+from psycopg.types.json import Jsonb
+
+from .policy import effective_permissions, lock_principal, targets
+
+EVENT_KINDS = frozenset(('message.created', 'message.edited', 'message.deleted',
+    'message.status', 'attachment.ready', 'file.text.ready', 'file.transcript.ready',
+    'file.description.ready', 'file.processing.failed'))
+ORIGINS = frozenset(('live', 'fixture', 'backfill', 'reconcile'))
+
+
+def _bound_setting(name, default, minimum, maximum):
+    """Operator configuration fails closed instead of disabling a work bound."""
+    value = os.environ.get(name, str(default))
+    if not value.isdecimal() or not minimum <= int(value) <= maximum:
+        raise ValueError('invalid_subscription_setting')
+    return int(value)
+
+
+def _ids(values, *, required=False):
+    from .store import APIError
+    if values is None and not required:
+        return None
+    if (not isinstance(values, (list, tuple)) or not 1 <= len(values) <= 64 or
+        any(not isinstance(v, str) or not 1 <= len(v) <= 256 or
+            any(ord(ch) < 32 or ord(ch) == 127 for ch in v) for v in values)):
+        raise APIError('invalid_filter')
+    return sorted(set(values))
+
+
+def _subscription_id(value):
+    from .store import APIError
+    try:
+        if not isinstance(value, str):
+            raise ValueError
+        return str(UUID(value))
+    except (ValueError, AttributeError, TypeError):
+        raise APIError('not_found', 404) from None
+
+
+def _state(c, row, p):
+    """ACL changes never revive a previous definition, even after restoration."""
+    changed = (row['scope_version'] != p['scope_version'] or
+        row['key_permission_version'] != p['key_permission_version'] or
+        not {'read', 'subscription-write'} <= set(p['permissions']))
+    if not changed:
+        sources = c.execute('SELECT account,chat FROM subscription_sources WHERE subscription=%s',
+            (row['id'],)).fetchall()
+        changed = any(source['account'] not in p['accounts'] or
+            p['chat_ids'] is not None and source['chat'] not in p['chat_ids'] for source in sources)
+    if changed and row['state'] != 'access_changed':
+        row = c.execute("""UPDATE subscriptions SET state='access_changed',
+            version=version+1,updated_at=clock_timestamp() WHERE id=%s RETURNING *""",
+            (row['id'],)).fetchone()
+    elif (row['state'] in ('active', 'paused') and row['expires_at'] is not None and
+            row['expires_at'] <= c.execute('SELECT clock_timestamp() AS t').fetchone()['t']):
+        row = c.execute("""UPDATE subscriptions SET state='expired',version=version+1,
+            updated_at=clock_timestamp() WHERE id=%s RETURNING *""", (row['id'],)).fetchone()
+    return row
+
+
+def _owned(c, p, subscription_id):
+    from .store import APIError
+    row = c.execute('''SELECT * FROM subscriptions WHERE id=%s AND principal=%s
+        AND key_id=%s FOR UPDATE''', (_subscription_id(subscription_id), p['id'], p['key_id'])).fetchone()
+    if row is None:
+        raise APIError('not_found', 404)
+    targets(p, [str(row['id'])])
+    return _state(c, row, p)
+
+
+def _view(c, row):
+    from .store import serial
+    if row['state'] == 'access_changed':
+        return {'subscription_id': str(row['id']), 'state': 'access_changed',
+            'version': row['version'], 'recreate_required': True, 'scope_masked': True}
+    head = c.execute('SELECT value FROM feed_counter WHERE id=1').fetchone()['value']
+    count = c.execute('SELECT count(*) AS n FROM subscription_matches WHERE subscription=%s',
+        (row['id'],)).fetchone()['n']
+    return serial({'subscription_id': row['id'], 'state': row['state'], 'version': row['version'],
+        'label': row['label'], **row['selector'], 'created_at': row['created_at'],
+        'updated_at': row['updated_at'], 'expires_at': row['expires_at'],
+        'start_position': row['start_position'], 'matched_through': row['matched_through'],
+        'matcher_caught_up': row['state'] == 'active' and row['matched_through'] == head,
+        'matched_event_count': count, 'blocked_reason': row['blocked_reason'], 'gap': row['gap'],
+        'matching_evidence': 'exact_event_revision',
+        'missing_revision_evidence_events': row['missing_evidence'],
+        'last_matched_at': row['last_matched_at'], 'scope_masked': False,
+        'freshness_basis': 'committed_archive_journal_not_provider_freshness',
+        'delivery': {'passive_read': True, 'ack': False, 'push': False, 'host_wakeup': False}})
+
+
+def create_subscription(store, c, p, chat_ids, *, sender_ids=None, kinds=None,
+        direction='incoming', origins=None, label='', expires_at=None):
+    from .store import APIError, date_bound
+    if 'read' not in p['permissions']:
+        raise APIError('forbidden', 403)
+    chats = _ids(chat_ids, required=True)
+    senders = _ids(sender_ids)
+    kinds = _ids(['message.created'] if kinds is None else kinds, required=True)
+    origins = _ids(['live'] if origins is None else origins, required=True)
+    if set(kinds) - EVENT_KINDS or set(origins) - ORIGINS or direction not in ('', 'incoming', 'outgoing'):
+        raise APIError('invalid_filter')
+    if (not isinstance(label, str) or len(label) > 128 or
+        any(ord(ch) < 32 or ord(ch) == 127 for ch in label)):
+        raise APIError('invalid_subscription')
+    expiry = date_bound(expires_at) if expires_at is not None else None
+    now = c.execute('SELECT clock_timestamp() AS t').fetchone()['t']
+    if expires_at is not None and (expiry is None or not now < expiry <= now + timedelta(days=366)):
+        raise APIError('invalid_utc_date')
+    sources = c.execute('SELECT id,account FROM chats WHERE id=ANY(%s) AND account=ANY(%s)',
+        (chats, p['accounts'])).fetchall()
+    if (len(sources) != len(chats) or
+        (p['chat_ids'] is not None and set(chats) - set(p['chat_ids']))):
+        raise APIError('not_found', 404)
+    # Provider sender identifiers are account-scoped. Equal IDs observed in two
+    # accounts are ambiguous, not proof of the same person. Subscribe separately.
+    sender_accounts = {}
+    if senders is not None:
+        known = c.execute('''SELECT DISTINCT account,sender FROM messages
+            WHERE chat=ANY(%s) AND sender=ANY(%s) UNION SELECT DISTINCT account,sender
+            FROM sender_profiles WHERE chat=ANY(%s) AND sender=ANY(%s)''',
+            (chats, senders, chats, senders)).fetchall()
+        for sender in senders:
+            accounts = {r['account'] for r in known if r['sender'] == sender}
+            if not accounts:
+                raise APIError('not_found', 404)
+            if len(accounts) != 1:
+                raise APIError('ambiguous_reference', 409)
+            sender_accounts[sender] = next(iter(accounts))
+    c.execute('SELECT pg_advisory_xact_lock(hashtextextended(%s,0))',
+        ('subscriptions:' + str(p['key_id']),))
+    maximum = _bound_setting('SUBSCRIPTION_MAX_DEFINITIONS', 64, 1, 1000)
+    count = c.execute('SELECT count(*) AS n FROM subscriptions WHERE principal=%s AND key_id=%s',
+        (p['id'], p['key_id'])).fetchone()['n']
+    if count >= maximum:
+        raise APIError('subscription_limit', 429)
+    # The counter is serialized by event publishers. An MVCC read sees only a
+    # committed frontier and cannot skip an uncommitted event transaction.
+    head = c.execute('SELECT value FROM feed_counter WHERE id=1').fetchone()['value']
+    selector = dict(chat_ids=chats, sender_ids=senders, kinds=kinds, origins=origins, direction=direction)
+    if len(json.dumps(selector, ensure_ascii=False).encode()) > 14000:
+        raise APIError('invalid_filter')
+    row = c.execute('''INSERT INTO subscriptions(principal,key_id,scope_version,key_permission_version,
+        selector,label,start_position,matched_through,expires_at) VALUES(%s,%s,%s,%s,%s,%s,%s,%s,%s)
+        RETURNING *''', (p['id'], p['key_id'], p['scope_version'], p['key_permission_version'],
+            Jsonb(selector), label, head, head, expiry)).fetchone()
+    for source in sources:
+        selected = None if senders is None else [sid for sid in senders if sender_accounts[sid] == source['account']]
+        c.execute('INSERT INTO subscription_sources(subscription,account,chat,sender_ids) VALUES(%s,%s,%s,%s)',
+            (row['id'], source['account'], source['id'], selected))
+    targets(p, [str(row['id'])])
+    return _view(c, row)
+
+
+def list_subscriptions(store, c, p, *, limit=50):
+    from .store import bounded
+    bounded(limit)
+    rows = c.execute('''SELECT * FROM subscriptions WHERE principal=%s AND key_id=%s
+        ORDER BY created_at DESC,id DESC LIMIT %s FOR UPDATE''', (p['id'], p['key_id'], limit + 1)).fetchall()
+    result = [_view(c, _state(c, row, p)) for row in rows[:limit]]
+    targets(p, [str(row['id']) for row in rows[:limit]])
+    return {'items': result, 'has_more': len(rows) > limit}
+
+
+def get_subscription(store, c, p, subscription_id):
+    return _view(c, _owned(c, p, subscription_id))
+
+
+def update_subscription(store, c, p, subscription_id, version, *, action, resume_policy='catch_up'):
+    from .store import APIError
+    if 'read' not in p['permissions']:
+        raise APIError('forbidden', 403)
+    if type(version) is not int or not 1 <= version <= 2**53 - 1:
+        raise APIError('invalid_version')
+    if action not in ('pause', 'resume', 'close') or resume_policy not in ('catch_up', 'skip'):
+        raise APIError('invalid_subscription_state')
+    if action != 'resume' and resume_policy != 'catch_up':
+        raise APIError('invalid_subscription_state')
+    row = _owned(c, p, subscription_id)
+    if row['state'] == 'access_changed':
+        # Do not include the old version, selectors or counts in an error.
+        raise APIError('subscription_access_changed', 409)
+    if row['version'] != version:
+        raise APIError('subscription_conflict', 409)
+    if row['state'] in ('closed', 'expired'):
+        raise APIError('subscription_closed', 409)
+    if action == 'pause' and row['state'] != 'active' or action == 'resume' and row['state'] != 'paused':
+        raise APIError('invalid_subscription_state', 409)
+    state = {'pause': 'paused', 'resume': 'active', 'close': 'closed'}[action]
+    position = row['matched_through']
+    gap = row['gap']
+    if action == 'resume' and resume_policy == 'skip':
+        head = c.execute('SELECT value FROM feed_counter WHERE id=1').fetchone()['value']
+        if position < head:
+            gap = {'reason': 'explicit_resume_skip', 'after': position, 'through': head,
+                'recoverable': False, 'intentional': True}
+        position = head
+    row = c.execute('''UPDATE subscriptions SET state=%s,version=version+1,
+        matched_through=%s,gap=%s,blocked_reason=NULL,updated_at=clock_timestamp()
+        WHERE id=%s RETURNING *''', (state, position, Jsonb(gap) if gap else None, row['id'])).fetchone()
+    return _view(c, row)
+
+
+def get_subscription_events(store, c, p, subscription_id, *, after=0, limit=50):
+    from .store import APIError, bounded, serial
+    bounded(limit)
+    if type(after) is not int or not 0 <= after <= 2**53 - 1:
+        raise APIError('invalid_version')
+    row = _owned(c, p, subscription_id)
+    state = _view(c, row)
+    if row['state'] == 'access_changed':
+        return {'subscription': state, 'items': [], 'has_more': False, 'scope_masked': True}
+    events = c.execute('''SELECT e.id,e.kind,e.origin,e.revision,e.created_at,
+        jsonb_strip_nulls(jsonb_build_object(
+            'message',e.snapshot->'message','account',e.snapshot->'account','chat',e.snapshot->'chat',
+            'sender',e.snapshot->'sender','provider_id',e.snapshot->'provider_id',
+            'sent_at',e.snapshot->'sent_at','direction',e.snapshot->'direction',
+            'deleted',e.snapshot->'deleted','processing',e.snapshot->'processing',
+            'metadata',e.snapshot->'metadata')) AS snapshot
+        FROM subscription_matches sm JOIN events e ON e.id=sm.event
+        WHERE sm.subscription=%s AND sm.event>%s ORDER BY sm.event LIMIT %s''',
+        (row['id'], after, limit + 1)).fetchall()
+    fields = ('message', 'account', 'chat', 'sender', 'provider_id', 'revision', 'sent_at',
+        'direction', 'deleted', 'processing', 'metadata')
+    items = [{**{key: event['snapshot'][key] for key in fields if key in event['snapshot']},
+        'event_id': event['id'], 'kind': event['kind'], 'origin': event['origin'],
+        'revision': event['revision'], 'observed_at': event['created_at'],
+        'historical': event['origin'] in ('backfill', 'reconcile'),
+        'matching_basis': 'exact_event_revision'} for event in events[:limit]]
+    return serial({'subscription': state, 'items': items, 'has_more': len(events) > limit,
+        'next_after': items[-1]['event_id'] if items else after,
+        'consumption': 'passive_read_no_ack', 'scope_masked': False})
+
+
+def _worker_identity(c, row):
+    lock_principal(c, row['principal'], shared=True)
+    p = c.execute('''SELECT p.*,k.id AS key_id,k.permissions AS key_permissions,
+        k.permission_version AS key_permission_version FROM principals p JOIN api_keys k ON k.principal=p.id
+        WHERE p.id=%s AND k.id=%s AND p.enabled AND NOT k.revoked AND k.expires_at>clock_timestamp()''',
+        (row['principal'], row['key_id'])).fetchone()
+    if p is not None:
+        p['permissions'] = effective_permissions(p['permissions'], p['key_permissions'])
+    return p
+
+
+def match_subscriptions(store, *, batch_size=250, max_subscriptions=32):
+    """One bounded pass; safe to retry or run from more than one worker."""
+    from .store import bounded
+    bounded(batch_size, 1000)
+    bounded(max_subscriptions, 128)
+    maximum = _bound_setting('SUBSCRIPTION_MAX_MATCHES', 10000, 1, 1000000)
+    stats = {'checked': 0, 'scanned': 0, 'matched': 0, 'access_changed': 0,
+        'expired': 0, 'blocked': 0, 'missing_evidence': 0}
+    with store.pool.connection() as c:
+        candidates = c.execute('''SELECT id,principal,key_id FROM subscriptions WHERE state='active'
+            ORDER BY last_matched_at NULLS FIRST,created_at,id LIMIT %s''', (max_subscriptions,)).fetchall()
+    for candidate in candidates:
+        with store.pool.connection() as c:
+            # ConnectionPool exits commit. Locks cover exactly one bounded
+            # subscription batch, not the whole pass or any provider operation.
+            p = _worker_identity(c, candidate)
+            row = c.execute("SELECT * FROM subscriptions WHERE id=%s AND state='active' FOR UPDATE SKIP LOCKED",
+                (candidate['id'],)).fetchone()
+            if row is None:
+                continue
+            stats['checked'] += 1
+            if p is None:
+                c.execute("""UPDATE subscriptions SET state='access_changed',version=version+1,
+                    updated_at=clock_timestamp() WHERE id=%s""", (row['id'],))
+                stats['access_changed'] += 1
+                continue
+            row = _state(c, row, p)
+            if row['state'] != 'active':
+                stats[row['state']] += 1
+                continue
+            sources = c.execute('SELECT account,chat,sender_ids FROM subscription_sources WHERE subscription=%s',
+                (row['id'],)).fetchall()
+            # Version equality is the fence, with a full source-scope check as a
+            # defensive boundary if records are restored or repaired externally.
+            if any(source['account'] not in p['accounts'] or
+                    p['chat_ids'] is not None and source['chat'] not in p['chat_ids'] for source in sources):
+                c.execute("""UPDATE subscriptions SET state='access_changed',version=version+1,
+                    updated_at=clock_timestamp() WHERE id=%s""", (row['id'],))
+                stats['access_changed'] += 1
+                continue
+            head = c.execute('SELECT value FROM feed_counter WHERE id=1').fetchone()['value']
+            events = c.execute('''SELECT id,account,kind,origin,
+                jsonb_strip_nulls(jsonb_build_object('chat',snapshot->'chat',
+                    'sender',snapshot->'sender','direction',snapshot->'direction')) AS snapshot
+                FROM events WHERE id>%s AND id<=%s ORDER BY id LIMIT %s''',
+                (row['matched_through'], head, batch_size)).fetchall()
+            count = c.execute('SELECT count(*) AS n FROM subscription_matches WHERE subscription=%s',
+                (row['id'],)).fetchone()['n']
+            lookup = {(source['account'], source['chat']): source['sender_ids'] for source in sources}
+            selector = row['selector']
+            position = row['matched_through']
+            missing = 0
+            reason = None
+            gap = row['gap'] if row['gap'] and row['gap'].get('intentional') else None
+            for event in events:
+                if event['id'] != position + 1:
+                    reason = 'journal_gap'
+                    gap = {'reason': reason, 'after': position, 'through': event['id'] - 1,
+                        'recoverable': False, 'requires_operator': True}
+                    break
+                snapshot = event['snapshot']
+                source = (event['account'], snapshot.get('chat'))
+                matches = (source in lookup and event['kind'] in selector['kinds'] and
+                    event['origin'] in selector['origins'])
+                if matches and selector['direction']:
+                    if 'direction' not in snapshot:
+                        missing += 1
+                        matches = False
+                    else:
+                        matches = snapshot['direction'] == selector['direction']
+                if matches and lookup[source] is not None:
+                    if 'sender' not in snapshot:
+                        missing += 1
+                        matches = False
+                    else:
+                        matches = snapshot['sender'] in lookup[source]
+                if matches:
+                    if count >= maximum:
+                        reason = 'match_budget'
+                        gap = {'reason': reason, 'after': position, 'through': head,
+                            'recoverable': True, 'requires_operator': True}
+                        break
+                    inserted = c.execute('''INSERT INTO subscription_matches(subscription,event)
+                        VALUES(%s,%s) ON CONFLICT DO NOTHING RETURNING event''', (row['id'], event['id'])).fetchone()
+                    if inserted:
+                        count += 1
+                        stats['matched'] += 1
+                position = event['id']
+                stats['scanned'] += 1
+            # If the retained range ends below a known committed frontier, the
+            # tail was removed. Never convert that absence into a complete page.
+            if reason is None and len(events) < batch_size and position < head:
+                reason = 'journal_gap'
+                gap = {'reason': reason, 'after': position, 'through': head,
+                    'recoverable': False, 'requires_operator': True}
+            if reason:
+                stats['blocked'] += 1
+            stats['missing_evidence'] += missing
+            c.execute('''UPDATE subscriptions SET matched_through=%s,blocked_reason=%s,gap=%s,
+                missing_evidence=missing_evidence+%s,last_matched_at=clock_timestamp()
+                WHERE id=%s''', (position, reason, Jsonb(gap) if gap else None, missing, row['id']))
+    return stats

@@ -8,10 +8,21 @@ from psycopg.types.json import Jsonb
 
 from .envelope import canonical, fingerprint, stable_id, validate
 from .store import serial
+from .incoming_formatting import known as known_formatting, unknown as unknown_formatting
 
 
 class Archive:
     def __init__(self,store): self.store=store
+
+    def set_sending(self,account,enabled):
+        """Operator-only opt-in; never changes account discovery or agent scopes."""
+        if type(enabled) is not bool:raise ValueError('invalid_send_policy')
+        from .policy import audit
+        with self.store.pool.connection() as c:
+            changed=c.execute('UPDATE account_policies SET send_enabled=%s WHERE account=%s RETURNING account',
+                (enabled,account)).fetchone()
+            if not changed:raise ValueError('unknown_account')
+            audit(c,None,'set_sending','ok')
 
     def register(self,account,platform,label,*,synthetic=True,include_chats=(),exclude_chats=(),discover=False):
         if not re.fullmatch(r'[a-zA-Z0-9_.-]{1,64}',account) or platform not in ('telegram','whatsapp'):
@@ -85,24 +96,53 @@ class Archive:
             if tombstone and not e['deleted']:
                 e={**e,'deleted':True,'body':'','media':[],
                    'updated_at':max(tombstone,datetime.fromisoformat(e['updated_at'])).isoformat()}
+                if 'formatting' in e:e['formatting']=unknown_formatting()
             previous=c.execute('SELECT outcome FROM ingest_receipts WHERE digest=%s',(receipt,)).fetchone()
             if previous: return {'outcome':'duplicate','message':mid}
-            c.execute('''INSERT INTO chats(id,account,title,provider_chat) VALUES(%s,%s,%s,%s)
-                ON CONFLICT(id) DO UPDATE SET title=excluded.title,provider_chat=excluded.provider_chat
+            chat_type=e.get('metadata',{}).get('chat_type')
+            if chat_type=='unknown':chat_type=None
+            c.execute('''INSERT INTO chats(id,account,title,provider_chat,chat_type) VALUES(%s,%s,%s,%s,%s)
+                ON CONFLICT(id) DO UPDATE SET
+                title=CASE WHEN excluded.title<>%s AND excluded.title<>'' THEN excluded.title ELSE chats.title END,
+                provider_chat=excluded.provider_chat,chat_type=coalesce(excluded.chat_type,chats.chat_type)
                 WHERE (excluded.title<>%s AND excluded.title<>'' AND chats.title<>excluded.title)
-                    OR chats.provider_chat IS DISTINCT FROM excluded.provider_chat''',
-                      (cid,aid,e['chat_title'],e['chat'],e['chat']))
+                    OR chats.provider_chat IS DISTINCT FROM excluded.provider_chat
+                    OR (excluded.chat_type IS NOT NULL AND chats.chat_type IS DISTINCT FROM excluded.chat_type)''',
+                      (cid,aid,e['chat_title'],e['chat'],chat_type,e['chat'],e['chat']))
             old=c.execute('SELECT * FROM messages WHERE id=%s FOR UPDATE',(mid,)).fetchone()
             content=fingerprint(e); updated=datetime.fromisoformat(e['updated_at']); outcome='created'
+            old_format=None
+            if old:
+                retained=c.execute('SELECT snapshot FROM message_revisions WHERE message=%s AND revision=%s',
+                    (mid,old['revision'])).fetchone()
+                old_format=retained['snapshot'].get('formatting') if retained else None
+            candidate_format=e.get('formatting')
+            known_candidate=known_formatting(candidate_format);known_retained=known_formatting(old_format)
+            formatting_changed=known_candidate and known_retained and candidate_format!=old_format
+            formatting_completed=known_candidate and not known_retained
+            sender_completed=bool(old and not old['sender'] and e['sender'] and not old['deleted']
+                and not e['deleted'] and e['platform']=='telegram' and e['direction']=='outgoing'
+                and e.get('metadata',{}).get('chat_type')=='private'
+                and e.get('metadata',{}).get('sender_identity_basis')=='authenticated_self'
+                and old['provider_updated_at']==updated
+                and fingerprint({**e,'sender':''})==old['content_hash']
+                and not formatting_changed)
             if old:
                 if old['deleted'] and not e['deleted']: outcome='tombstoned'
+                elif sender_completed:outcome='edited'
                 elif (old['sent_at']!=datetime.fromisoformat(e['sent_at']) or old['direction']!=e['direction']
                       or old['sender']!=e['sender']): outcome='conflict'
-                elif old['content_hash']==content: outcome='unchanged'
+                elif old['content_hash']==content and not (formatting_changed or formatting_completed): outcome='unchanged'
                 elif old['provider_updated_at'] and updated<old['provider_updated_at']: outcome='stale'
+                elif old['content_hash']==content and formatting_completed:outcome='edited'
                 elif (old['provider_updated_at']==updated and not e['deleted']): outcome='conflict'
                 else: outcome='deleted' if e['deleted'] else 'edited'
             elif e['deleted']: outcome='deleted'
+            # An incomplete observation of the same retained provider body must
+            # not erase known formatting, including authenticated sender repair.
+            inherited_format=bool(old and known_retained and not known_candidate and not e['deleted']
+                and (old['content_hash']==content or sender_completed))
+            if inherited_format:e={**e,'formatting':old_format}
             if outcome in ('created','edited','deleted'):
                 revision=old['revision']+1 if old else 1
                 c.execute('''INSERT INTO messages(id,account,chat,provider_id,sender,body,sent_at,revision,
@@ -123,7 +163,10 @@ class Archive:
                         THEN 'queued' ELSE media_jobs.state END''',(jid,aid,mid,Jsonb(descriptor)))
                 c.execute("UPDATE media_jobs SET state='superseded',lease_until=NULL WHERE message=%s AND NOT(id=ANY(%s))",
                           (mid,media_ids))
-                c.execute('UPDATE attachments SET active=(id=ANY(%s)) WHERE message=%s',(media_ids,mid))
+                # A formatting-only revision retains the same originals. Avoid
+                # no-op active updates which otherwise enqueue extraction again.
+                c.execute('''UPDATE attachments SET active=(id=ANY(%s)) WHERE message=%s
+                    AND active IS DISTINCT FROM (id=ANY(%s))''',(media_ids,mid,media_ids))
                 self.store.append_event(c,aid,mid,'message.'+outcome,e['origin'],receipt)
             elif outcome=='unchanged':
                 c.execute('UPDATE messages SET provider_updated_at=greatest(provider_updated_at,%s) WHERE id=%s',(updated,mid))
@@ -161,18 +204,45 @@ class Archive:
             elif outcome in ('edited','deleted','unchanged'):
                 # A repeated copy of the retained revision does not resolve an
                 # equal/newer conflicting observation. Only later evidence does.
-                c.execute('''UPDATE message_conflicts SET resolved_at=clock_timestamp(),
+                c.execute('''UPDATE message_conflicts mc SET resolved_at=clock_timestamp(),
                     resolved_revision=(SELECT revision FROM messages WHERE id=%s)
-                    WHERE message=%s AND resolved_at IS NULL AND candidate_updated_at<%s''',
-                    (mid,mid,updated))
+                    FROM ingest_receipts r WHERE r.digest=mc.receipt_digest
+                    AND mc.message=%s AND mc.resolved_at IS NULL AND mc.candidate_updated_at<%s
+                    AND (NOT %s OR coalesce(r.envelope->'formatting'->>'state','unknown')='unknown'
+                        OR r.envelope->'formatting'=%s::jsonb)''',
+                    (mid,mid,updated,inherited_format,Jsonb(old_format)))
+                if sender_completed:
+                    # Only competing copies of this exact content are resolved.
+                    # Unrelated equal-version contradictions stay visible.
+                    candidates=c.execute('''SELECT mc.receipt_digest,mc.candidate_updated_at,r.envelope FROM message_conflicts mc
+                        JOIN ingest_receipts r ON r.digest=mc.receipt_digest
+                        WHERE mc.message=%s AND mc.resolved_at IS NULL
+                        ORDER BY mc.observed_at,mc.receipt_digest LIMIT 100''',(mid,)).fetchall()
+                    equivalent=[r['receipt_digest'] for r in candidates
+                        if r['candidate_updated_at']<=updated
+                        and fingerprint(validate(r['envelope'])) in (content,old['content_hash'])
+                        and (not known_formatting(r['envelope'].get('formatting'))
+                            or not known_formatting(e.get('formatting'))
+                            or r['envelope']['formatting']==e['formatting'])]
+                    if equivalent:c.execute('''UPDATE message_conflicts SET resolved_at=clock_timestamp(),
+                        resolved_revision=%s WHERE message=%s AND receipt_digest=ANY(%s) AND resolved_at IS NULL''',
+                        (revision,mid,equivalent))
             c.execute("""UPDATE source_status SET last_ingest_at=clock_timestamp(),status='receiving',
                 detail_code=CASE WHEN detail_code='version_conflict' THEN detail_code ELSE %s END WHERE account=%s""",
                       ('version_conflict' if outcome=='conflict' else 'coverage_not_reconciled',aid))
             return {'outcome':outcome,'message':mid}
 
-    def claim_media(self,owner,*,account=None,ttl=120,collector_lease=None,since=None,writer=None):
+    def claim_media(self,owner,*,account=None,ttl=120,collector_lease=None,since=None,writer=None,
+                    live_writer=None,live_window_seconds=86400):
         from .storage_admission import StorageAdmission
         if not re.fullmatch(r'[a-zA-Z0-9_.-]{1,64}',owner) or not 10<=ttl<=600: raise ValueError('invalid_worker')
+        if live_writer is not None and (writer is None or
+                live_writer.root.resolve()!=writer.root.resolve() or
+                not 0<=live_writer.reserve_bytes<=writer.reserve_bytes or
+                not 0<live_writer.max_bytes<=writer.max_bytes or
+                type(live_window_seconds) is not int or not 600<=live_window_seconds<=7*86400):
+            raise ValueError('invalid_live_media_policy')
+        live_max=live_writer.max_bytes if live_writer is not None else None
         with self.store.pool.connection() as c:
             StorageAdmission.lock_and_reap(c)
             if collector_lease is not None:
@@ -181,21 +251,29 @@ class Archive:
             c.execute("""UPDATE media_jobs SET state='failed',error_code='retry_exhausted',lease_until=NULL
                 WHERE state='leased' AND attempts>=5 AND lease_until<clock_timestamp()
                 AND (%s::text IS NULL OR account=%s)""",(account,account))
-            job=c.execute('''SELECT j.* FROM media_jobs j JOIN account_policies p ON p.account=j.account
+            job=c.execute('''SELECT j.*,priority.live_media AS _live_media FROM media_jobs j JOIN account_policies p ON p.account=j.account
                 JOIN messages m ON m.id=j.message AND m.account=j.account
                 JOIN chats ch ON ch.id=m.chat AND ch.account=j.account
+                CROSS JOIN LATERAL (SELECT COALESCE(%s::bigint IS NOT NULL AND
+                    (j.descriptor->>'bytes')::bigint BETWEEN 0 AND %s::bigint AND
+                    m.sent_at>=clock_timestamp()-%s*interval '1 second' AND
+                    m.sent_at<=clock_timestamp()+interval '5 minutes',false) AS live_media) priority
                 WHERE p.enabled AND (%s::text IS NULL OR j.account=%s) AND j.attempts<5 AND
                 NOT m.deleted AND NOT(ch.provider_chat=ANY(p.exclude_chats)) AND
                 (p.discover_chats OR ch.provider_chat=ANY(p.include_chats)) AND
                 (%s::timestamptz IS NULL OR m.sent_at>=%s) AND
                 ((j.state='queued' AND j.next_due<=clock_timestamp()) OR
                  (j.state='leased' AND j.lease_until<clock_timestamp()))
-                ORDER BY j.next_due,j.id FOR UPDATE OF j SKIP LOCKED LIMIT 1''',(account,account,since,since)).fetchone()
+                ORDER BY priority.live_media DESC,
+                    CASE WHEN priority.live_media THEN m.sent_at END DESC,j.next_due,j.id
+                FOR UPDATE OF j SKIP LOCKED LIMIT 1''',
+                (live_max,live_max,live_window_seconds,account,account,since,since)).fetchone()
             if not job: return None
             expires=c.execute("SELECT clock_timestamp()+%s*interval '1 second' AS at",(ttl,)).fetchone()['at']
             reservation=None
             if writer is not None:
-                try:reservation=StorageAdmission(writer).reserve(c,job,expires)
+                selected_writer=live_writer if job['_live_media'] else writer
+                try:reservation=StorageAdmission(selected_writer).reserve(c,job,expires)
                 except ValueError as exc:
                     if str(exc)!='media_size_limit':raise
                     c.execute("UPDATE media_jobs SET state='failed',error_code='size_limit',lease_until=NULL WHERE id=%s",
@@ -208,6 +286,7 @@ class Archive:
             claimed=c.execute('''UPDATE media_jobs SET state='leased',attempts=attempts+1,lease_owner=%s,
                 lease_epoch=lease_epoch+1,lease_until=%s,error_code=NULL
                 WHERE id=%s RETURNING *''',(owner,expires,job['id'])).fetchone()
+            claimed['_live_media']=job['_live_media']
             if reservation is not None:claimed['_storage_reservation']=reservation
             return claimed
 
@@ -265,11 +344,19 @@ class Archive:
                 digest=excluded.digest,bytes=excluded.bytes,active=true''',
                 (job['id'],job['message'],blob.digest,d['filename'],d['mime'],blob.bytes))
             c.execute("UPDATE media_jobs SET state='ready',error_code=NULL,lease_until=NULL WHERE id=%s",(job['id'],))
-            origin=c.execute('''SELECT r.snapshot->>'origin' AS origin FROM messages m
+            source=c.execute('''SELECT m.revision,r.snapshot->>'origin' AS origin FROM messages m
                 JOIN message_revisions r ON r.message=m.id AND r.revision=m.revision WHERE m.id=%s''',
-                (job['message'],)).fetchone()['origin'] or 'reconcile'
-            self.store.append_event(c,job['account'],job['message'],'attachment.ready',origin,
-                                    stable_id('event',job['id'],blob.digest,str(job['lease_epoch'])))
+                (job['message'],)).fetchone()
+            # Original readiness is independent from OCR/model readiness. The
+            # opaque version is salted with its occurrence, never a blob hash.
+            version='original_'+hashlib.sha256(canonical(
+                [job['id'],source['revision'],blob.digest])).hexdigest()
+            self.store.append_event(c,job['account'],job['message'],'attachment.ready',
+                source['origin'] or 'reconcile',
+                stable_id('event',job['id'],blob.digest,str(job['lease_epoch'])),
+                snapshot_metadata={'processing':{'attachment_id':job['id'],'stage':'original',
+                    'state':'ready','artifact_version':version,'basis':'downloaded',
+                    'source_revision':source['revision']}})
             from .storage_admission import StorageAdmission
             StorageAdmission.release(c,job)
 

@@ -9,5 +9,8 @@
   "scan_interval_seconds": 60,
   "max_media_bytes": 536870912,
   "disk_reserve_bytes": 1073741824,
+  "media_live_disk_reserve_bytes": null,
+  "media_live_max_bytes": 33554432,
+  "media_live_window_seconds": 86400,
   "max_dialogs": 2000
 }

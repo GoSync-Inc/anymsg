@@ -20,6 +20,7 @@ Provider sessions, owner DSN и ключ расшифровки backup аген�
 | `download` | Получение оригинала/статуса вложения и временной ссылки; известно разрешённое attachment ID |
 | `cursor-write` | ACK ранее полученной страницы; сам по себе не разрешает читать архив |
 | `review-write` вместе с `read` | Неизменяемая отметка разбора с автором, ревизиями всех источников и ссылкой на результат |
+| `send` | Enqueue exact owner-confirmed text and inspect own send receipts; requires separate account opt-in (SENDING.md) |
 | `capabilities` | Доступен любому действующему ключу, в том числе без операционных разрешений |
 
 По умолчанию новый principal получает read/download/cursor-write в явно заданных аккаунтах.
@@ -129,3 +130,11 @@ Migration006 добавляет опциональный review-write, не ра
 Backup image0.6 должен предшествовать schema6; manifest включает26 таблиц.
 Gateway имеет SELECT и ограниченный column INSERT reviews/review_sources,
 SELECT/UPDATE счётчика публикации, но не UPDATE/DELETE отметок или времени создания.
+
+## Opt-in sending (schema22)
+
+See [SENDING.md](SENDING.md). Migration does not grant send to existing keys.
+Gateway can only insert request columns/read outbox; collector alone updates
+states and reads public credential expiration/revocation and ACL metadata,
+without token hashes. There is no remote access administration or server approval
+gate. Existing agent-side exact owner confirmation remains mandatory.

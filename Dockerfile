@@ -13,6 +13,9 @@ WORKDIR /app
 COPY requirements.lock ./requirements.lock
 COPY LICENSE THIRD_PARTY_NOTICES.md /app/
 RUN pip install --no-cache-dir --require-hashes -r requirements.lock
+COPY requirements-telemetry.lock ./requirements-telemetry.lock
+ARG ANYMSG_INSTALL_TELEMETRY=0
+RUN if [ "$ANYMSG_INSTALL_TELEMETRY" = "1" ]; then pip install --no-cache-dir --require-hashes -r requirements-telemetry.lock; fi
 RUN groupadd -g 10001 probe && useradd -u 10001 -g probe -M probe \
     && mkdir -p /data/files && chown -R probe:probe /data
 USER probe

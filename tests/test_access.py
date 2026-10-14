@@ -120,7 +120,7 @@ def test_scope_revisions_invalidate_receipts_and_grants_but_rotation_preserves_s
     with pytest.raises(APIError,match='unauthorized'):s.search(b)
     assert s.search(rotated)['items']
     keys=s.list_keys('agent-b')
-    assert len(keys)==3 and all(set(k)=={'id','principal','expires_at','revoked'} for k in keys)
+    assert len(keys)==3 and all(set(k)=={'id','principal','expires_at','revoked','permissions','permission_version'} for k in keys)
     assert next(k for k in keys if k['id']==kid)['revoked']
 
 

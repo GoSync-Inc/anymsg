@@ -1,0 +1,354 @@
+"""Durable structural subscriptions; isolated synthetic PostgreSQL only."""
+from concurrent.futures import ThreadPoolExecutor
+from datetime import datetime, timezone
+import threading
+
+from psycopg.types.json import Jsonb
+import pytest
+
+from messaging_service.store import APIError
+from messaging_service.subscriptions import match_subscriptions
+
+
+def key(store, principal='subscriber', accounts=None, **kwargs):
+    return store.issue_key(principal, accounts or ['telegram-demo'],
+        permissions=['read', 'subscription-write'], key_permissions=['read', 'subscription-write'], **kwargs)
+
+
+def create(store, token, **kwargs):
+    return store.create_subscription(token, ['telegram-demo-chat'], **kwargs)
+
+
+def emit(store, message='demo-tg-1', kind='message.created', origin='live'):
+    with store.pool.connection() as c:
+        account = c.execute('SELECT account FROM messages WHERE id=%s', (message,)).fetchone()['account']
+        return store.append_event(c, account, message, kind, origin)
+
+
+def test_defaults_start_at_committed_head_and_do_not_ack(seeded):
+    store, old, _ = seeded
+    token = key(store)
+    subscription = create(store, token, label='news')
+    assert subscription['state'] == 'active' and subscription['version'] == 1
+    assert subscription['start_position'] == 4
+    assert subscription['kinds'] == ['message.created'] and subscription['origins'] == ['live']
+    historical = emit(store, origin='backfill')
+    live = emit(store)
+    match_subscriptions(store)
+    page = store.get_subscription_events(token, subscription['subscription_id'])
+    assert [item['event_id'] for item in page['items']] == [live]
+    assert historical not in [item['event_id'] for item in page['items']]
+    assert page['subscription']['matcher_caught_up']
+    assert page['items'][0]['sender'] == 'demo-person-1'
+    assert 'body' not in page['items'][0]
+    assert page['consumption'] == 'passive_read_no_ack'
+    assert store.get_subscription_events(token, subscription['subscription_id']) == page
+    assert len(store.get_updates(old, 'existing')['items']) == 5
+
+
+def test_independent_source_sets_senders_and_event_revisions(seeded):
+    store, _, _ = seeded
+    token = key(store, accounts=['telegram-demo', 'whatsapp-demo-1'])
+    subscription = store.create_subscription(token, ['telegram-demo-chat', 'whatsapp-demo-1-chat'],
+        sender_ids=['demo-person-2'], kinds=['message.created', 'message.edited'])
+    ignored = emit(store, 'demo-tg-1')
+    selected = emit(store, 'demo-tg-2')
+    with store.pool.connection() as c:
+        c.execute("UPDATE messages SET sender='changed-sender',revision=revision+1 WHERE id='demo-tg-2'")
+    changed = emit(store, 'demo-tg-2', kind='message.edited')
+    match_subscriptions(store, batch_size=1)
+    match_subscriptions(store)
+    page = store.get_subscription_events(token, subscription['subscription_id'])
+    assert [item['event_id'] for item in page['items']] == [selected]
+    assert page['items'][0]['sender'] == 'demo-person-2' and page['items'][0]['revision'] == 1
+    assert page['subscription']['matched_through'] == changed
+    assert ignored < selected < changed
+
+
+def test_same_sender_string_across_accounts_is_not_a_person_merge(seeded):
+    store, _, _ = seeded
+    token = key(store, accounts=['telegram-demo', 'whatsapp-demo-1'])
+    with pytest.raises(APIError, match='ambiguous_reference'):
+        store.create_subscription(token, ['telegram-demo-chat', 'whatsapp-demo-1-chat'],
+            sender_ids=['demo-person-1'])
+
+
+def test_key_ownership_and_scope_denials(seeded):
+    store, old, other = seeded
+    with pytest.raises(APIError, match='forbidden'):
+        create(store, old)
+    token = key(store)
+    subscription = create(store, token)
+    second_key = key(store)
+    assert store.list_subscriptions(second_key)['items'] == []
+    for unauthorized in (second_key, other):
+        with pytest.raises(APIError, match='not_found'):
+            store.get_subscription(unauthorized, subscription['subscription_id'])
+        with pytest.raises(APIError, match='not_found'):
+            store.get_subscription_events(unauthorized, subscription['subscription_id'])
+    with pytest.raises(APIError, match='not_found'):
+        store.create_subscription(token, ['whatsapp-demo-1-chat'])
+    with pytest.raises(APIError, match='not_found'):
+        create(store, token, sender_ids=['unknown-person'])
+    reader = store.issue_key('read-only', ['telegram-demo'], permissions=['read'], key_permissions=['read'])
+    with pytest.raises(APIError, match='forbidden'):
+        create(store, reader)
+
+
+def test_legacy_ceiling_does_not_inherit_new_permission(seeded):
+    store, old, _ = seeded
+    store.set_access('agent-a', permissions=['read', 'subscription-write'])
+    with pytest.raises(APIError, match='forbidden'):
+        create(store, old)
+    assert 'subscription-write' not in store.capabilities(old)['permissions']
+
+
+@pytest.mark.parametrize('changes', [
+    {'chat_ids': []}, {'chat_ids': 'telegram-demo-chat'}, {'sender_ids': []},
+    {'kinds': []}, {'kinds': ['message.created', 'arbitrary']}, {'origins': ['bad']},
+    {'direction': 'both'}, {'label': 'x' * 129}, {'label': 'unsafe\nlabel'},
+    {'expires_at': '2020-01-01T00:00:00Z'}, {'expires_at': '2030-01-01'},
+])
+def test_creation_strict_validation(seeded, changes):
+    store, _, _ = seeded
+    token = key(store)
+    values = {'chat_ids': ['telegram-demo-chat'], **changes}
+    with pytest.raises(APIError):
+        store.create_subscription(token, **values)
+
+
+def test_pause_resume_catchup_skip_close_and_version_conflict(seeded):
+    store, _, _ = seeded
+    token = key(store)
+    sid = create(store, token)['subscription_id']
+    paused = store.update_subscription(token, sid, 1, action='pause')
+    missed = emit(store)
+    assert match_subscriptions(store)['checked'] == 0
+    with pytest.raises(APIError, match='subscription_conflict'):
+        store.update_subscription(token, sid, 1, action='resume')
+    resumed = store.update_subscription(token, sid, paused['version'], action='resume')
+    match_subscriptions(store)
+    assert [e['event_id'] for e in store.get_subscription_events(token, sid)['items']] == [missed]
+    paused = store.update_subscription(token, sid, resumed['version'], action='pause')
+    skipped = emit(store)
+    resumed = store.update_subscription(token, sid, paused['version'], action='resume', resume_policy='skip')
+    assert resumed['gap']['reason'] == 'explicit_resume_skip'
+    future = emit(store)
+    match_subscriptions(store)
+    assert [e['event_id'] for e in store.get_subscription_events(token, sid)['items']] == [missed, future]
+    assert skipped not in [e['event_id'] for e in store.get_subscription_events(token, sid)['items']]
+    closed = store.update_subscription(token, sid, resumed['version'], action='close')
+    assert closed['state'] == 'closed'
+    emit(store)
+    assert match_subscriptions(store)['checked'] == 0
+    with pytest.raises(APIError, match='subscription_closed'):
+        store.update_subscription(token, sid, closed['version'], action='resume')
+
+
+def test_scope_changes_mask_and_never_revive_definition(seeded):
+    store, _, _ = seeded
+    token = key(store)
+    sid = create(store, token, label='private label')['subscription_id']
+    emit(store)
+    match_subscriptions(store)
+    store.set_access('subscriber', chats=[])
+    page = store.get_subscription_events(token, sid)
+    assert page['items'] == [] and page['scope_masked']
+    assert set(page['subscription']) == {'subscription_id', 'state', 'version', 'recreate_required', 'scope_masked'}
+    assert 'private label' not in str(page)
+    store.set_access('subscriber', chats=None)
+    emit(store)
+    assert match_subscriptions(store)['checked'] == 0
+    assert store.get_subscription(token, sid)['state'] == 'access_changed'
+    with pytest.raises(APIError, match='subscription_access_changed'):
+        store.update_subscription(token, sid, 2, action='resume')
+
+
+def test_key_permission_change_revocation_and_expiry_stop_matcher(seeded):
+    store, _, _ = seeded
+    token = key(store)
+    sid = create(store, token)['subscription_id']
+    credential = store.capabilities(token)['credential_id']
+    store.set_key_permissions(credential, ['read'])
+    emit(store)
+    assert match_subscriptions(store)['access_changed'] == 1
+    assert store.get_subscription_events(token, sid)['scope_masked']
+    revoked = key(store, 'revoked')
+    revoked_id = create(store, revoked)['subscription_id']
+    store.revoke(revoked)
+    assert match_subscriptions(store)['access_changed'] == 1
+    with store.pool.connection() as c:
+        assert c.execute('SELECT state FROM subscriptions WHERE id=%s', (revoked_id,)).fetchone()['state'] == 'access_changed'
+    expiring = key(store, 'expiring')
+    expiring_id = create(store, expiring)['subscription_id']
+    with store.pool.connection() as c:
+        c.execute("UPDATE subscriptions SET expires_at=clock_timestamp()-interval '1 second' WHERE id=%s", (expiring_id,))
+    assert match_subscriptions(store)['expired'] == 1
+    assert store.get_subscription(expiring, expiring_id)['state'] == 'expired'
+
+
+def test_bounded_matching_pagination_restart_and_concurrent_workers(seeded):
+    store, _, _ = seeded
+    token = key(store)
+    sid = create(store, token)['subscription_id']
+    events = [emit(store) for _ in range(8)]
+    assert match_subscriptions(store, batch_size=2)['matched'] == 2
+    with ThreadPoolExecutor(max_workers=2) as pool:
+        list(pool.map(lambda _: match_subscriptions(store, batch_size=2), range(2)))
+    match_subscriptions(store)
+    assert match_subscriptions(store)['matched'] == 0
+    page = store.get_subscription_events(token, sid, limit=3)
+    assert page['has_more'] and [e['event_id'] for e in page['items']] == events[:3]
+    next_page = store.get_subscription_events(token, sid, after=page['next_after'])
+    assert [e['event_id'] for e in next_page['items']] == events[3:]
+    assert next_page['subscription']['matched_event_count'] == 8
+
+
+def test_match_rows_and_checkpoint_rollback_atomically(seeded, monkeypatch):
+    store, _, _ = seeded
+    token = key(store)
+    sid = create(store, token)['subscription_id']
+    event = emit(store)
+    with store.pool.connection() as c:
+        c.execute("""CREATE FUNCTION subscription_test_failure() RETURNS trigger LANGUAGE plpgsql AS $$
+            BEGIN RAISE EXCEPTION 'synthetic matcher failure'; END $$""")
+        c.execute('CREATE TRIGGER subscription_test_failure BEFORE UPDATE OF matched_through ON subscriptions FOR EACH ROW EXECUTE FUNCTION subscription_test_failure()')
+    try:
+        with pytest.raises(Exception, match='synthetic matcher failure'):
+            match_subscriptions(store)
+        with store.pool.connection() as c:
+            assert c.execute('SELECT count(*) AS n FROM subscription_matches WHERE subscription=%s', (sid,)).fetchone()['n'] == 0
+            assert c.execute('SELECT matched_through FROM subscriptions WHERE id=%s', (sid,)).fetchone()['matched_through'] == 4
+    finally:
+        with store.pool.connection() as c:
+            c.execute('DROP TRIGGER subscription_test_failure ON subscriptions')
+            c.execute('DROP FUNCTION subscription_test_failure()')
+    match_subscriptions(store)
+    assert [e['event_id'] for e in store.get_subscription_events(token, sid)['items']] == [event]
+
+
+def test_creation_does_not_skip_uncommitted_event(seeded):
+    store, _, _ = seeded
+    token = key(store)
+    inserted = threading.Event()
+    release = threading.Event()
+    def publisher():
+        with store.pool.connection() as c:
+            event = store.append_event(c, 'telegram-demo', 'demo-tg-1', origin='live')
+            inserted.set()
+            assert release.wait(timeout=5)
+        return event
+    with ThreadPoolExecutor(max_workers=1) as pool:
+        publishing = pool.submit(publisher)
+        assert inserted.wait(timeout=5)
+        try:
+            subscription = create(store, token)
+            assert subscription['start_position'] == 4
+        finally:
+            release.set()
+        event = publishing.result(timeout=5)
+    match_subscriptions(store)
+    assert [e['event_id'] for e in store.get_subscription_events(token, subscription['subscription_id'])['items']] == [event]
+
+
+def test_match_budget_does_not_drop_events_and_recovers(seeded, monkeypatch):
+    store, _, _ = seeded
+    token = key(store)
+    sid = create(store, token)['subscription_id']
+    monkeypatch.setenv('SUBSCRIPTION_MAX_MATCHES', '2')
+    events = [emit(store) for _ in range(4)]
+    assert match_subscriptions(store)['blocked'] == 1
+    blocked = store.get_subscription(token, sid)
+    assert blocked['blocked_reason'] == 'match_budget'
+    assert blocked['gap']['recoverable'] and blocked['matched_through'] == events[1]
+    monkeypatch.setenv('SUBSCRIPTION_MAX_MATCHES', '4')
+    match_subscriptions(store)
+    page = store.get_subscription_events(token, sid)
+    assert [e['event_id'] for e in page['items']] == events
+    assert page['subscription']['gap'] is None
+
+
+def test_definition_budget_is_atomic_and_visible(seeded, monkeypatch):
+    store, _, _ = seeded
+    token = key(store)
+    monkeypatch.setenv('SUBSCRIPTION_MAX_DEFINITIONS', '1')
+    create(store, token)
+    with pytest.raises(APIError, match='subscription_limit'):
+        create(store, token)
+    assert len(store.list_subscriptions(token)['items']) == 1
+
+
+def test_removed_journal_event_is_not_complete_empty_result(seeded):
+    store, _, _ = seeded
+    token = key(store)
+    sid = create(store, token)['subscription_id']
+    event = emit(store)
+    with store.pool.connection() as c:
+        c.execute('DELETE FROM events WHERE id=%s', (event,))
+    assert match_subscriptions(store)['blocked'] == 1
+    state = store.get_subscription_events(token, sid)['subscription']
+    assert not state['matcher_caught_up'] and state['gap']['reason'] == 'journal_gap'
+    assert state['matched_through'] == 4
+
+
+def test_old_writer_trigger_captures_identity_without_provider_restart(seeded):
+    store, _, _ = seeded
+    token = key(store)
+    sid = create(store, token, sender_ids=['demo-person-1'])['subscription_id']
+    with store.pool.connection() as c:
+        event = c.execute('UPDATE feed_counter SET value=value+1 WHERE id=1 RETURNING value').fetchone()['value']
+        c.execute('''INSERT INTO events(id,account,message,kind,revision,origin,snapshot)
+            VALUES(%s,'telegram-demo','demo-tg-1','message.created',1,'live',%s)''',
+            (event, Jsonb({'message': 'demo-tg-1', 'account': 'telegram-demo', 'chat': 'telegram-demo-chat', 'direction': 'incoming'})))
+        c.execute("UPDATE messages SET sender='different',revision=revision+1 WHERE id='demo-tg-1'")
+    match_subscriptions(store)
+    page = store.get_subscription_events(token, sid)
+    assert page['items'][0]['sender'] == 'demo-person-1'
+    assert page['items'][0]['provider_id'] == 'demo-tg-1'
+
+
+def test_missing_legacy_sender_snapshot_is_explicit_not_mutable_fallback(seeded):
+    store, _, _ = seeded
+    token = key(store)
+    person = create(store, token, sender_ids=['demo-person-1'])['subscription_id']
+    chat = create(store, token)['subscription_id']
+    event = emit(store)
+    with store.pool.connection() as c:
+        c.execute("UPDATE events SET snapshot=snapshot-'sender' WHERE id=%s", (event,))
+    assert match_subscriptions(store)['missing_evidence'] == 1
+    person_page = store.get_subscription_events(token, person)
+    assert person_page['items'] == [] and person_page['subscription']['missing_revision_evidence_events'] == 1
+    assert [e['event_id'] for e in store.get_subscription_events(token, chat)['items']] == [event]
+
+
+def test_fair_matcher_visits_sources_beyond_one_batch(seeded):
+    store, _, _ = seeded
+    token = key(store)
+    subscriptions = [create(store, token)['subscription_id'] for _ in range(5)]
+    event = emit(store)
+    for _ in range(3):
+        match_subscriptions(store, max_subscriptions=2)
+    assert all([e['event_id'] for e in store.get_subscription_events(token, sid)['items']] == [event] for sid in subscriptions)
+
+
+def test_processing_refs_are_independent_of_message_readiness(seeded):
+    store, _, _ = seeded
+    token = key(store)
+    sid = create(store, token, kinds=['message.created', 'file.transcript.ready'])['subscription_id']
+    message = emit(store)
+    with store.pool.connection() as c:
+        ready = store.append_event(c, 'telegram-demo', 'demo-tg-1', 'file.transcript.ready', 'live',
+            snapshot_metadata={'processing': {'attachment_id': 'synthetic-voice', 'stage': 'transcript',
+                'state': 'ready', 'artifact_version': 'synthetic-v1'}})
+    match_subscriptions(store)
+    events = store.get_subscription_events(token, sid)['items']
+    assert [e['event_id'] for e in events] == [message, ready]
+    assert 'processing' not in events[0] and events[1]['processing']['stage'] == 'transcript'
+
+
+def test_no_push_or_reply_preset_claimed(seeded):
+    store, _, _ = seeded
+    capabilities = store.capabilities(key(store))['subscriptions']
+    assert capabilities['implemented'] and capabilities['passive_events']
+    assert not capabilities['ack'] and not capabilities['push']
+    assert not capabilities['verified_host'] and not capabilities['native_reply_preset']

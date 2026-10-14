@@ -2,6 +2,55 @@
 from .file_index import file_response_fields
 
 
+def send_provenance(c,rows):
+    """Already authorized message rows only; never expose credentials/request IDs."""
+    if not rows:return
+    ids=list({r.get('id') or r['message'] for r in rows})
+    sends=c.execute('''SELECT DISTINCT ON(m.id) m.id AS message_id,o.id AS send_id,o.principal,o.body,
+        count(*) OVER(PARTITION BY m.id) AS candidate_count
+        FROM messages m JOIN outgoing_messages o ON o.account=m.account AND o.chat=m.chat
+            AND o.provider_message_id=m.provider_id AND o.status='sent'
+        WHERE m.id=ANY(%s) AND m.direction='outgoing'
+        ORDER BY m.id,o.finished_at DESC,o.id''',(ids,)).fetchall()
+    sent={r['message_id']:r for r in sends}
+    for row in rows:
+        action=sent.get(row.get('id') or row['message'])
+        if action is None:continue
+        if action['candidate_count']!=1:
+            row['agent_send']={'basis':'ambiguous_outbox_receipts','candidate_count':action['candidate_count'],
+                'owner_approval_verified_by_server':False}
+        else:
+            row['agent_send']={'send_id':action['send_id'],'principal':action['principal'],
+                'basis':'confirmed_outbox_receipt','body_matches_sent_text':row.get('body')==action['body'],
+                'owner_approval_verified_by_server':False}
+
+
+def formatting_evidence(c,rows):
+    """Read exact authorized revisions; never attach newer proof to old events."""
+    from .incoming_formatting import unknown
+    missing=[r for r in rows if 'formatting' not in r]
+    if not missing:return
+    # A message may occur at multiple frozen revisions in an update batch.
+    pairs=list(dict.fromkeys((r.get('id') or r['message'],r['revision']) for r in missing))
+    proof={(r['message'],r['revision']):r['formatting'] for r in c.execute(
+        """SELECT mr.message,mr.revision,mr.snapshot->'formatting' AS formatting
+            FROM message_revisions mr JOIN unnest(%s::text[],%s::integer[]) AS requested(message,revision)
+                ON mr.message=requested.message AND mr.revision=requested.revision""",
+        ([p[0] for p in pairs],[p[1] for p in pairs])).fetchall()}
+    for row in missing:
+        value=proof.get((row.get('id') or row['message'],row['revision']))
+        row['formatting']=value if value is not None else unknown()
+
+
+def delivery_evidence(c,rows):
+    """Decorate authorized rows, preserving receipt events' frozen evidence."""
+    from .receipts import for_rows,unknown_evidence
+    missing=[r for r in rows if r.get('direction')=='outgoing' and 'delivery_receipt' not in r]
+    proofs=for_rows(c,missing)
+    for row in missing:
+        row['delivery_receipt']=proofs.get(row.get('id') or row.get('message'),unknown_evidence())
+
+
 def decorate(c,rows):
     if not rows:return rows
     ids=list({r['id'] for r in rows})
@@ -47,7 +96,13 @@ def decorate(c,rows):
         max(observed_at) AS last_conflict_at FROM message_conflicts
         WHERE message=ANY(%s) GROUP BY message''',(ids,))}
     current={r['id']:r['revision'] for r in c.execute('SELECT id,revision FROM messages WHERE id=ANY(%s)',(ids,))}
+    send_provenance(c,rows)
+    delivery_evidence(c,rows)
+    formatting_evidence(c,rows)
     for row in rows:
+        # Some query paths truncate before decoration; never imply these spans
+        # address the shortened response body. Do not mutate stored snapshots.
+        row['formatting']={**row['formatting'],'offsets_reference':'full_provider_body_utf16'}
         row['attachments']=grouped.get(row['id'],[])
         conflict=conflicts.get(row['id'],{'active_conflicts':0,'historical_conflicts':0,'last_conflict_at':None})
         row['evidence']={k:v for k,v in conflict.items() if k!='message'}

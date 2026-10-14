@@ -1,13 +1,36 @@
 # Roadmap
 
 This library stays focused on messenger collection and an agent interface.
-Task/project management is outside the archive. Sending is not in 0.9.9 and
-remains a separate, explicitly approved action boundary.
+Version 0.9.15 adds an allowlisted live messenger-operation interface, independent
+key ceilings and account opt-in. See [MESSENGER_OPERATIONS.md](MESSENGER_OPERATIONS.md)
+and the [provider coverage audit](MESSENGER_CAPABILITY_AUDIT.md). This is an expanded
+first catalog, not full parity with every upstream method.
+Task/project management is outside the archive. Version 0.9.14 adds passive formatting previews, reviewed rich-text sends and
+versioned incoming formatting evidence ([FORMATTING.md](FORMATTING.md)).
+Version 0.9.13 adds passive
+delivery/read observations and bounded status updates ([RECEIPTS.md](RECEIPTS.md)).
+Version 0.9.12 completes missing
+Telegram private-send identities and exposes confirmed agent-send provenance.
+[MESSAGE_ACTIONS.md](MESSAGE_ACTIONS.md) tracks receipt/reaction/action follow-up,
+including discovery compatibility. [FORMATTING.md](FORMATTING.md) defines the implemented rich-text contract;
+native visual acceptance requires separately approved provider sends.
+Version 0.9.11 separates the
+WhatsApp sending lane from background history/media in the same authenticated
+collector. Version 0.9.10 adds opt-in text
+sending as a separate, explicitly approved action boundary.
 
 The 0.9.9 baseline already includes per-chat evidence, explicit collector errors,
 verified WhatsApp identity observations, file-text indexing, morphology search,
 bounded downloads, byte-level deduplication and optional enrichment adapters.
 These capabilities do not imply that every source history or file is available.
+
+Version 0.9.16 implements the [durable subscription core](SUBSCRIPTIONS.md):
+explicit chat/channel sets and account-scoped senders, persistent lifecycle,
+restart-safe matching, passive event pages and independent file readiness.
+Next: scoped subscription ACKs, dispatch/batching, reply/mention presets and a
+verified host receiver with notification transport. Push and agent wake-up are
+not available in this slice. Existing history, storage and file-understanding
+work remains below.
 
 Next work, in order:
 
@@ -33,8 +56,11 @@ Next work, in order:
    against the existing PostgreSQL baseline, including Russian queries, people
    and file descriptions. Measure SQL, REST/MCP and client-connector latency
    separately; improve only demonstrated bottlenecks.
-6. **Sending:** design a scoped draft/approval/outbox path with idempotency,
-   retries and audit evidence after the owner defines approval requirements.
+6. **Sending:** opt-in text/reply outbox with idempotency is implemented (SENDING.md).
+   Next: reaction reads,
+   then attachments/edit/delete/reaction/read actions. A scoped server draft/approval
+   path is optional and follows explicit owner configuration. Ambiguous sends
+   must never be blindly retried; formatted text must not be silently split.
 
 Every stage needs regression tests, resource/coverage diagnostics and explicit
 release notes. Separate owners should use separate deployments; true tenancy is

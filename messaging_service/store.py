@@ -1,7 +1,7 @@
 """PostgreSQL archive: one policy layer for HTTP and MCP.
 
-No provider sessions, network fetch, arbitrary SQL, owner approval or outgoing
-message path is exposed to agents. Collection uses separate operator workers.
+No provider sessions, network fetch, arbitrary SQL or server approval gate is
+exposed to agents. Reviewed opt-in operations use the existing fenced collectors.
 """
 from __future__ import annotations
 
@@ -23,7 +23,8 @@ from psycopg_pool import ConnectionPool
 from . import __version__
 from .policy import (DEFAULT_PERMISSIONS, OPERATION_PERMISSIONS, UNSET, audit,
                      key_id, lock_principal, normalize_policy, principal_id,
-                     scope_filter, targets)
+                     scope_filter, targets, effective_permissions, PERMISSIONS, normalize_list,
+                     LEGACY_PERMISSIONS)
 
 
 class APIError(Exception):
@@ -95,7 +96,8 @@ class Store:
         lock_principal(c, known['principal'], shared=True)
         # READ COMMITTED rechecks after a concurrent operator changed access.
         # clock_timestamp also rejects credentials that expired while waiting.
-        row = c.execute('''SELECT p.*, k.digest AS key_digest,k.id AS key_id FROM api_keys k
+        row = c.execute('''SELECT p.*, k.digest AS key_digest,k.id AS key_id,
+            k.permissions AS key_permissions,k.permission_version AS key_permission_version FROM api_keys k
             JOIN principals p ON p.id=k.principal
             WHERE k.digest=%s AND NOT k.revoked AND k.expires_at>clock_timestamp() AND p.enabled''',
             (key_digest,)).fetchone()
@@ -103,6 +105,8 @@ class Store:
             error = APIError(missing, status)
             error.audit_identity = {'id': known['principal'], 'key_id': known['id']}
             raise error
+        row['principal_permissions'] = row['permissions']
+        row['permissions'] = effective_permissions(row['permissions'], row['key_permissions'])
         return row
 
     @contextmanager
@@ -191,24 +195,39 @@ class Store:
 
     def capabilities(self, token):
         with self.authorized(token,'capabilities') as (c, p):
+            from .messenger_operations import CATALOG_VERSION,OPERATIONS,operation_manifest
             dataset=self.dataset(c,p)
             accounts = c.execute('SELECT id,platform,label,synthetic FROM accounts WHERE id=ANY(%s) ORDER BY id',
                                  ([r['id'] for r in dataset['sources']],)).fetchall()
-            features={'read':['search','history','context','updates','reviews','search_people','search_files','get_file_text','get_file_occurrences','get_sync_status','get_file_segments','resolve_reference'], 'download':['attachment'], 'cursor-write':['ack']}
-            if 'read' in p['permissions']:features['review-write']=['record_review']
+            features={'read':['search','history','context','updates','reviews','search_people','search_files','get_file_text','get_file_occurrences','get_sync_status','get_file_segments','resolve_reference','preview_message'], 'download':['attachment'], 'cursor-write':['ack'], 'send':['send_message','get_send_status']}
+            if 'read' in p['permissions']:
+                features['review-write']=['record_review']
+                features['read'].extend(['list_subscriptions','get_subscription','get_subscription_events'])
+                features['subscription-write']=['create_subscription','update_subscription']
+            available=[feature for permission,names in features.items() if permission in p['permissions'] for feature in names]
+            operation_tools=['list_messenger_operations','preview_messenger_operation',
+                             'execute_messenger_operation','get_messenger_operation']
+            if any(spec['permission'] in p['permissions'] for spec in OPERATIONS.values()):
+                available.extend(operation_tools)
+            else:available.append('list_messenger_operations')
             return {'service': 'anymsg', 'version': __version__, **dataset,
                 'tool_manifest':{'version':__version__,'names':sorted(OPERATION_PERMISSIONS.keys()-{'download'}),
                     'discovery_action':'refresh_connection_if_tools_list_differs',
                     'rest_fallback':'POST /v1/{tool_name} with the same bearer and JSON parameters'},
                 'principal': p['id'], 'scope_version': p['scope_version'], 'accounts': accounts,
                 'credential_id':str(p['key_id']), 'permissions':p['permissions'],
+                'key_permission_ceiling':p['key_permissions'] if p['key_permissions'] is not None else sorted(LEGACY_PERMISSIONS),
+                'key_permission_version':p['key_permission_version'],
                 'chat_scope':{'all_in_permitted_accounts':p['chat_ids'] is None,'chat_ids':p['chat_ids']},
                 'auth_mode': 'managed_bearer_keys',
                 'search_options':{'filters':['accounts','chats','senders','from_time','to_time','direction'],
                     'query_modes':['all','phrase','web','exact'],'orders':['asc','desc','relevance'],
                     'languages':['auto','simple','russian','english','indonesian'],
                     'fuzzy':'explicit_bounded_fallback','compact':True,'optional_coverage':True,
-                    'context':'independent_before_and_after_counts','chat_orders':['id','activity'],
+                    'context':'independent_before_and_after_counts','chat_orders':['id','activity','last_activity_desc'],
+                    'chat_order_default':'activity','awaiting_reply_default_days':14,
+                    'awaiting_reply_bots':'exclude_observed_bot_senders_not_name_guesses',
+                    'sync_status_details':['compact','full'],
                     'updates':'version_checked_filter_reset_preserves_ack_position',
                     'update_orders':['event','sent_at_within_delivered_batch'],
                     'updates_exclude_channels':True,'is_backfill':True,
@@ -224,21 +243,117 @@ class Store:
                     'file_caption_provenance':'current_parent_message_revision_only',
                     'chat_coverage':True,'provider_id_lookup':'resolve_reference',
                     'empty_result_diagnostics':True,'message_conflicts':'scoped_active_and_historical'},
-                'available': [feature for permission,names in features.items() if permission in p['permissions'] for feature in names],
-                'unavailable': ['guaranteed_full_history', 'drafts', 'send',
+                'available':available,
+                'subscriptions':{'implemented':True,'definitions':True,'passive_events':True,
+                    'source_selection':'frozen_explicit_chats_and_account_scoped_sender_ids',
+                    'event_selection':'structural_exact_revision','origin_default':'live',
+                    'mutation_permission':'subscription-write','read_permission_required':True,
+                    'ownership':'originating_credential_and_principal','new_permission_inherited':False,
+                    'source_scope_change':'masked_access_changed_recreate_required',
+                    'ack':False,'push':False,'verified_host':False,'native_reply_preset':False,
+                    'provider_polling':False,'start_boundary':'committed_archive_frontier',
+                    'existing_update_consumers_unchanged':True},
+                'sending':{'implemented':True,'approval_mode':'acting_agent_obtains_exact_owner_confirmation',
+                    'server_approval_gate':False,'text_only':False,'legacy_send_message_text_only':True,
+                    'request_id_required':True,
+                    'formatting':{'formats':['plain','markdown','html'],
+                        'preview_tool':'preview_message','preview_permission':'read',
+                        'preview_contacts_provider':False,'plain_default':True,
+                        'rich_preview_digest_required':True,'digest_proves_owner_approval':False,
+                        'digest_binds':['principal','scope_version','account','chat','reply_target',
+                            'source','format','rendered_payload','renderer_version','link_preview','allow_lossy'],
+                        'link_preview_default':False,'automatic_splitting':False,
+                        'whatsapp_link_preview_control':'provider_multi_device_limitation',
+                        'whatsapp_plain_native_markup':'provider_may_interpret_delimiters'},
+                    'ambiguous_result_policy':'unknown_no_automatic_retry',
+                    'delivery_observations':{'telegram':'private_outbox_read_boundary',
+                        'whatsapp':'message_ack_private_or_group_aggregate',
+                        'provider_timestamps_available':False,'historical_coverage_guaranteed':False,
+                        'event_kind':'message.status','changes_provider_read_state':False},
+                    'read_permission_does_not_allow_send':True},
+                'messenger_operations':{'implemented':True,'catalog_version':CATALOG_VERSION,
+                    'operation_count':len(OPERATIONS),'tools':operation_tools,
+                    'supported_count_by_platform':{platform:sum(item['supported'] for item in operation_manifest(platform))
+                                                   for platform in ('telegram','whatsapp')},
+                    'availability_tool':'list_messenger_operations','account_opt_in_required':True,
+                    'independent_key_permissions':True,'new_permissions_inherited_by_existing_keys':False,
+                    'administration':['groups','contacts','account_profile'],
+                    'archive_read_remains_passive':True,'provider_session_owner':'existing_fenced_collector',
+                    'mutation_preview_digest_required':True,'preview_digest_proves_owner_approval':False,
+                    'ambiguous_mutations':'unknown_no_automatic_retry','registered_file_limit_bytes':32*1024**2,
+                    'read_state_requires_explicit_permission':True},
+                'unavailable': ['guaranteed_full_history', 'drafts',
                                 'owner_approval', 'project_memory', 'schedules', 'oauth'],
                 'limits': {'page_size': 100, 'query_chars': 200,
                            'download_grant_seconds': 120, 'delivery_seconds': 900,
-                           'review_sources':20, 'context_reviews':5}}
+                           'review_sources':20, 'context_reviews':5,'send_text_utf16_units':4000,
+                           'format_source_utf16_units':16000,'http_json_body_bytes':16384,
+                           'send_queue_ttl_seconds':600,'send_per_account_per_minute':60}}
+
+    def preview_message(self,token,account,chat_id,text,reply_to='',format='plain',
+                        link_preview=False,allow_lossy=False):
+        from .outgoing import preview
+        with self.authorized(token,'preview_message') as (c,p):
+            return preview(c,p,account,chat_id,text,reply_to,format,link_preview,allow_lossy)
+
+    def send_message(self,token,account,chat_id,text,request_id,reply_to='',format='plain',
+                     preview_digest='',link_preview=False,allow_lossy=False):
+        from .outgoing import enqueue
+        with self.authorized(token,'send_message') as (c,p):
+            return enqueue(c,p,account,chat_id,text,request_id,reply_to,format,
+                preview_digest,link_preview,allow_lossy)
+
+    def get_send_status(self,token,send_id):
+        from .outgoing import status
+        with self.authorized(token,'get_send_status') as (c,p):
+            return status(c,p,send_id)
+
+    def list_messenger_operations(self,token,account):
+        from .commands import manifest
+        with self.authorized(token,'list_messenger_operations') as (c,p):
+            return manifest(c,p,account)
+
+    def preview_messenger_operation(self,token,account,operation,chat_id='',message_id='',
+                                   expected_revision=0,parameters=None):
+        from .commands import preview
+        with self.authorized(token,'preview_messenger_operation') as (c,p):
+            return preview(self,c,p,account,operation,chat_id,message_id,expected_revision,parameters)
+
+    def execute_messenger_operation(self,token,account,operation,chat_id='',message_id='',
+                                   expected_revision=0,parameters=None,request_id='',preview_digest=''):
+        from .commands import enqueue
+        with self.authorized(token,'execute_messenger_operation') as (c,p):
+            return enqueue(self,c,p,account,operation,chat_id,message_id,expected_revision,
+                           parameters,request_id,preview_digest)
+
+    def get_messenger_operation(self,token,operation_id):
+        from .commands import status
+        with self.authorized(token,'get_messenger_operation') as (c,p):
+            return status(self,c,p,operation_id)
+
+    def set_messenger_operations(self,account,operations):
+        """Owner-only account opt-in; this method is not exposed through MCP."""
+        from .messenger_operations import operation_manifest
+        values=normalize_list(operations,maximum=100)
+        with self.pool.connection() as c:
+            row=c.execute('SELECT platform FROM accounts WHERE id=%s',(account,)).fetchone()
+            if not row:raise ValueError('unknown_account')
+            supported={entry['operation'] for entry in operation_manifest(row['platform']) if entry['supported']}
+            if set(values)-supported:raise ValueError('unsupported_operation')
+            changed=c.execute('UPDATE account_policies SET operations_enabled=%s WHERE account=%s',
+                              (values,account)).rowcount
+            if not changed:raise ValueError('unknown_account')
+            audit(c,None,'set_operations','ok')
 
     def list_chats(self, token, after='', limit=100, *, accounts=None,query='',chat_types=None,
                    order='id',exclude_channels=False,awaiting_reply=False,from_time='',to_time='',
-                   include_coverage=True):
+                   include_coverage=True,awaiting_reply_days=14):
         from .chat_queries import list_chats
         with self.authorized(token,'list_chats') as (c,p):
             return list_chats(self,c,p,after,limit,accounts=accounts,query=query,chat_types=chat_types,
                 order=order,exclude_channels=exclude_channels,awaiting_reply=awaiting_reply,
-                from_time=from_time,to_time=to_time,include_coverage=include_coverage)
+                from_time=from_time,to_time=to_time,include_coverage=include_coverage,
+                awaiting_reply_days=awaiting_reply_days)
 
     def search_people(self,token,query='',*,accounts=None,chats=None,after='',limit=20,
                       transliterate=False,group_by_sender=False):
@@ -475,6 +590,34 @@ class Store:
                 exclude_channels=exclude_channels,order=order,reset_filters=reset_filters,
                 expected_ack_version=expected_ack_version)
 
+    def create_subscription(self, token, chat_ids, *, sender_ids=None, kinds=None,
+                            direction='incoming', origins=None, label='', expires_at=None):
+        from .subscriptions import create_subscription
+        with self.authorized(token, 'create_subscription') as (c, p):
+            return create_subscription(self, c, p, chat_ids, sender_ids=sender_ids, kinds=kinds,
+                direction=direction, origins=origins, label=label, expires_at=expires_at)
+
+    def list_subscriptions(self, token, *, limit=50):
+        from .subscriptions import list_subscriptions
+        with self.authorized(token, 'list_subscriptions') as (c, p):
+            return list_subscriptions(self, c, p, limit=limit)
+
+    def get_subscription(self, token, subscription_id):
+        from .subscriptions import get_subscription
+        with self.authorized(token, 'get_subscription') as (c, p):
+            return get_subscription(self, c, p, subscription_id)
+
+    def update_subscription(self, token, subscription_id, version, *, action, resume_policy='catch_up'):
+        from .subscriptions import update_subscription
+        with self.authorized(token, 'update_subscription') as (c, p):
+            return update_subscription(self, c, p, subscription_id, version,
+                action=action, resume_policy=resume_policy)
+
+    def get_subscription_events(self, token, subscription_id, *, after=0, limit=50):
+        from .subscriptions import get_subscription_events
+        with self.authorized(token, 'get_subscription_events') as (c, p):
+            return get_subscription_events(self, c, p, subscription_id, after=after, limit=limit)
+
     def ack_updates(self, token, consumer, receipt, expected_version):
         with self.authorized(token,'ack_updates') as (c, p):
             if not isinstance(expected_version,int) or isinstance(expected_version,bool) or expected_version<0:
@@ -506,8 +649,8 @@ class Store:
             c.execute("SET LOCAL statement_timeout='180s'")
             c.execute(Path(__file__).with_name('schema.sql').read_text())
             version=int(c.execute("SELECT value FROM probe_metadata WHERE name='schema_version'").fetchone()['value'])
-            if version>21: raise RuntimeError('database_newer_than_runtime')
-            for target,name in [(2,'002_archive.sql'),(3,'003_collectors.sql'),(4,'004_whatsapp.sql'),(5,'005_access.sql'),(6,'006_reviews.sql'),(7,'007_search_indexes.sql'),(8,'008_people.sql'),(9,'009_file_index.sql'),(10,'010_search_audit.sql'),(11,'011_telegram_window.sql'),(12,'012_search.sql'),(13,'013_file_search.sql'),(14,'014_collector_health.sql'),(15,'015_enrichment.sql'),(16,'016_file_content.sql'),(17,'017_chat_evidence.sql'),(18,'018_collector_operations.sql'),(19,'019_whatsapp_identities.sql'),(20,'020_processing_admission.sql'),(21,'021_media_storage.sql')]:
+            if version>26: raise RuntimeError('database_newer_than_runtime')
+            for target,name in [(2,'002_archive.sql'),(3,'003_collectors.sql'),(4,'004_whatsapp.sql'),(5,'005_access.sql'),(6,'006_reviews.sql'),(7,'007_search_indexes.sql'),(8,'008_people.sql'),(9,'009_file_index.sql'),(10,'010_search_audit.sql'),(11,'011_telegram_window.sql'),(12,'012_search.sql'),(13,'013_file_search.sql'),(14,'014_collector_health.sql'),(15,'015_enrichment.sql'),(16,'016_file_content.sql'),(17,'017_chat_evidence.sql'),(18,'018_collector_operations.sql'),(19,'019_whatsapp_identities.sql'),(20,'020_processing_admission.sql'),(21,'021_media_storage.sql'),(22,'022_outgoing.sql'),(23,'023_receipts.sql'),(24,'024_formatting.sql'),(25,'025_operations.sql'),(26,'026_subscriptions.sql')]:
                 migration=Path(__file__).with_name('migrations')/name
                 sha=hashlib.sha256(migration.read_bytes()).hexdigest()
                 if version<target:
@@ -521,7 +664,8 @@ class Store:
                     applied=c.execute('SELECT sha256 FROM archive_migrations WHERE version=%s',(target,)).fetchone()
                     if not applied or applied['sha256']!=sha: raise RuntimeError('migration_checksum_mismatch')
 
-    def issue_key(self, principal, accounts, days=7, *, chats=UNSET, permissions=UNSET):
+    def issue_key(self, principal, accounts, days=7, *, chats=UNSET, permissions=UNSET,
+                  key_permissions=UNSET):
         principal_id(principal)
         if type(days) is not int or not 1<=days<=30:
             raise ValueError('invalid_key_lifetime')
@@ -532,11 +676,34 @@ class Store:
             if chats is UNSET:chats=old['chat_ids'] if old else None
             if permissions is UNSET:permissions=old['permissions'] if old else DEFAULT_PERMISSIONS
             accounts,chats,permissions=normalize_policy(c,accounts,chats,permissions)
+            implicit_ceiling=key_permissions is UNSET
+            if implicit_ceiling:key_permissions=sorted(LEGACY_PERMISSIONS|set(permissions))
+            key_permissions=normalize_list(key_permissions,maximum=len(PERMISSIONS))
+            if set(key_permissions)-(set(permissions)|(LEGACY_PERMISSIONS if implicit_ceiling else set())):
+                raise ValueError('invalid_key_permissions')
             self._write_policy(c,principal,old,accounts,chats,permissions,old['enabled'] if old else True)
-            issued=c.execute('INSERT INTO api_keys(digest,principal,expires_at) VALUES(%s,%s,%s) RETURNING id',
-                (digest(token),principal,datetime.now(timezone.utc)+timedelta(days=days))).fetchone()
+            issued=c.execute('INSERT INTO api_keys(digest,principal,expires_at,permissions) VALUES(%s,%s,%s,%s) RETURNING id',
+                (digest(token),principal,datetime.now(timezone.utc)+timedelta(days=days),key_permissions)).fetchone()
             audit(c,{'id':principal,'key_id':issued['id']},'issue_key','ok')
         return token
+
+    def set_key_permissions(self,credential_id,permissions):
+        credential_id=key_id(credential_id)
+        permissions=normalize_list(permissions,maximum=len(PERMISSIONS))
+        if set(permissions)-PERMISSIONS:raise ValueError('invalid_scope')
+        with self.pool.connection() as c:
+            known=c.execute('SELECT principal FROM api_keys WHERE id=%s',(credential_id,)).fetchone()
+            if not known:raise ValueError('unknown_key')
+            lock_principal(c,known['principal'])
+            principal=c.execute('SELECT permissions FROM principals WHERE id=%s',
+                                (known['principal'],)).fetchone()
+            if set(permissions)-set(principal['permissions']):raise ValueError('invalid_key_permissions')
+            row=c.execute('''UPDATE api_keys SET permissions=%s,
+                permission_version=permission_version+1 WHERE id=%s
+                RETURNING id,principal,permissions,permission_version''',
+                (permissions,credential_id)).fetchone()
+            audit(c,{'id':known['principal'],'key_id':credential_id},'set_key_permissions','ok')
+            return serial(row)
 
     @staticmethod
     def _write_policy(c,principal,old,accounts,chats,permissions,enabled):
@@ -583,7 +750,7 @@ class Store:
     def list_keys(self,principal):
         principal_id(principal)
         with self.pool.connection() as c:
-            return serial(c.execute('SELECT id,principal,expires_at,revoked FROM api_keys WHERE principal=%s ORDER BY expires_at,id',
+            return serial(c.execute('SELECT id,principal,expires_at,revoked,permissions,permission_version FROM api_keys WHERE principal=%s ORDER BY expires_at,id',
                                     (principal,)).fetchall())
 
     def audit_tail(self,principal='',limit=50):
@@ -594,11 +761,19 @@ class Store:
                 ORDER BY occurred_at DESC,id DESC LIMIT %s''',(principal,principal,limit)).fetchall())
 
     @staticmethod
-    def append_event(c, account, message, kind='message.created', origin='fixture', event_key=None):
+    def append_event(c, account, message, kind='message.created', origin='fixture', event_key=None,
+                     snapshot_metadata=None):
         from psycopg.types.json import Jsonb
-        row=c.execute('''SELECT id AS message,account,chat,body,revision,sent_at,deleted,direction
+        row=c.execute('''SELECT id AS message,account,chat,sender,provider_id,body,revision,sent_at,deleted,direction
             FROM messages WHERE id=%s AND account=%s''',(message,account)).fetchone()
         if not row: raise ValueError('invalid_event_message')
+        if snapshot_metadata is not None:
+            if (not isinstance(snapshot_metadata,dict) or set(snapshot_metadata)-{'processing'} or
+                    len(json.dumps(snapshot_metadata,ensure_ascii=False).encode())>16384):
+                raise ValueError('invalid_event_metadata')
+            row.update(snapshot_metadata)
+        from .result_evidence import formatting_evidence
+        formatting_evidence(c,[row])
         value = c.execute('UPDATE feed_counter SET value=value+1 WHERE id=1 RETURNING value').fetchone()['value']
         c.execute('''INSERT INTO events(id,account,message,kind,revision,origin,snapshot,event_key)
             VALUES(%s,%s,%s,%s,%s,%s,%s,%s)''',

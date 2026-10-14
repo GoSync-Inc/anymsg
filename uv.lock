@@ -26,10 +26,11 @@ wheels = [
 
 [[package]]
 name = "anymsg"
-version = "0.9.9"
+version = "0.9.16"
 source = { editable = "." }
 dependencies = [
     { name = "httpx" },
+    { name = "markdown-it-py" },
     { name = "mcp" },
     { name = "psycopg", extra = ["binary", "pool"] },
     { name = "starlette" },
@@ -37,23 +38,35 @@ dependencies = [
     { name = "uvicorn" },
 ]
 
+[package.optional-dependencies]
+telemetry = [
+    { name = "tiden-telemetry" },
+]
+
 [package.dev-dependencies]
 dev = [
     { name = "pytest" },
+    { name = "tiden-telemetry" },
 ]
 
 [package.metadata]
 requires-dist = [
     { name = "httpx", specifier = "==0.28.1" },
+    { name = "markdown-it-py", specifier = "==4.2.0" },
     { name = "mcp", specifier = "==2.3.0" },
     { name = "psycopg", extras = ["binary", "pool"], specifier = "==3.3.6" },
     { name = "starlette", specifier = "==1.7.0" },
     { name = "telethon", specifier = "==1.45.0" },
+    { name = "tiden-telemetry", marker = "extra == 'telemetry'", specifier = "==0.1.0" },
     { name = "uvicorn", specifier = "==0.54.0" },
 ]
+provides-extras = ["telemetry"]
 
 [package.metadata.requires-dev]
-dev = [{ name = "pytest", specifier = "==9.1.1" }]
+dev = [
+    { name = "pytest", specifier = "==9.1.1" },
+    { name = "tiden-telemetry", specifier = "==0.1.0" },
+]
 
 [[package]]
 name = "attrs"
@@ -287,6 +300,18 @@ wheels = [
 ]
 
 [[package]]
+name = "markdown-it-py"
+version = "4.2.0"
+source = { registry = "https://pypi.org/simple" }
+dependencies = [
+    { name = "mdurl" },
+]
+sdist = { url = "https://files.pythonhosted.org/packages/06/ff/7841249c247aa650a76b9ee4bbaeae59370dc8bfd2f6c01f3630c35eb134/markdown_it_py-4.2.0.tar.gz", hash = "sha256:04a21681d6fbb623de53f6f364d352309d4094dd4194040a10fd51833e418d49", size = 82454, upload-time = "2026-05-07T12:08:28.36Z" }
+wheels = [
+    { url = "https://files.pythonhosted.org/packages/b3/81/4da04ced5a082363ecfa159c010d200ecbd959ae410c10c0264a38cac0f5/markdown_it_py-4.2.0-py3-none-any.whl", hash = "sha256:9f7ebbcd14fe59494226453aed97c1070d83f8d24b6fc3a3bcf9a38092641c4a", size = 91687, upload-time = "2026-05-07T12:08:27.182Z" },
+]
+
+[[package]]
 name = "mcp"
 version = "2.3.0"
 source = { registry = "https://pypi.org/simple" }
@@ -322,6 +347,15 @@ dependencies = [
 sdist = { url = "https://files.pythonhosted.org/packages/9e/2d/7c251e34207f6c51000312fc8839111ac45cfe02023f90b44e7f1051dd8e/mcp_types-2.3.0.tar.gz", hash = "sha256:d1e46549edb35ee19a94940fcee6d1addd7e589ab7ea92dda83f5d84781fc362", size = 65898, upload-time = "2026-10-02T22:06:57.863Z" }
 wheels = [
     { url = "https://files.pythonhosted.org/packages/ce/48/32583066b155bb5d4507e7887dc88ee23118cc4de8e2a12870c49719e2a8/mcp_types-2.3.0-py3-none-any.whl", hash = "sha256:968efdbdaedfab06adae40d378a34395f1090c5921d4be3c9cde283aaf76d91d", size = 69108, upload-time = "2026-10-02T22:06:54.099Z" },
+]
+
+[[package]]
+name = "mdurl"
+version = "0.1.2"
+source = { registry = "https://pypi.org/simple" }
+sdist = { url = "https://files.pythonhosted.org/packages/d6/54/cfe61301667036ec958cb99bd3efefba235e65cdeb9c84d24a8293ba1d90/mdurl-0.1.2.tar.gz", hash = "sha256:bb413d29f5eea38f31dd4754dd7377d4465116fb207585f97bf925588687c1ba", size = 8729, upload-time = "2022-08-14T12:40:10.846Z" }
+wheels = [
+    { url = "https://files.pythonhosted.org/packages/b3/38/89ba8ad64ae25be8de66a6d463314cf1eb366222074cfda9ee839c56a4b4/mdurl-0.1.2-py3-none-any.whl", hash = "sha256:84008a41e51615a49fc9966191ff91509e3c40b939176e643fd50a5c2196b8f8", size = 9979, upload-time = "2022-08-14T12:40:09.779Z" },
 ]
 
 [[package]]
@@ -611,6 +645,15 @@ dependencies = [
 sdist = { url = "https://files.pythonhosted.org/packages/d5/07/b23b6cc73cd994763fbd641d196904f56cc966035eda841275b5689c6e5f/telethon-1.45.0.tar.gz", hash = "sha256:4cb7ae269b8ab9dad9fc490b859f0bc2f885121e990f5b20407b1faa0db2a1d9", size = 728057, upload-time = "2026-09-10T14:28:04.739Z" }
 wheels = [
     { url = "https://files.pythonhosted.org/packages/92/ac/241c09e6905215f225d8088438ceb1f32cc4b4865f3f49068cb402debfd7/telethon-1.45.0-py3-none-any.whl", hash = "sha256:339e24c83aedc9f12cbe389264627edc49779e4289c535aa90aafc4ce62f7972", size = 804098, upload-time = "2026-09-10T14:28:03.115Z" },
+]
+
+[[package]]
+name = "tiden-telemetry"
+version = "0.1.0"
+source = { registry = "https://pypi.org/simple" }
+sdist = { url = "https://files.pythonhosted.org/packages/f6/b1/161fe113c71e56c5f2be88d43a7d85cb29d9785e7042ad9ab4b2c3bb7ca6/tiden_telemetry-0.1.0.tar.gz", hash = "sha256:66dba9d90fcbd7ccb61ad992a182011e712a9b32299cac548d799c9108bcacbf", size = 11409, upload-time = "2026-06-10T16:51:13.629Z" }
+wheels = [
+    { url = "https://files.pythonhosted.org/packages/05/b0/f60ded1a0f441ba30625ee12bb6a3de448e1eade50c852d572d2e1ad7ae0/tiden_telemetry-0.1.0-py3-none-any.whl", hash = "sha256:d7eb5f6d1862d3fed4272d3423a20b5a2e444ccce9637b60c595ad2769e316ef", size = 12639, upload-time = "2026-06-10T16:51:12.461Z" },
 ]
 
 [[package]]

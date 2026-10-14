@@ -1,9 +1,20 @@
-"""Shared archive policy and content-free audit records. No remote administration."""
+"""Shared scoped policy and content-free audit records for reviewed operations."""
 import re
 from uuid import UUID
 
 DEFAULT_PERMISSIONS = ('cursor-write', 'download', 'read')
-PERMISSIONS = frozenset((*DEFAULT_PERMISSIONS, 'review-write'))
+LEGACY_PERMISSIONS = frozenset((*DEFAULT_PERMISSIONS, 'review-write', 'send'))
+MESSENGER_PERMISSIONS = frozenset(('read-live', 'contacts-read', 'profile-read', 'groups-read',
+    'message-edit', 'message-delete', 'message-react', 'message-pin', 'read-state',
+    'chat-manage', 'contacts-manage', 'groups-manage', 'profile-manage'))
+SUBSCRIPTION_PERMISSIONS = frozenset(('subscription-write',))
+PERMISSIONS = LEGACY_PERMISSIONS | MESSENGER_PERMISSIONS | SUBSCRIPTION_PERMISSIONS
+
+
+def effective_permissions(principal_permissions, key_permissions):
+    """NULL legacy ceilings can never inherit a newly introduced capability."""
+    ceiling = LEGACY_PERMISSIONS if key_permissions is None else set(key_permissions)
+    return sorted(set(principal_permissions) & ceiling)
 OPERATION_PERMISSIONS = {
     'capabilities': None,
     'list_chats': 'read', 'search': 'read', 'get_messages': 'read',
@@ -14,9 +25,16 @@ OPERATION_PERMISSIONS = {
     'search_people': 'read', 'search_files': 'read', 'get_file_text': 'read',
     'get_file_occurrences':'read', 'get_file_segments':'read', 'get_sync_status':'read',
     'resolve_reference':'read',
+    'preview_message':'read','send_message':'send','get_send_status':'send',
+    'list_messenger_operations':None, 'preview_messenger_operation':None,
+    'execute_messenger_operation':None, 'get_messenger_operation':None,
+    'create_subscription':'subscription-write', 'list_subscriptions':'read',
+    'get_subscription':'read', 'update_subscription':'subscription-write',
+    'get_subscription_events':'read',
 }
 AUDIT_OPERATIONS = frozenset(OPERATION_PERMISSIONS) | {
-    'issue_key', 'revoke_key', 'set_access', 'http_boundary',
+    'issue_key', 'revoke_key', 'set_access', 'http_boundary', 'send_dispatch', 'set_sending',
+    'set_key_permissions', 'set_operations', 'messenger_dispatch',
 }
 AUDIT_CODES = frozenset({
     'unauthorized', 'forbidden', 'not_found', 'invalid_limit', 'invalid_query',
@@ -27,6 +45,15 @@ AUDIT_CODES = frozenset({
     'invalid_parameters', 'temporarily_unavailable', 'operation_failed',
     'invalid_review', 'revision_not_found', 'review_conflict',
     'query_timeout','service_busy','service_unavailable','chat_required','ambiguous_reference',
+    'invalid_message_text','invalid_request_id','idempotency_conflict','sending_disabled',
+    'sender_not_ready','send_access_changed','send_expired','send_result_unknown',
+    'invalid_message_format','unsafe_message_markup','invalid_message_entities',
+    'formatting_too_complex','unsupported_message_formatting',
+    'lossy_formatting_requires_confirmation','message_too_long','preview_required','preview_mismatch',
+    'unsupported_operation','invalid_operation_parameters','operation_disabled','operation_expired',
+    'operation_access_changed','operation_result_unknown','operation_target_changed','operation_rejected',
+    'invalid_subscription','subscription_limit','subscription_conflict','subscription_closed',
+    'subscription_access_changed','invalid_subscription_state',
 })
 UNSET = object()
 
@@ -99,9 +126,12 @@ def audit(c, p, operation, outcome, code=None):
     p = p or {}
     values = (p.get('id'), p.get('key_id'), operation, outcome, safe_code,
               p.get('_audit_targets', []) if outcome == 'ok' else [])
-    if operation in ('issue_key','revoke_key','set_access'):
+    if operation in ('issue_key','revoke_key','set_access','set_sending','set_key_permissions','set_operations'):
         c.execute('''INSERT INTO audit_log(principal,key_id,operation,outcome,error_code,resource_ids,actor)
             VALUES(%s,%s,%s,%s,%s,%s,'operator')''', values)
+    elif operation in ('send_dispatch','messenger_dispatch'):
+        c.execute('''INSERT INTO audit_log(principal,key_id,operation,outcome,error_code,resource_ids,actor)
+            VALUES(%s,%s,%s,%s,%s,%s,'collector')''', values)
     else:
         c.execute('''INSERT INTO audit_log(principal,key_id,operation,outcome,error_code,resource_ids)
             VALUES(%s,%s,%s,%s,%s,%s)''', values)
