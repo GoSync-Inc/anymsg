@@ -1,0 +1,16 @@
+# Optional gateway diagnostics. This does not enable any collector or AI provider.
+services:
+  api:
+    build:
+      args:
+        ANYMSG_INSTALL_TELEMETRY: "1"
+    environment:
+      ANYMSG_TIDEN_ENABLED: "1"
+      ANYMSG_TIDEN_DSN_FILE: /run/secrets/tiden_dsn
+      ANYMSG_TIDEN_ENVIRONMENT: ${ANYMSG_TIDEN_ENVIRONMENT:-production}
+    volumes:
+      - type: bind
+        source: ./private/tiden.dsn
+        target: /run/secrets/tiden_dsn
+        read_only: true
+        bind: {create_host_path: false}

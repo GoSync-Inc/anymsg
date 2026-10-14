@@ -437,10 +437,13 @@ async def run_config(path):
 
 def main():
     import argparse
+    from .telemetry import configure, capture
+    configure('whatsapp')
     parser=argparse.ArgumentParser(description=__doc__);parser.add_argument('--config',type=Path,required=True)
     args=parser.parse_args();os.umask(0o077)
     try:asyncio.run(run_config(args.config))
     except Exception as exc:
+        capture(exc, 'collector_failed')
         safe={'collector_disabled','session_handover_not_confirmed','whatsapp_pairing_required','whatsapp_identity_mismatch',
             'private_session_required','live_account_required','collector_already_owned','session_already_owned',
             'collector_lease_lost','collection_disabled','provider_disconnected'}

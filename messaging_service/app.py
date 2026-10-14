@@ -26,6 +26,7 @@ from .security_logging import redact_library_logs
 from . import __version__
 from .error_details import payload,classified
 from .presentation import options, render
+from .telemetry import capture as capture_error
 
 Detail = Literal['compact','full']
 QueryMode = Literal['all','phrase','web','exact']
@@ -192,6 +193,7 @@ class Boundary:
             await JSONResponse(detail,status_code=error.status,headers=headers)(scope,receive,send)
         except Exception as error:
             # No exception strings, query values, tokens or filenames in remote responses/logs.
+            capture_error(error, 'request_failed')
             log.error('request_failed type=%s',type(error).__name__)
             if response_started: return
             detail=payload(error,getattr(error,'operation',''))
@@ -235,6 +237,7 @@ def create_app(store: Store, allowed_hosts: list[str]):
             log.warning('tool_error tool=%s request_id=%s code=%s',method,detail['request_id'],detail['error'])
             raise ToolError(json.dumps(detail)) from None
         except Exception as error:
+            capture_error(error, 'tool_failed')
             log.error('tool_failed tool=%s type=%s',method,type(error).__name__)
             detail=payload(error,method)
             log.error('tool_failed tool=%s request_id=%s code=%s',method,detail['request_id'],detail['error'])

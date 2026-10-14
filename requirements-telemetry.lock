@@ -1,0 +1,4 @@
+# Optional Tiden Python SDK; hashes verified against the PyPI release.
+tiden-telemetry==0.1.0 \
+    --hash=sha256:d7eb5f6d1862d3fed4272d3423a20b5a2e444ccce9637b60c595ad2769e316ef \
+    --hash=sha256:66dba9d90fcbd7ccb61ad992a182011e712a9b32299cac548d799c9108bcacbf

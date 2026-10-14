@@ -18,6 +18,8 @@ and [HTTPX](https://github.com/encode/httpx) (BSD-3-Clause),
 [Puppeteer](https://github.com/puppeteer/puppeteer) (Apache-2.0).
 Optional audio processing uses faster-whisper/CTranslate2; model weights have
 separate terms and are not bundled. The npm HTTP SDK has no runtime dependencies.
+Optional runtime diagnostics use [tiden-telemetry](https://github.com/qase-tms/tiden-telemetry-python)
+(MIT), pinned in `requirements-telemetry.lock`. Sending is disabled by default.
 
 The Chromium seccomp policy derives from Moby. Its provenance and Apache-2.0
 license are retained in `deploy/chromium-seccomp-SOURCE.md` and

@@ -33,11 +33,14 @@ Homepage = "https://github.com/GoSync-Inc/anymsg"
 Repository = "https://github.com/GoSync-Inc/anymsg"
 Issues = "https://github.com/GoSync-Inc/anymsg/issues"
 
+[project.optional-dependencies]
+telemetry = ["tiden-telemetry==0.1.0"]
+
 [project.scripts]
 anymsg = "anymsg.cli:main"
 
 [dependency-groups]
-dev = ["pytest==9.1.1"]
+dev = ["pytest==9.1.1", "tiden-telemetry==0.1.0"]
 
 [tool.hatch.build.targets.wheel]
 packages = ["anymsg", "messaging_service"]

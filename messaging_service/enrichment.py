@@ -299,7 +299,10 @@ class EnrichmentWorker:
         row,profile=claim
         try:self.finish(row,self.processor(self.files,row,profile))
         except ModelError as exc:self.finish(row,error=exc.code)
-        except Exception:self.finish(row,error='enrichment_failed')
+        except Exception as error:
+            from .telemetry import capture
+            capture(error, 'enrichment_failed')
+            self.finish(row,error='enrichment_failed')
         return True
 
 
@@ -318,6 +321,8 @@ def main():
         except Exception:print(json.dumps({'error':'enrichment_failed'}))
         return
     if not args.config:parser.error('--config required')
+    from .telemetry import configure
+    configure('enricher')
     cfg=configuration(args.config)
     worker=EnrichmentWorker(private_text(os.environ['DATABASE_URL_FILE']).strip(),os.environ['PROBE_FILES'],cfg)
     stop=threading.Event()

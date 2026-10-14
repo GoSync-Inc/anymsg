@@ -10,6 +10,7 @@ from .messenger_operations import OPERATIONS
 
 
 def main():
+    from .telemetry import configure
     parser=argparse.ArgumentParser()
     parser.add_argument('command',choices=['serve','init','migrate','issue-key','revoke-key',
         'replay','snapshot','verify-restore','quarantine-restore','register-account',
@@ -45,6 +46,8 @@ def main():
     parser.add_argument('--discover-chats',action='store_true')
     parser.add_argument('--synthetic',action='store_true')
     args=parser.parse_args()
+    if args.command == 'serve':
+        configure('gateway')
     dsn=Path(os.environ['DATABASE_URL_FILE']).read_text().strip()
     public_url=os.environ.get('PROBE_PUBLIC_URL','http://127.0.0.1:18940')
     store=Store(dsn,Path(os.environ.get('PROBE_FILES','./probe-files')),public_url)

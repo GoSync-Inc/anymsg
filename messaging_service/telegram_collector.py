@@ -650,12 +650,15 @@ async def run_config(path):
 
 def main():
     import argparse
+    from .telemetry import configure, capture
+    configure('telegram')
     parser=argparse.ArgumentParser(description=__doc__)
     parser.add_argument('--config',type=Path,required=True)
     args=parser.parse_args()
     os.umask(0o077)
     try: asyncio.run(run_config(args.config))
     except Exception as exc:
+        capture(exc, 'collector_failed')
         # Exception strings from providers can contain private requests. Emit
         # only this service's fixed error vocabulary to the supervisor.
         safe={'collector_disabled','session_handover_not_confirmed','telegram_pairing_required',

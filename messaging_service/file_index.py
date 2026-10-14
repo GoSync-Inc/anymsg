@@ -635,6 +635,8 @@ class FileIndexer:
 
 
 def main():
+    from .telemetry import configure, capture
+    configure('indexer')
     parser = argparse.ArgumentParser(description='Index already archived immutable files locally')
     parser.add_argument('--dsn-file', default=os.environ.get('DATABASE_URL_FILE'))
     parser.add_argument('--files', default=os.environ.get('PROBE_FILES', '/data/files'))
@@ -657,7 +659,8 @@ def main():
             result = worker.run_once()
             if result['claimed']:
                 print(json.dumps({'status': result['status'], 'error_code': result['error_code']}), flush=True)
-        except Exception:
+        except Exception as error:
+            capture(error, 'indexer_failed')
             # The operator can inspect DB queue state. Never log DSN/SQL/paths
             # or arbitrary parser/database error strings in this background loop.
             print('{"status":"error","error_code":"indexer_failed"}', flush=True)

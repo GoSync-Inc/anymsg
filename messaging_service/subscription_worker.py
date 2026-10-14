@@ -10,9 +10,11 @@ import threading
 
 from .store import Store
 from .subscriptions import match_subscriptions
+from .telemetry import configure, capture
 
 
 def main():
+    configure('subscriptions')
     parser = argparse.ArgumentParser()
     parser.add_argument('--once', action='store_true')
     parser.add_argument('--interval', type=float, default=2)
@@ -39,7 +41,8 @@ def main():
                 if args.once:
                     print(json.dumps(result))
                     return
-            except Exception:
+            except Exception as error:
+                capture(error, 'subscription_match_failed')
                 # No SQL, DSN, content, selectors or subscription IDs in logs.
                 if args.once:
                     raise RuntimeError('subscription_match_failed') from None

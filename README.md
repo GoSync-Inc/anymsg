@@ -108,6 +108,7 @@ See [ACCESS.md](ACCESS.md), [SEARCH.md](SEARCH.md), [FILE_INDEX.md](FILE_INDEX.m
 Run synthetic tests only: [CONTRIBUTING.md](CONTRIBUTING.md).
 Planned work and scope: [ROADMAP.md](ROADMAP.md).
 Agent review status and the current candidate: [REVIEW_FOLLOWUP.md](REVIEW_FOLLOWUP.md).
+Optional runtime diagnostics: [TELEMETRY.md](TELEMETRY.md).
 
 ## License and security
 
