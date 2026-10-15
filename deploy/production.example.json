@@ -1,0 +1,13 @@
+{
+  "version": 1,
+  "state_directory": "/var/lib/deedkit-production",
+  "projects": [
+    {
+      "name": "deedkit-gateway",
+      "directory": "/opt/deedkit/deploy",
+      "files": ["/opt/deedkit/deploy/compose.gateway.yaml", "/opt/deedkit/deploy/compose.gateway-ingress.yaml"],
+      "env_files": ["/opt/deedkit/deploy/private/gateway.env"],
+      "services": {"gateway": "gateway"}
+    }
+  ]
+}

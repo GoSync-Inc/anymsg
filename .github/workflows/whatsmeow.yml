@@ -1,17 +1,6 @@
 name: Native WhatsApp adapter
 on:
-  pull_request:
-    paths:
-      - 'whatsapp/whatsmeow/**'
-      - 'services/messaging/messaging_service/whatsapp*.py'
-      - 'services/messaging/messaging_service/messenger_operations.py'
-      - 'services/messaging/messaging_service/commands.py'
-      - 'services/messaging/messaging_service/outgoing.py'
-      - 'tests/test_whatsmeow*.py'
-      - 'services/messaging/Dockerfile'
-      - '.github/workflows/whatsmeow.yml'
-  push:
-    branches: [main, 'codex/whatsmeow-primary']
+  workflow_call:
   workflow_dispatch:
 permissions:
   contents: read
