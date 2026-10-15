@@ -86,3 +86,26 @@ review, documented rollout/rollback and unresolved live checks.
 - Rich URL previews, poll voting, newsletter/community contracts and expired
   media re-upload require separate work. Do not expose raw upstream methods as
   a shortcut around permission, policy or approval checks.
+
+## Receipt acceptance follow-up
+
+The first exact owner-approved self-send exposed a valid PN→LID rewrite being
+rejected as a receipt mismatch. The existing archive proved the message was sent
+once; it was not retried. The follow-up validates session-store aliases and owner
+sender, retains the actual capture once, and stores a separately scoped exact
+wire reference in schema 28. Text and operation sends share this contract.
+Requested destinations and existing archive IDs/checksums remain unchanged.
+
+A separate subprocess regression reproduced a shutdown hang with inherited
+blocking IPC descriptors. Registering them with the runtime poller permits
+SIGTERM, either EOF and output backpressure to cancel cleanly. No production
+collector/database cutover is included in this corrective slice. Fresh live
+sending after the correction needs a new exact approval, since the earlier
+single-send approval has already been consumed.
+
+Follow-up validation: 2,066 Python tests passed with 10 environment/fixture skips;
+the sole first-run failure was a missing `python` executable in the Mac PATH,
+and passed when rerun with the existing virtual environment on PATH. Native Go
+race tests, vet, static Linux build and the native Docker smoke passed. Two
+read-only VPS session restorations completed and exited normally. These checks
+do not assert a second live send or a production account cutover.

@@ -74,11 +74,21 @@ func execute(path string, pair bool) error {
 		return e
 	}
 	defer sending.Close()
+	input, e := inheritedIPCFile(0, "background-input")
+	if e != nil {
+		return e
+	}
+	defer input.Close()
+	output, e := inheritedIPCFile(1, "background-output")
+	if e != nil {
+		return e
+	}
+	defer output.Close()
 	p := &Provider{Config: c}
 	defer p.Close()
 	lanes := make(chan error, 2)
 	go func() {
-		lanes <- runLane(ctx, p, os.Stdin, os.Stdout, map[string]bool{"start": true, "policy": true, "dialogs": true, "page": true, "media": true, "request_history": true})
+		lanes <- runLane(ctx, p, input, output, map[string]bool{"start": true, "policy": true, "dialogs": true, "page": true, "media": true, "request_history": true})
 	}()
 	go func() {
 		lanes <- runLane(ctx, p, sending, sending, map[string]bool{"send_text": true, "messenger_operation": true})
@@ -87,11 +97,17 @@ func execute(path string, pair bool) error {
 	select {
 	case e = <-lanes:
 		received = 1
+		if ctx.Err() != nil {
+			// A lane may observe the signal before this select does. Normal
+			// cancellation is still a graceful process exit in that ordering.
+			e = nil
+		}
 		cancel()
 	case <-ctx.Done():
 	}
-	_ = os.Stdin.Close()
+	_ = input.Close()
 	_ = sending.Close()
+	_ = output.Close()
 	// Readers and in-flight handlers own the stores until their lane has
 	// drained/cancelled. Never close SQLite beneath a live capture/send call.
 	for received < 2 {

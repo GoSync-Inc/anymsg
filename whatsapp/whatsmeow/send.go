@@ -23,17 +23,22 @@ import (
 // This small dependency boundary permits tests of the actual policy/receipt
 // contract without creating a client, authorizing a device or sending anything.
 type sendDependencies struct {
-	policy func() (Policy, error)
-	get    func(string, string) (*events.Message, error)
-	put    func(*events.Message, string) error
-	send   func(context.Context, types.JID, *waE2E.Message, whatsmeow.SendRequestExtra) (whatsmeow.SendResponse, error)
-	newID  func() string
-	owner  types.JID
+	policy   func() (Policy, error)
+	get      func(string, string) (*events.Message, error)
+	put      func(*events.Message, string) error
+	send     func(context.Context, types.JID, *waE2E.Message, whatsmeow.SendRequestExtra) (whatsmeow.SendResponse, error)
+	newID    func() string
+	owner    types.JID
+	ownerLID types.JID
+	lidForPN func(context.Context, types.JID) (types.JID, error)
+	pnForLID func(context.Context, types.JID) (types.JID, error)
 }
 
 func (p *Provider) sendDependencies() sendDependencies {
 	owner, _ := ParseChatID(p.Config.ExpectedWID)
 	return sendDependencies{policy: p.policy, get: p.Capture.Get, put: p.Capture.Put, owner: owner,
+		ownerLID: p.Client.Store.GetLID(),
+		lidForPN: p.Client.Store.LIDs.GetLIDForPN, pnForLID: p.Client.Store.LIDs.GetPNForLID,
 		newID: func() string { return p.Client.GenerateMessageID() },
 		send: func(ctx context.Context, to types.JID, message *waE2E.Message, extra whatsmeow.SendRequestExtra) (whatsmeow.SendResponse, error) {
 			return p.Client.SendMessage(ctx, to, message, extra)
@@ -143,30 +148,75 @@ func sendText(ctx context.Context, req textRequest, d sendDependencies) (any, er
 	if err := check(); err != nil {
 		return nil, err
 	}
-	id, err := sendAndCapture(ctx, d, to, message)
-	if err != nil {
-		return nil, err
-	}
-	return map[string]any{"provider_message_id": id}, nil
+	return sendAndCaptureReceipt(ctx, d, to, message)
 }
 
 // A server acknowledgement is evidence of acceptance, not delivery or reading.
 // Every error after invoking send is ambiguous and must never trigger a retry.
 func sendAndCapture(ctx context.Context, d sendDependencies, to types.JID, message *waE2E.Message) (string, error) {
+	receipt, err := sendAndCaptureReceipt(ctx, d, to, message)
+	if err != nil {
+		return "", err
+	}
+	return receipt["provider_message_id"].(string), nil
+}
+
+func sendAndCaptureReceipt(ctx context.Context, d sendDependencies, to types.JID, message *waE2E.Message) (map[string]any, error) {
 	id := d.newID()
 	if id == "" || !serializedMessagePattern.MatchString(id) {
-		return "", errors.New("send_target_invalid")
+		return nil, errors.New("send_target_invalid")
 	}
 	resp, err := d.send(ctx, to, message, whatsmeow.SendRequestExtra{ID: id})
 	if err != nil {
-		return "", errors.New("provider_operation_uncertain")
+		return nil, errors.New("provider_operation_uncertain")
 	}
-	if resp.ID != id || resp.Timestamp.IsZero() || (!resp.Chat.IsEmpty() && resp.Chat.ToNonAD() != to.ToNonAD()) {
-		return "", errors.New("send_receipt_mismatch")
+	if resp.ID != id || resp.Timestamp.IsZero() || resp.Chat.IsEmpty() ||
+		(resp.Chat.ToNonAD() != to.ToNonAD() && !verifiedSendLIDPair(ctx, d, to, resp.Chat)) ||
+		resp.Sender.IsEmpty() || !ownedIdentity(resp.Sender, d.owner, d.ownerLID) {
+		return nil, errors.New("send_receipt_mismatch")
 	}
-	event := &events.Message{Info: types.MessageInfo{MessageSource: types.MessageSource{Chat: to, Sender: d.owner, IsFromMe: true, IsGroup: to.Server == types.GroupServer}, ID: id, Timestamp: resp.Timestamp}, Message: message, RawMessage: message}
+	// The provider may route a PN request through its verified LID. Retain that
+	// actual namespace and sender so a later own-device echo has the same archive
+	// identity. A second synthetic PN archive copy would duplicate the message.
+	source := types.MessageSource{Chat: resp.Chat, Sender: resp.Sender, IsFromMe: true, IsGroup: resp.Chat.Server == types.GroupServer}
+	if resp.Chat.ToNonAD() != to.ToNonAD() {
+		source.RecipientAlt = to.ToNonAD()
+	}
+	if resp.Sender.Server == types.HiddenUserServer {
+		source.SenderAlt = d.owner.ToNonAD()
+		source.AddressingMode = types.AddressingModeLID
+	} else if d.ownerLID.Server == types.HiddenUserServer && !d.ownerLID.IsEmpty() {
+		source.SenderAlt = d.ownerLID.ToNonAD()
+		source.AddressingMode = types.AddressingModePN
+	}
+	event := &events.Message{Info: types.MessageInfo{MessageSource: source, ID: id, Timestamp: resp.Timestamp}, Message: message, RawMessage: message}
 	if err = d.put(event, "live"); err != nil {
-		return "", errors.New("provider_operation_uncertain")
+		return nil, errors.New("provider_operation_uncertain")
 	}
-	return LegacyMessageID(event), nil
+	// The existing outbox contract references the requested public chat ID. This
+	// receipt projection is not written back to capture and never rewrites archive
+	// IDs or broadens policy to another namespace.
+	public := *event
+	public.Info.Chat, public.Info.Sender = to, d.owner
+	return map[string]any{"provider_message_id": LegacyMessageID(&public), "archive_reference": map[string]any{
+		"provider_chat_id": LegacyChatID(event.Info.Chat), "provider_message_id": LegacyMessageID(event),
+	}}, nil
+}
+
+// Pinned SendMessage only rewrites PN destinations to LID, never groups or the
+// reverse direction. Both session-store lookups must agree; equal user strings,
+// an arbitrary receipt or a one-way/conflicting mapping are not alias evidence.
+// These are local store reads, not account discovery or a network retry.
+func verifiedSendLIDPair(ctx context.Context, d sendDependencies, pn, lid types.JID) bool {
+	pn, lid = pn.ToNonAD(), lid.ToNonAD()
+	if pn.Server != types.DefaultUserServer || lid.Server != types.HiddenUserServer ||
+		pn.IsEmpty() || lid.IsEmpty() || d.lidForPN == nil || d.pnForLID == nil {
+		return false
+	}
+	storedLID, err := d.lidForPN(ctx, pn)
+	if err != nil || storedLID.ToNonAD() != lid {
+		return false
+	}
+	storedPN, err := d.pnForLID(ctx, lid)
+	return err == nil && storedPN.ToNonAD() == pn
 }

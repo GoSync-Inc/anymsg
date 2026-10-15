@@ -288,7 +288,7 @@ def test_collector_role_has_only_contract_grants_and_immutable_dispatch_payloads
             assert table('outgoing_messages', 'SELECT') and table('messenger_commands', 'SELECT')
             for name, mutable, immutable in [
                 ('outgoing_messages', ['status', 'started_at', 'finished_at', 'lease_epoch',
-                                       'provider_message_id', 'error_code'], ['body', 'key_id', 'request_id']),
+                                       'provider_message_id', 'error_code', 'archive_reference'], ['body', 'key_id', 'request_id']),
                 ('messenger_commands', ['status', 'started_at', 'finished_at', 'lease_epoch',
                                         'result', 'error_code'], ['payload', 'key_id', 'request_id']),
                 ('receipt_event_jobs', ['cursor_id', 'complete'], ['account', 'receipt']),
