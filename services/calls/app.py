@@ -27,6 +27,7 @@ from learning import LearningWorker, ANALYZER_MODEL
 from supervisor import Supervisor, SUPERVISOR_MODEL
 from outbound import Outbound,CallingSettings,TwilioCalls,ExternalBrief
 from settings import Setup,read_private,write_private
+from call_errors import record_model_error
 
 SOURCE = Path(__file__).resolve()
 PRIVATE = Path(os.environ.get('VOICE_STATE_DIR', str(Path.home() / '.local' / 'share' / 'deedkit' / 'calls')))
@@ -168,6 +169,9 @@ def create_app(data_dir=None, archive=None, control_token=None, reviewer=None, a
                 if service.get_call(identity)['channel']!='browser':await outbound.stop(identity,reason)
                 else:service.stop(identity, reason)
             return
+        # UI disconnect cleanup can race the model error callback. Keep the
+        # failure already observed instead of reclassifying it as owner_stop.
+        if session.get('end_reason')=='model_error':reason='model_error'
         session['end_reason'] = reason
         runner = session.get('runner')
         if runner:
@@ -460,10 +464,10 @@ def create_app(data_dir=None, archive=None, control_token=None, reviewer=None, a
                         raise
                     except TimeoutError:
                         reason='duration_limit'
-                    except Exception:
+                    except Exception as exc:
                         reason='model_error'
-                        connection.send_app_message({'label':'rtvi-ai','type':'server-message','data':{
-                            'kind':'error','message':'Модель или соединение недоступны. Проверь ключ, доступ к модели и Billing.'}})
+                        connection.send_app_message({'label':'rtvi-ai','type':'server-message',
+                            'data':record_model_error(session,exception=exc)})
                     finally:
                         service.stop(identity,reason)
                         try:

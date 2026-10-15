@@ -21,10 +21,11 @@ def grok_brief(service, **kwargs):
     return service.prepare(BriefInput(**{**BRIEF, 'dialog_engine':'grok_realtime', **kwargs}), [])
 
 
-def test_grok_snapshot_pins_provider_and_does_not_reuse_gemini_learning(tmp_path):
+@pytest.mark.parametrize('language',['ru','en','id'])
+def test_grok_snapshot_pins_provider_and_does_not_reuse_gemini_learning(tmp_path,language):
     service=VoiceService(tmp_path)
     service.learning.active_candidate=lambda:{'prompt_version':'gemini-only','instruction':'GEMINI CANDIDATE'}
-    brief=grok_brief(service, grok_voice='rex')
+    brief=grok_brief(service, grok_voice='rex',language=language)
     assert brief['model']==GROK_MODEL and brief['grok_voice']=='rex'
     assert 'GEMINI CANDIDATE' not in brief['prompt']
     model=create_model(brief, 'synthetic-xai-key')
@@ -32,7 +33,7 @@ def test_grok_snapshot_pins_provider_and_does_not_reuse_gemini_learning(tmp_path
     assert model._settings.model==GROK_MODEL
     assert model._settings.session_properties.voice=='rex'
     assert model._settings.system_instruction==brief['prompt']
-    assert model._settings.session_properties.audio.input.transcription.language_hint=='ru-RU'
+    assert model._settings.session_properties.audio.input.transcription.language_hint==language
     service.close()
 
 

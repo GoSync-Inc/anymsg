@@ -17,6 +17,7 @@ from pipecat.workers.runner import WorkerRunner
 
 from core import TOOL_MODELS
 from audio_health import RuntimeAudioHealth
+from call_errors import record_model_error
 
 
 class AudioDeliveryProbe(FrameProcessor):
@@ -151,10 +152,8 @@ async def send_owner_update(worker,decision):
     await worker.queue_frames([frame])
 
 
-async def report_error(state,rtvi):
-    state['end_reason']='model_error'
-    await rtvi.send_server_message({'kind':'error','message':
-        'Модель или соединение недоступны. Проверь ключ, доступ к модели и Billing.'})
+async def report_error(state,rtvi,frame=None):
+    await rtvi.send_server_message(record_model_error(state,frame))
 
 
 async def run_voice(connection,brief,key,state):
@@ -237,7 +236,7 @@ async def run_transport(transport,brief,key,state,browser=False):
     @worker.event_handler('on_pipeline_error')
     async def pipeline_error(worker,frame):
         # Provider payloads may contain secrets. Never relay frame.error to the UI.
-        await report_error(state,worker.rtvi)
+        await report_error(state,worker.rtvi,frame)
 
     async def begin():
         service.connected(identity)

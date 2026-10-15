@@ -18,6 +18,34 @@ from app import create_app
 from test_tasks import Archive, BRIEF
 
 
+async def test_browser_cleanup_preserves_model_error_instead_of_owner_stop(monkeypatch,tmp_path):
+    failed=asyncio.Event()
+    async def fixture_voice(connection,brief,key,state):
+        state['end_reason']='model_error';failed.set()
+        await asyncio.Event().wait()
+    class Peer:
+        pc_id='fixture-error-peer'
+        async def disconnect(self):pass
+    async def handle(request,callback):
+        await callback(Peer())
+        return {'sdp':'fixture-answer','type':'answer','pc_id':Peer.pc_id}
+    monkeypatch.setattr(voice,'run_voice',fixture_voice)
+    app=create_app(tmp_path,Archive())
+    async with app.router.lifespan_context(app):
+        monkeypatch.setattr(app.state.rtc,'handle_web_request',handle)
+        async with httpx.AsyncClient(transport=httpx.ASGITransport(app),base_url='http://testserver',
+            headers={'Origin':'http://testserver','X-Voice-Service':'1'}) as c:
+            await c.post('/api/credentials',json={'gemini':'fixture-key'})
+            brief=(await c.post('/api/briefs',json=BRIEF)).json()
+            call=(await c.post('/api/calls/start',json={'brief_id':brief['id']})).json()
+            assert (await c.post('/api/offer',json={'sdp':'fixture','type':'offer',
+                'requestData':{'call_id':call['id']}})).status_code==200
+            await asyncio.wait_for(failed.wait(),3)
+            result=(await c.post('/api/calls/'+call['id']+'/stop')).json()
+            assert result['status']=='failed' and result['end_reason']=='model_error'
+            assert not app.state.session
+
+
 async def test_cancelled_peer_cleanup_does_not_block_next_browser_call(monkeypatch,tmp_path):
     """A cancellation during peer close must not leave a terminal call owning RTC."""
     release=asyncio.Event()

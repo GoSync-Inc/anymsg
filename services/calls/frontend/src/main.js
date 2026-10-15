@@ -4,6 +4,7 @@ import { ActivityGate, TurnTiming, summarize } from './timing.mjs';
 import { startRemoteAudio, stopRemoteAudio } from './audio-playback.mjs';
 import { AudioHealth, audioHealthText } from './audio-health.mjs';
 import { settleDisconnectedCall } from './call-cleanup.mjs';
+import { MicrophoneControl, bindTalkButton } from './microphone.mjs';
 import { createLearningUI } from './learning.mjs';
 import './style.css';
 
@@ -16,6 +17,16 @@ let config, brief = null, current = null, client = null, active = false, stoppin
 let audioContext = null, probes = [], poller = null, audioPoller = null, timing = new TurnTiming(), lastRender = '';
 let inboxSignature='';
 let transport=null,health=new AudioHealth(),healthPoller=null,healthBusy=false,playerWaiting=0;
+const microphone=new MicrophoneControl(enabled=>client?.enableMic(enabled),mic=>{
+  $('talk').setAttribute('aria-pressed',String(mic.enabled));
+  $('talk').textContent=mic.enabled?'Говори · отпусти, чтобы слушать':'Удерживай, чтобы говорить';
+  $('mic-state').textContent=mic.mode
+    ? (mic.enabled?'Микрофон включён, пока держишь кнопку.':'Микрофон выключен. Для ответа удерживай кнопку или пробел, когда она в фокусе.')
+    : 'Микрофон открыт во время разговора. В шумном месте включи режим по кнопке перед запуском.';
+  $('mute').textContent=mic.enabled?'Выключить микрофон':'Включить микрофон';
+  locks();
+});
+bindTalkButton($('talk'),microphone,window,document);
 Object.assign(outcomeLabels,{refused:'Собеседник отказался от разговора.',unavailable:'Собеседник сейчас недоступен.'});
 const learningUI=createLearningUI({api,node,error,currentCall:()=>current,isActive:()=>active,
   promptChanged:async()=>{invalidate();await refreshConfig();}});
@@ -36,7 +47,11 @@ function locks() {
   const joinWaiting=current?.id===config?.active_call_id && current?.status==='waiting_for_browser' && brief?.id===current?.brief_id;
   $('start').disabled=config?.channels?.browser==='local_rehearsal_only' || active || preparing || !brief || !config?.credentials[brief?.dialog_engine==='grok_realtime'?'xai':'gemini'] || (!!config?.active_call_id && !joinWaiting);
   $('stop').disabled=!active;
-  $('mute').disabled=!active || !client;
+  $('push-to-talk').disabled=active || preparing;
+  $('talk').hidden=!microphone.mode;
+  $('talk').disabled=!active || !client || !microphone.ready;
+  $('mute').hidden=microphone.mode;
+  $('mute').disabled=!active || !client || !microphone.ready;
   document.querySelectorAll('.source-row input').forEach(el=>el.disabled=active || preparing);
 }
 function invalidate() {
@@ -307,9 +322,9 @@ async function start() {
     current=await api('/api/calls/start','POST',{brief_id:brief.id});lastRender='';renderRecord(current,true);
     if(current.status!=='waiting_for_browser')throw new Error('Эта проверка уже завершена. Подготовь новое поручение.');
     transport=new SmallWebRTCTransport({iceServers:[]});
-    client=new PipecatClient({transport,enableMic:true,enableCam:false,callbacks:{
+    client=new PipecatClient({transport,enableMic:!microphone.mode,enableCam:false,callbacks:{
       onTrackStarted:attachTrack,
-      onBotReady:()=>{status('Разговор идёт',true);$('call-hint').textContent='Говори как собеседник. На вопросы владельца можно ответить после завершения.';locks();},
+      onBotReady:()=>{if(!active || stopping)return;microphone.start();status('Разговор идёт',true);$('call-hint').textContent='Говори как собеседник. На вопросы владельца можно ответить после завершения.';locks();},
       onServerMessage:message=>{if(message.kind==='error'){error(message.message);stop(false);}else pollRecord().catch(()=>{});},
       onError:()=>{error('Сбой подключения или передачи звука. Подробности сохраняются в диагностике разговора.');stop();},
       onDisconnected:()=>{if(active && !stopping)stop(false);},
@@ -325,7 +340,7 @@ async function start() {
 }
 async function stop(requestStop=true) {
   if(stopping || !active)return;
-  stopping=true; active=false;clearInterval(poller);clearInterval(audioPoller);
+  stopping=true; active=false;microphone.stop();clearInterval(poller);clearInterval(audioPoller);
   clearInterval(healthPoller);
   // Collect while the peer still exists, before server stop or client.disconnect.
   await pollHealth();
@@ -371,7 +386,8 @@ $('inbox-refresh').onclick=()=>loadInbox().catch(e=>error(e.message));
 $('search').onclick=search;
 $('query').onkeydown=e=>{if(e.key==='Enter'){e.preventDefault();search();}};
 $('start').onclick=start;$('stop').onclick=stop;
-$('mute').onclick=()=>{if(!client)return;const enabled=!client.isMicEnabled;client.enableMic(enabled);$('mute').textContent=enabled?'Выключить микрофон':'Включить микрофон';};
+$('mute').onclick=()=>microphone.toggle();
+$('push-to-talk').onchange=()=>microphone.setMode($('push-to-talk').checked);
 $('review-form').onsubmit=async e=>{
   e.preventDefault();if(!current || active)return;
   try {renderRecord(await api(`/api/calls/${current.id}/result`,'POST',{review:{task:$('task-rating').value,naturalness:Number($('naturalness').value),notes:$('review-notes').value.trim()}}));$('review-feedback').textContent='Оценка сохранена.';await loadHistory();}

@@ -17,7 +17,7 @@ class AuditedGrok(GrokRealtimeLLMService):
                 voice=brief['grok_voice'],
                 audio=events.AudioConfiguration(input=events.AudioInput(
                     transcription=events.InputAudioTranscription(
-                        language_hint={'ru':'ru-RU','en':'en-US','id':'id-ID'}[brief['language']]))))))
+                        language_hint=brief['language']))))))
 
     async def push_frame(self, frame, direction=FrameDirection.DOWNSTREAM):
         if direction == FrameDirection.DOWNSTREAM:

@@ -15,6 +15,21 @@ Provider audio counters contain durations and rates, never PCM. Owner updates
 use a server-origin system item; they do not become assistant speech or interrupt
 the current answer. They become available on the next model turn.
 
+Transcription hints use the documented `ru`, `en` and `id` codes. Unsupported
+regional variants can silently fall back to automatic language detection.
+
+In a noisy browser rehearsal, enable **«В шумном месте: говорить по кнопке»**
+before starting. The microphone starts muted; hold the talk button (or Space /
+Enter with that button focused) for a reply and release it while listening.
+Release, pointer cancellation, lost focus, a hidden page and stopping all close
+the microphone. This is an explicit microphone gate, not background-speaker
+recognition or noise filtering, and it does not change phone/SIP audio.
+
+Model failures save a finite category and an HTTP status when available, without
+raw provider messages, response bodies, headers or credentials. Browser cleanup
+preserves `model_error` instead of overwriting it with `owner_stop`; unknown
+failures stay unknown rather than asserting a billing problem.
+
 This executor does not implement the browser-only Gemini Flows closing graph.
 Farewell playback, interruption, network disconnects and ru/en/id task quality
 still require audio acceptance. Grok's inclusion is not evidence that it is
