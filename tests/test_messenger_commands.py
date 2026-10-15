@@ -291,8 +291,15 @@ def test_terminal_result_and_exact_retry_survive_successful_target_change(operat
         s.get_messenger_operation(key,first['operation_id'])
 
 
-@pytest.mark.parametrize('completed',[False,True])
-def test_forward_receipt_keeps_source_scope_after_source_deleted(operator,completed):
+def test_terminal_forward_result_keeps_source_scope_after_source_deleted(operator):
+    _assert_forward_receipt_keeps_source_scope(operator,completed=True)
+
+
+def test_pending_forward_result_keeps_source_scope_after_source_deleted(operator):
+    _assert_forward_receipt_keeps_source_scope(operator,completed=False)
+
+
+def _assert_forward_receipt_keeps_source_scope(operator,*,completed):
     from messaging_service.commands import CommandWorker
     s,archive,key,state=operator
     args={'account':'command-fixture','operation':'forward_message',
