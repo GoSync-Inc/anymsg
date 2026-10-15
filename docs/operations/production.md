@@ -51,6 +51,12 @@ this tool does not convert browser sessions. Databases and unrelated services
 are never selected. State, mounts, networks, ports and private settings are
 retained from the resolved configuration.
 
+Before initial enrollment, compare the resolved configuration with the running
+containers and reconcile missing shell variables or settings drift. Container
+labels list Compose paths but do not capture shell environment overrides. The
+prepared snapshot preserves the resolved files; an explicit candidate review
+must confirm that they are the intended production settings.
+
 Host-mounted code and import-path overrides are refused, including legacy
 Telegram bridge files mounted outside the image. Move such extensions into the
 reviewed source/image and test them in CI before selecting that service. The
