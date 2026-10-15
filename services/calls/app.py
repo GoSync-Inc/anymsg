@@ -1,7 +1,6 @@
 """Private voice controls; signed public Twilio media and a narrow Telegram broker."""
 import asyncio
 import contextlib
-import hmac
 import os
 import sys
 import json
@@ -27,6 +26,7 @@ from learning import LearningWorker, ANALYZER_MODEL
 from supervisor import Supervisor, SUPERVISOR_MODEL
 from outbound import Outbound,CallingSettings,TwilioCalls,ExternalBrief
 from settings import Setup,read_private,write_private
+from security import OwnerCredential, VoiceBoundary
 
 SOURCE = Path(__file__).resolve()
 PRIVATE = Path(os.environ.get('VOICE_STATE_DIR', str(Path.home() / '.local' / 'share' / 'deedkit' / 'calls')))
@@ -122,11 +122,17 @@ class CaseReview(Input):
     expected_behavior:str | None=Field(default=None,min_length=3,max_length=1500)
 
 
-def create_app(data_dir=None, archive=None, control_token=None, reviewer=None, advisor=None, agent_registry=None):
+def create_app(data_dir=None, archive=None, control_token=None, reviewer=None, advisor=None, agent_registry=None,
+               callback_limits=None):
     directory = Path(data_dir or os.environ.get('VOICE_DATA_DIR',str(PRIVATE / 'data')))
     if data_dir is None and (not directory.is_absolute() or not directory.is_dir()):
         raise ValueError("Set VOICE_DATA_DIR to an explicitly initialized absolute state directory")
     service = VoiceService(directory)
+    try:
+        owner = OwnerCredential(directory)
+    except Exception:
+        service.close()
+        raise
     archive_config = Path(os.environ.get('VOICE_ANYMSG_CONFIG', str(PRIVATE / 'anymsg.json')))
     archive = archive if archive is not None else AnyMsg.from_config(archive_config) if archive_config.exists() else UnconfiguredArchive()
     keys, session = {}, {}
@@ -206,27 +212,8 @@ def create_app(data_dir=None, archive=None, control_token=None, reviewer=None, a
     app.state.supervisor=supervisor
     app.state.outbound=outbound
 
-    @app.middleware('http')
-    async def local_only(request, call_next):
-        if request.url.path.startswith('/provider/'):
-            provider=outbound.providers.get('twilio')
-            expected=urlsplit(provider.config.get('public_url','')).hostname if provider else None
-            if not expected or request.url.hostname!=expected:
-                return JSONResponse({'detail':'Provider host required'},status_code=403)
-            return await call_next(request)
-        if request.url.hostname not in {'127.0.0.1', 'localhost', 'testserver'}:
-            return JSONResponse({'detail':'Loopback host required'}, status_code=403)
-        if request.url.path.startswith('/control/'):
-            if not hmac.compare_digest(request.headers.get('authorization',''), 'Bearer '+control_token):
-                return JSONResponse({'detail':'Control credential required'},status_code=401)
-        elif request.url.path.startswith('/v1/'):
-            pass  # Separate principal credential and bounded body enforced by AgentAPI.
-        elif request.method not in {'GET','HEAD'}:
-            if request.headers.get('origin') != str(request.base_url).rstrip('/') or request.headers.get('x-voice-service') != '1':
-                return JSONResponse({'detail':'Local interface required'}, status_code=403)
-        response = await call_next(request)
-        response.headers.update({'Cache-Control':'no-store','X-Content-Type-Options':'nosniff','Referrer-Policy':'no-referrer'})
-        return response
+    app.add_middleware(VoiceBoundary, owner=owner, control_token=control_token,
+                       outbound=outbound, limits=callback_limits)
 
     @app.exception_handler(RequestValidationError)
     async def invalid(request, exc):
@@ -515,7 +502,7 @@ def create_app(data_dir=None, archive=None, control_token=None, reviewer=None, a
 
     @app.post('/provider/twilio/status/{identity}')
     async def twilio_status(identity:str,request:Request):
-        provider=outbound.providers.get('twilio');params=await request.form()
+        provider=outbound.providers.get('twilio');params=request.state.twilio_form
         if not provider or not provider.signature_valid(provider.config['public_url'].rstrip('/')+'/provider/twilio/status/'+identity,
                                                        params,request.headers.get('x-twilio-signature')):
             raise HTTPException(403,'Provider signature required')
@@ -532,7 +519,7 @@ def create_app(data_dir=None, archive=None, control_token=None, reviewer=None, a
     async def twilio_inbound(request:Request):
         # Sender enablement needs a Voice endpoint. This outbound pilot never
         # answers an incoming call or invents a task for an unknown caller.
-        provider=outbound.providers.get('twilio');params=await request.form()
+        provider=outbound.providers.get('twilio');params=request.state.twilio_form
         if not provider or params.get('AccountSid')!=provider.config.get('account_sid') or not provider.signature_valid(
             provider.config['public_url'].rstrip('/')+'/provider/twilio/inbound',params,request.headers.get('x-twilio-signature')):
             raise HTTPException(403,'Provider signature required')

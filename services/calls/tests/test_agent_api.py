@@ -265,7 +265,7 @@ async def test_http_surface_separates_owner_control_and_bounded_agent_body(tmp_p
             ).status_code == 401
             assert (
                 await c.post("/api/credentials", json={}, headers=headers)
-            ).status_code == 403
+            ).status_code == 401
             cap = await c.post("/v1/capabilities", json={}, headers=headers)
             assert cap.status_code == 200 and cap.json()["principal"] == "alice"
             assert (
