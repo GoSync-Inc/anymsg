@@ -5,7 +5,7 @@ import {executeOperation,OPERATION_ERRORS} from './operations.mjs';
 import fs from 'node:fs';
 import path from 'node:path';
 import {runLane,sendingSocket} from './ipc.mjs';
-import {DiskCapture,event,asId,chatId,allows,cursor,compare,readPolicy} from './capture.mjs';
+import {DiskCapture,event,asId,chatId,allows,cursor,compare,readPolicy,envelopeText} from './capture.mjs';
 import {download} from './media.mjs';
 import {cachedSenderNames,cachedOwnerIds} from './sender.mjs';
 import {readPage} from './history.mjs';
@@ -51,10 +51,13 @@ function capture(message,change='message',body=undefined) {
     spool.put({kind:'whatsapp_event',account:cfg.account,event:value,change,
       observed_at:new Date().toISOString(),origin:'live'});
   } catch(e) {
-    if(e.message==='unsupported_chat')return; // Status broadcasts/newsletters outside current supported source types.
+    // Status broadcasts/newsletters are outside current supported source types.
+    // A single message the archive can never represent must not stop capture.
+    if(SKIPPED_CAPTURE.has(e.message))return;
     failed(CONNECTION_ERRORS.has(e.message)?e.message:'durable_capture_failed');void stop(1);
   }
 }
+const SKIPPED_CAPTURE=new Set(['unsupported_chat','invalid_provider_message','invalid_provider_time','provider_id_unavailable']);
 function deleted(after,before) {
   if(!verified || stopping)return;
   try {
@@ -104,7 +107,8 @@ async function page(chat,limit,before) {
   const messages=result.raw.map(raw=>event(new pkg.Message(client,raw),undefined,ownerIds)).sort((a,b)=>compare(cursor(a),cursor(b)));
   const names=await pageBounds.names(messages.filter(m=>!m.senderName).map(m=>m.senderId),
     ids=>client.pupPage.evaluate(cachedSenderNames,ids));
-  for(const message of messages)if(!message.senderName)message.senderName=names[message.senderId] || '';
+  for(const message of messages)if(!message.senderName)
+    message.senderName=typeof names[message.senderId]==='string'?envelopeText(names[message.senderId],512):'';
   const observed=await pageBounds.names([...new Set(messages.flatMap(m=>[m.senderId,m.chatId]))],
     ids=>client.pupPage.evaluate(cachedIdentityObservations,ids));
   if(Array.isArray(observed))identities.remember(observed);

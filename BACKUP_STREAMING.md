@@ -34,7 +34,10 @@ Receiver v2 first reserves a conservative **maximum** ciphertext size against
 its per-object limit, quota and free-space reserve. It accepts frames of at most
 1 MiB and checks actual size/free reserve throughout delivery. After FIFO EOF,
 the host requires the independent encoder result (source integrity, successful
-age exit, ciphertext length/hash) before sending the final frame. An interrupted
+age exit, ciphertext length/hash) before sending the final frame. A worker that
+exits or publishes its result before writing to the FIFO ends this wait promptly:
+while no writer is attached, the host checks the owned container at most once per
+second instead of waiting for the whole stream deadline. An interrupted
 or corrupt source, failed encoder, oversized/truncated stream, bad footer or
 receiver error cannot publish a backup. Receipt means ciphertext integrity;
 it does not replace decryption and isolated restore verification.

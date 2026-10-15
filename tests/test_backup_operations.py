@@ -11,7 +11,7 @@ import sys
 import pytest
 
 from messaging_service.backup_receiver import receive,locked,prune,AGE_HEADER
-from messaging_service.backup_runner import Runner,write_json,read_json,upload
+from messaging_service.backup_runner import ID,Runner,write_json,read_json,upload
 from messaging_service.backup_worker import dump_credentials
 
 NAME='20261013T000000Z-0123456789abcdef'
@@ -214,6 +214,42 @@ def test_runner_capture_failure_resume_and_remove_only_owned_staging(tmp_path):
     runner.recover_stop()
     assert docker.containers['tg-id']['State']['Running'] and not docker.containers['wa-id']['State']['Running']
     assert not (tmp_path/'journal.json').exists() and not any(p.name=='snapshot' for p in tmp_path.rglob('*'))
+
+
+def test_runner_interrupted_capture_removes_abandoned_ciphertext_but_never_delivered_jobs(tmp_path):
+    runner,docker=runner_fixture(tmp_path);docker.hold_worker=True
+    delivered=tmp_path/'20261012T000000Z-0123456789abcdef';delivered.mkdir(mode=0o700)
+    (delivered/'bundle.tar.age').write_bytes(AGE_HEADER+b'delivered fixture')
+    write_json(delivered/'delivery.json',{'status':'stored'})
+    ticks=iter(range(0,10**6,30));runner.clock=lambda:next(ticks)
+    def encrypting(_):
+        # The worker is still encrypting when the whole-job deadline expires:
+        # a partial age temporary and a complete but undelivered ciphertext.
+        work=tmp_path/runner.journal['id']
+        (work/'.encrypt-synthetic').write_bytes(b'partial ciphertext fixture')
+        (work/'bundle.tar.age').write_bytes(AGE_HEADER+b'undelivered fixture')
+    runner.sleep=encrypting
+    with pytest.raises(RuntimeError,match='capture_timeout'):runner.run()
+    job=tmp_path/runner.journal['id']
+    assert (job/'bundle.tar.age').is_file() and (job/'.encrypt-synthetic').is_file()
+    runner.recover_stop()
+    assert not job.exists() and not (tmp_path/'journal.json').exists()
+    assert docker.containers['tg-id']['State']['Running'] and not docker.containers['wa-id']['State']['Running']
+    assert not any(cid.startswith('pos-backup-') for cid in docker.containers)
+    assert read_json(tmp_path/'status.json')['error_code']=='backup_capture_timeout'
+    assert (delivered/'bundle.tar.age').is_file() and (delivered/'delivery.json').is_file()
+    # A new capture under a new ID succeeds; local retention sees only delivered jobs.
+    docker.hold_worker=False;runner.sleep=lambda _:None;runner.run()
+    jobs=sorted(p.name for p in tmp_path.iterdir() if p.is_dir() and ID.fullmatch(p.name))
+    assert len(jobs)==2 and delivered.name in jobs and all((tmp_path/name/'delivery.json').is_file() for name in jobs)
+
+
+def test_runner_recovery_never_removes_a_delivered_job_directory(tmp_path):
+    runner,docker=runner_fixture(tmp_path);runner.prepare();work=tmp_path/runner.journal['id']
+    (work/'bundle.tar.age').write_bytes(AGE_HEADER+b'delivered fixture')
+    write_json(work/'delivery.json',{'status':'stored'})
+    with pytest.raises(RuntimeError,match='invalid_backup_journal'):runner.recover_stop()
+    assert (work/'bundle.tar.age').is_file() and (tmp_path/'journal.json').exists()
 
 
 def test_runner_resumes_existing_worker_after_host_restart_or_inspection_failure(tmp_path):

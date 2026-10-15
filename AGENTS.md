@@ -8,6 +8,10 @@ Preserve existing SQL migration checksums and provider IDs. Test wheels outside 
 checkout and inspect wheel/sdist/npm contents before publication. Stop owned test
 processes after use; do not stop shared services. Superflow is not automatic.
 
+Maintain planned work, priorities and delivery status in root BACKLOG.md.
+Module documents keep contracts and acceptance procedures and link to that queue;
+do not create parallel roadmaps. Distinguish merged source from live verification.
+
 Production upgrades follow docs/operations/production.md. Use the verified
 promotion tool with an exact current main SHA and successful required CI;
 never deploy a feature branch, dirty checkout, copied source patch or ad hoc

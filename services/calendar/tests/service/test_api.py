@@ -1,3 +1,6 @@
+import json
+from pathlib import Path
+
 from starlette.testclient import TestClient
 from tests.service.test_policy import SCOPES
 
@@ -127,3 +130,62 @@ def test_capability_scope_discovery_matches_authenticated_principal(household):
     with c:
         result = c.post("/v1/capabilities", json={}, headers={"Authorization": "Bearer " + key}).json()
         assert set(result["permissions"]) == set(SCOPES)
+
+
+def test_tool_annotations_separate_reads_local_plans_and_provider_writes(household):
+    from family_calendar.service.api import ANNOTATIONS
+
+    c, key = client(household)
+    with c:
+        listed = c.post(
+            "/mcp",
+            headers={"Authorization": "Bearer " + key, "Accept": "application/json, text/event-stream"},
+            json={"jsonrpc": "2.0", "id": 1, "method": "tools/list"},
+        ).json()["result"]["tools"]
+    hints = {tool["name"].removeprefix("family_"): tool["annotations"] for tool in listed}
+    assert hints == ANNOTATIONS
+    reads = {"capabilities", "calendars", "members", "agenda", "slots", "operation", "assignments"}
+    assert {name for name, value in hints.items() if value["readOnlyHint"]} == reads
+    assert hints["plan"] == {
+        "readOnlyHint": False,
+        "destructiveHint": False,
+        "idempotentHint": False,
+        "openWorldHint": False,
+    }
+    assert hints["apply"]["destructiveHint"] and hints["apply"]["openWorldHint"]
+
+
+def test_gateway_catalog_mirrors_calendar_tool_metadata():
+    from family_calendar.service.api import ANNOTATIONS, DESCRIPTIONS, MODELS
+
+    packaged = Path(__file__).resolve().parents[3] / "gateway/src/agent_gateway/catalog.json"
+    rows = {row["name"]: row for row in json.loads(packaged.read_text()) if row["module"] == "calendar"}
+    assert set(rows) == {"calendar_" + name for name in MODELS}
+    for name, model in MODELS.items():
+        row = rows["calendar_" + name]
+        assert row["operation"] == name and row["inputSchema"] == model.model_json_schema()
+        assert row["description"] == DESCRIPTIONS[name]
+        assert row["annotations"] == ANNOTATIONS[name]
+
+
+def test_time_errors_name_the_accepted_format_in_both_transports(household):
+    from family_calendar.service.core import TIME_FORMAT
+
+    c, key = client(household)
+    arguments = {"calendar_refs": ["cal-a"], "start": "2026-10-20T10:00:00", "end": "2026-10-20T11:00:00"}
+    with c:
+        headers = {"Authorization": "Bearer " + key}
+        rest = c.post("/v1/agenda", json=arguments, headers=headers)
+        mcp = c.post(
+            "/mcp",
+            headers={**headers, "Accept": "application/json, text/event-stream"},
+            json={
+                "jsonrpc": "2.0",
+                "id": 1,
+                "method": "tools/call",
+                "params": {"name": "family_agenda", "arguments": arguments},
+            },
+        ).json()["result"]
+    assert rest.status_code == 409
+    assert rest.json() == mcp["structuredContent"] == {"error": "invalid_time", "hint": TIME_FORMAT}
+    assert mcp["isError"] is True

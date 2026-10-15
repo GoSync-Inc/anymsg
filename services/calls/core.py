@@ -316,6 +316,19 @@ class VoiceService:
         with self.lock:
             return self._get("calls",identity)
 
+    def owned_page(self,table,owner_principal,limit,offset):
+        """Newest-first bodies of one principal only; events stay in their own table."""
+        path={'briefs':'$.owner_principal','calls':'$.brief.owner_principal'}[table]
+        with self.lock:
+            rows=[json.loads(r[0]) for r in self.db.execute(
+                f"SELECT body FROM {table} WHERE json_extract(body,?)=? ORDER BY rowid DESC LIMIT ? OFFSET ?",
+                (path,owner_principal,limit,min(offset,2**62)))]
+            if table=='briefs':
+                for b in rows:
+                    call=self.db.execute("SELECT id,json_extract(body,'$.status') FROM calls WHERE brief_id=?",(b['id'],)).fetchone()
+                    b['call_id'],b['call_status']=call or (None,None)
+            return rows
+
     def connecting(self,identity):
         with self.lock:
             v=self.get_call(identity)

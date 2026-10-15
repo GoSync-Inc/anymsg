@@ -1,5 +1,5 @@
 from contextlib import contextmanager
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 import hashlib
 import json
 from pathlib import Path
@@ -187,6 +187,13 @@ class Store:
         self.query("UPDATE principals SET enabled=false,version=version+1 WHERE id=%s", (principal_id,))
 
     def publish_window(self, calendar_ref, start, end, resources, status, error=None):
+        try:
+            self._publish_window(calendar_ref, start, end, resources, status, error)
+        except (psycopg.DataError, psycopg.IntegrityError):
+            # Provider data the projection cannot hold is not an unavailable provider.
+            raise CalendarError("invalid_provider_data") from None
+
+    def _publish_window(self, calendar_ref, start, end, resources, status, error):
         # Replace only this bounded projection, not durable assignments, plans or operation history.
         with self.transaction() as c:
             c.execute(
@@ -206,6 +213,9 @@ class Store:
                     ),
                 )
                 for event in resource["occurrences"]:
+                    a, b = instant(event["start"]), instant(event["end"])
+                    if b < a:
+                        raise CalendarError("invalid_provider_event_time")
                     c.execute(
                         "INSERT INTO occurrences VALUES (%s,%s,%s,%s,%s,%s,%s) ON CONFLICT(ref) DO UPDATE SET "
                         "start_at=excluded.start_at,end_at=excluded.end_at,details=excluded.details,busy=excluded.busy",
@@ -213,8 +223,9 @@ class Store:
                             event["ref"],
                             resource["resource_ref"],
                             calendar_ref,
-                            instant(event["start"]),
-                            instant(event["end"]),
+                            a,
+                            # A zero-length instant keeps the smallest span CHECK(end_at>start_at) allows.
+                            max(b, a + timedelta(microseconds=1)),
                             Jsonb(event["details"]),
                             event["busy"],
                         ),

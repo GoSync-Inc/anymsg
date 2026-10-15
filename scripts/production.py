@@ -11,6 +11,7 @@ import os
 from pathlib import Path
 import posixpath
 import re
+import shlex
 import shutil
 import subprocess
 import sys
@@ -172,20 +173,144 @@ def snapshot(project):
     return document, running
 
 
+# The runtime's data/config mount roots, never executable roots.
+MOUNT_ROOTS = ("/data", "/sessions", "/spool", "/run/secrets", "/run/deedkit",
+               "/models", "/processing-locks", "/broker", "/voice-broker")
+# A mount root named inside a larger argument, e.g. inline code or `--require=/data/x.js`.
+MOUNT_REFERENCE = re.compile(r"(?<![\w./-])(?:" + "|".join(map(re.escape, MOUNT_ROOTS)) + r")(?![\w.-])")
+CODE_SUFFIXES = (".py", ".pyc", ".pth", ".so", ".js", ".mjs", ".cjs", ".sh")
+# Options whose value is a configuration/data file: the only mounted paths a command may name.
+DATA_OPTIONS = {"--config", "--policy", "--home", "--dsn-file"}
+SHELLS = {"sh", "bash", "dash", "ash", "zsh", "ksh", "busybox"}
+NODE_CODE_OPTIONS = {"-e", "--eval", "-p", "--print", "-r", "--require", "--import",
+                     "--loader", "--experimental-loader", "-i", "--interactive"}
+# Diagnostics/encoding only. Every other PYTHON* setting can change imports or code
+# (PYTHONPATH, PYTHONHOME, PYTHONUSERBASE, PYTHONSTARTUP, PYTHONSAFEPATH, ...).
+PYTHON_VARIABLES = {"PYTHONUNBUFFERED", "PYTHONDONTWRITEBYTECODE", "PYTHONFAULTHANDLER",
+                    "PYTHONIOENCODING", "PYTHONUTF8", "PYTHONNOUSERSITE", "PYTHONHASHSEED", "PYTHONWARNINGS"}
+LOADER_VARIABLES = {"NODE_OPTIONS", "NODE_PATH", "NODE_REPL_EXTERNAL_MODULE", "GCONV_PATH",
+                    "BASH_ENV", "ENV", "PERL5LIB", "PERL5OPT", "RUBYLIB", "RUBYOPT"}
+HOST_NAMESPACES = ("network_mode", "pid", "ipc", "uts", "userns_mode", "cgroup")
+UNCONFINED = re.compile(r"(seccomp|apparmor|systempaths)[=:]unconfined|label[=:]disable")
+CODE_REFUSED = "host-mounted code or an unknown mount root bypasses verified images; package extensions in main first"
+IMPORT_REFUSED = "runtime import path overrides bypass verified images"
+INLINE_REFUSED = "inline shell or interpreter code bypasses verified images"
+PRIVILEGE_REFUSED = "privileged settings or host namespaces bypass the reviewed container sandbox"
+
+
+def mounted(value):
+    # Relative paths are also resolved from "/": an image WORKDIR may be the root.
+    path = posixpath.normpath(posixpath.join("/", str(value)))
+    return any(path == root or path.startswith(root + "/") for root in MOUNT_ROOTS)
+
+
+def unsafe_variable(name, value):
+    if name.startswith("PYTHON"):
+        return name not in PYTHON_VARIABLES
+    if name.startswith("LD_") or name in LOADER_VARIABLES:
+        return True
+    if name == "PATH":
+        return any(not entry.startswith("/") or mounted(entry) for entry in str(value or "").split(":"))
+    # A user site directory under HOME is imported and runs its .pth files.
+    return name == "HOME" and mounted(value or "/")
+
+
+def python_code(arguments):
+    values = iter(arguments)
+    for item in values:
+        if item == "-":
+            return "inline"
+        if item.startswith("--"):
+            if item == "--check-hash-based-pycs":
+                next(values, None)
+            continue
+        if not item.startswith("-"):
+            return None  # A script: validate_argv checks it as a path.
+        for index, flag in enumerate(item[1:], 1):
+            if flag == "c":
+                return "inline"
+            if flag in "mWX":
+                value = item[index + 1:] or next(values, "")
+                # With WORKDIR /, `-m broker.x` imports a host-mounted directory.
+                if flag == "m":
+                    return "module" if mounted(value.partition(".")[0] or "/") else None
+                break
+    return None
+
+
+def interpreter_code(argv):
+    # Every position may start a program: wrappers such as nice or timeout pass it on.
+    for index, item in enumerate(argv):
+        program, arguments = posixpath.basename(item), argv[index + 1:]
+        short = [value for value in arguments if value.startswith("-") and not value.startswith("--")]
+        if ((program in SHELLS and any("c" in value for value in short))
+                or (re.fullmatch(r"perl[0-9.]*", program) and any("e" in value.lower() for value in short))
+                or (program in ("node", "nodejs")
+                    and any(value.partition("=")[0] in NODE_CODE_OPTIONS for value in arguments))
+                or (program == "env" and (any("S" in value for value in short)
+                    or any(value.partition("=")[0] == "--split-string" for value in arguments)))):
+            return "inline"
+        if re.fullmatch(r"python[0-9.]*", program) and (result := python_code(arguments)):
+            return result
+    return None
+
+
+def validate_argv(argv, *, healthcheck=False):
+    argv = shlex.split(argv) if isinstance(argv, str) else [str(item) for item in argv or []]
+    if healthcheck:
+        if not argv or argv[0] == "NONE":
+            return
+        argv = ["sh", "-c", *argv[1:]] if argv[0] == "CMD-SHELL" else argv[1:] if argv[0] == "CMD" else argv
+    previous = ""
+    for item in argv:
+        name, separator, value = item.partition("=")
+        if separator and re.fullmatch(r"[A-Za-z_][A-Za-z0-9_]*", name) and unsafe_variable(name, value):
+            raise Refused(IMPORT_REFUSED)
+        if (previous not in DATA_OPTIONS and not (separator and name in DATA_OPTIONS)
+                and (mounted(item) or MOUNT_REFERENCE.search(item))):
+            raise Refused(CODE_REFUSED)
+        previous = item
+    code = interpreter_code(argv)
+    if code == "module":
+        raise Refused(CODE_REFUSED)
+    # A health probe needs inline Python; it still cannot name a mount (checked above).
+    if code == "inline" and not (healthcheck and re.fullmatch(r"python[0-9.]*", posixpath.basename(argv[0]))):
+        raise Refused(INLINE_REFUSED)
+
+
 def validate_runtime(unit):
     # Legacy host-mounted extensions would bypass the verified image entirely.
-    # These are the runtime's data/config mount roots, never executable roots.
-    roots = ("/data", "/sessions", "/spool", "/run/secrets", "/run/deedkit",
-             "/models", "/processing-locks", "/broker", "/voice-broker")
-    code_suffixes = (".py", ".pyc", ".so", ".js", ".mjs", ".cjs", ".sh")
-    for mount in unit.get("volumes", []):
-        target = posixpath.normpath(mount["target"])
-        if (not any(target == root or target.startswith(root + "/") for root in roots)
-                or target.endswith(code_suffixes) or str(mount.get("source", "")).endswith(code_suffixes)):
-            raise Refused("host-mounted code or an unknown mount root bypasses verified images; package extensions in main first")
-    environment = unit.get("environment", {})
-    if any(environment.get(name) for name in ("PYTHONPATH", "NODE_PATH", "LD_PRELOAD", "LD_LIBRARY_PATH")):
-        raise Refused("runtime import path overrides bypass verified images")
+    mounts = [(mount["target"], mount.get("source", "")) for mount in unit.get("volumes") or []]
+    # Compose secrets/configs are file mounts too; a config defaults to /<name>.
+    for kind, default in (("secrets", "/run/secrets/"), ("configs", "/")):
+        for item in unit.get(kind) or []:
+            item = {"source": item} if isinstance(item, str) else item
+            target = item.get("target") or item["source"]
+            mounts.append((target if target.startswith("/") else default + target, item["source"]))
+    for target, source in mounts:
+        target = posixpath.normpath(target)
+        if (not target.startswith("/") or not mounted(target)
+                or target.endswith(CODE_SUFFIXES) or str(source).endswith(CODE_SUFFIXES)):
+            raise Refused(CODE_REFUSED)
+    environment = unit.get("environment") or {}
+    if isinstance(environment, list):
+        environment = dict(item.partition("=")[::2] for item in environment)
+    if any(unsafe_variable(name, value) for name, value in environment.items()):
+        raise Refused(IMPORT_REFUSED)
+    if unit.get("working_dir") and mounted(unit["working_dir"]):
+        raise Refused(CODE_REFUSED)
+    def split(value):
+        return shlex.split(value) if isinstance(value, str) else [str(item) for item in value or []]
+    # Without an entrypoint override the command may itself start a program.
+    validate_argv(split(unit.get("entrypoint")) + split(unit.get("command")))
+    validate_argv((unit.get("healthcheck") or {}).get("test"), healthcheck=True)
+    if unit.get("post_start") or unit.get("pre_stop"):
+        raise Refused("lifecycle hooks run commands outside the verified image; package them in main first")
+    if (any(unit.get(key) for key in ("privileged", "cap_add", "devices", "device_cgroup_rules", "volumes_from", "gpus"))
+            or any(UNCONFINED.search(str(option)) for option in unit.get("security_opt") or [])
+            or any(str(unit.get(key) or "") == "host" for key in HOST_NAMESPACES)
+            or str(unit.get("pid") or "").startswith(("container:", "service:"))):
+        raise Refused(PRIVILEGE_REFUSED)
 
 
 def escaped(value):

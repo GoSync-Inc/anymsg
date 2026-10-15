@@ -35,6 +35,13 @@ fsync, очередь БД и время самого запроса агент�
 догоняющие события; `origin=live` не доказывает отсутствие такой задержки.
 Stateless MCP не будит простаивающего агента: клиент должен вызвать чтение/updates.
 
+Account sync freshness keeps successful scan age in `scan_state`, separately
+from live capture state. Pending spool captures report `capture_backlogged`; an
+expired collector lease reports `collector_not_running`, even after a recent
+history scan. An old last commit with zero pending captures is not evidence of
+lag on a quiet source. Media storage pauses qualify original availability
+independently. Chat-restricted readers receive no account-wide collector state.
+
 Owner mentions сохраняются по Telegram `mentioned` или совпадению WhatsApp
 mentioned IDs с cached phone/LID identities текущего авторизованного аккаунта.
 У WhatsApp quoted participant тоже может подтвердить ответ владельцу. Capture
@@ -44,6 +51,33 @@ IDs можно сопоставить с outgoing только внутри то
 эвристика очереди внимания, а не provider unread state или факт обязательства.
 
 Документация использованных API: [Telethon catch-up и streaming download](https://docs.telethon.dev/en/stable/modules/client.html), [ограничения MessageDeleted](https://docs.telethon.dev/en/stable/modules/events.html#telethon.events.messagedeleted.MessageDeleted). Реальные Telegram downloads проверены; длительное наблюдение и сценарии reconnect требуют отдельной приёмки. В0.7.2 истёкшие/требующие обновления file references обрабатываются очередью с ограниченными попытками и новой загрузкой metadata, не останавливая сбор остальных чатов.
+
+### Карантин очереди и устойчивость
+
+Одно сообщение не останавливает сбор аккаунта. Адаптеры обрезают или
+нейтрализуют отображаемые поля от отправителя (MIME с параметрами или
+управляющими символами, длинные имена файлов и имена профилей, NUL в тексте,
+размер больше 8 GiB, слишком длинный `replyToId`) вместо отказа. Сообщение,
+которое всё равно не проходит проверку, при сверке истории пропускается и
+считается в `invalid_provider_messages` статуса `live_capture`.
+
+Если запись в spool не проходит валидацию или её квитанция отправки навсегда
+расходится с БД (например, после восстановления старого бэкапа), `drain`
+переносит файл в `quarantine/` внутри того же spool
+(0700) рядом с `<имя>.reason` с кодом без содержимого. Следующие записи
+разбираются дальше. `live_capture` показывает `capture_quarantined`,
+`quarantined_captures` и `next_action=inspect_capture_quarantine`. Удерживаемые
+записи не в архиве; файлы ничего не удаляет. Чтобы повторить запись после
+исправления, верните файл без изменения имени из `quarantine/` в каталог spool
+при остановленном коллекторе. Повреждённый файл (digest не совпадает с
+именем) и переполненный карантин (1000 записей) по-прежнему останавливают
+разбор со `spool_corrupt`.
+
+Временные ошибки PostgreSQL (statement timeout, обрыв соединения, занятый
+pool) не перезапускают коллектор: сверка, медиа, отправки и heartbeat
+повторяют попытку с паузой до 60 с. Lease продлевается с локальным дедлайном:
+если БД не отвечает дольше lease, коллектор останавливается сам, а не ждёт на
+полуоткрытом соединении.
 
 ## Условия перед живым подключением
 

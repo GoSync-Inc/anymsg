@@ -194,7 +194,7 @@ def test_mcp_and_rest_expose_queue_filters_and_local_dismissal(inbox):
     with TestClient(create_app(s,['testserver'])) as client:
         r=rpc(client,key,'list_chats',{'awaiting_reply':True,'order':'priority','only_questions':True})
         assert 'error' not in r.json()
-        assert r.json()['result']['structuredContent']['items'][0]['awaiting_reply_message_id']==mid
+        assert r.json()['result']['structuredContent']['items'][0]['awaiting_reply']['message_id']==mid
         r=client.post('/v1/dismiss_reply',headers={'Authorization':'Bearer '+key},
             json={'chat_id':chat,'message_id':mid,'expected_revision':1})
         assert r.status_code==200 and r.json()['dismissed'] is True
@@ -387,7 +387,7 @@ def test_backup_hashes_exact_owner_observations_and_key_local_dismissal(inbox):
         observe(c,'queue-test','100',{'observed_at':datetime.now(timezone.utc).isoformat(),
             'unread_count':0,'read_inbox_max_id':1,'basis':'telegram_dialog'})
         manifest=database_manifest(c)
-        assert len(manifest)==52
+        assert len(manifest)==58
         assert manifest['reply_dismissals']['rows']==manifest['chat_read_observations']['rows']==1
         c.execute('UPDATE chat_read_observations SET unread_count=1 WHERE chat=%s',(chat,))
         changed=database_manifest(c)

@@ -45,6 +45,131 @@ async def test_only_one_worker_can_recover_jobs_and_run_for_a_database(store):
         ).fetchone()["ok"]
 
 
+@pytest.mark.asyncio
+async def test_interrupted_sync_job_fails_once_and_does_not_block_a_fresh_refresh(household):
+    from family_calendar.service.store import Store
+    from family_calendar.service.worker import Worker
+
+    household.grant("family", "adult-a", "cal-a", SCOPES, "details")
+    key = household.agent("agent", "family", "adult-a", SCOPES, ["cal-a"])
+    window = ("2026-10-19T00:00:00Z", "2026-10-20T00:00:00Z")
+    # A job that killed the previous worker process mid-read.
+    household.query(
+        "INSERT INTO sync_jobs(id,principal_id,calendar_ref,start_at,end_at,state) "
+        "VALUES ('sync-crashed','agent','cal-a',%s,%s,'sending')",
+        window,
+    )
+    reads = []
+
+    class Providers:
+        async def read_window(self, cal, start, end):
+            reads.append(cal["ref"])
+            return []
+
+        async def close(self):
+            pass
+
+    recovering = Worker(Store(household.dsn, household.schema), Providers())
+    ticked = asyncio.Event()
+
+    async def tick():
+        ticked.set()
+        await asyncio.Future()
+
+    recovering.tick = tick
+    running = asyncio.create_task(recovering.run())
+    try:
+        await asyncio.wait_for(ticked.wait(), 5)
+    finally:
+        running.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await running
+    assert household.one("SELECT state FROM sync_jobs WHERE id='sync-crashed'")["state"] == "failed"
+    coverage = FamilyService(household).agenda(key, ["cal-a"], *window)["coverage"][0]
+    assert (coverage["status"], coverage["error"]) == ("unknown", "sync_interrupted")
+
+    worker = Worker(household, Providers())
+    household.query(
+        "INSERT INTO sync_jobs(id,principal_id,calendar_ref,start_at,end_at) "
+        "VALUES ('sync-fresh','agent','cal-a',%s,%s)",
+        window,
+    )
+    assert await worker.sync_one()
+    assert not await worker.sync_one()
+    assert reads == ["cal-a"]
+    assert household.one("SELECT state FROM sync_jobs WHERE id='sync-fresh'")["state"] == "verified"
+    coverage = FamilyService(household).agenda(key, ["cal-a"], *window)["coverage"][0]
+    assert (coverage["status"], coverage["error"]) == ("complete", None)
+
+
+class WindowProvider:
+    def __init__(self, rows):
+        self.rows = rows
+
+    async def read_window(self, cal, start, end):
+        return self.rows
+
+    async def close(self):
+        pass
+
+
+WINDOW = ("2026-10-19T00:00:00Z", "2026-10-20T00:00:00Z")
+
+
+async def _sync(household, rows):
+    from family_calendar.service.worker import Worker
+
+    household.grant("family", "adult-a", "cal-a", SCOPES, "details")
+    key = household.agent("agent", "family", "adult-a", SCOPES, ["cal-a"])
+    household.query(
+        "INSERT INTO sync_jobs(id,principal_id,calendar_ref,start_at,end_at) VALUES ('sync','agent','cal-a',%s,%s)",
+        WINDOW,
+    )
+    assert await Worker(household, WindowProvider(rows)).sync_one()
+    return key, household.one("SELECT state FROM sync_jobs WHERE id='sync'")["state"]
+
+
+@pytest.mark.asyncio
+async def test_zero_length_provider_event_publishes_as_non_blocking_instant(household):
+    from datetime import datetime, timezone
+    from family_calendar.service.providers import normalize_google
+    from family_calendar.service.store import instant
+
+    point = {"dateTime": "2026-10-19T08:00:00Z"}
+    rows = [
+        normalize_google("cal-a", {"id": "point", "summary": "Reminder", "start": point, "end": point}, "UTC")
+    ]
+    key, state = await _sync(household, rows)
+    agenda = FamilyService(household).agenda(key, ["cal-a"], *WINDOW)
+    assert state == "verified" and agenda["coverage"][0]["status"] == "complete"
+    [event] = agenda["events"]
+    assert instant(event["start"]) == instant(event["end"]) == datetime(2026, 10, 19, 8, tzinfo=timezone.utc)
+    assert event["busy"] is False and event["instant"] is True
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "occurrence,code",
+    [
+        ({"details": {"title": "nul\x00"}}, "invalid_provider_data"),
+        ({"end": "2026-10-19T07:00:00Z"}, "invalid_provider_event_time"),
+    ],
+)
+async def test_unstorable_provider_event_is_reported_as_data_not_unavailable_provider(
+    household, occurrence, code
+):
+    event = {"ref": "event-x", "start": "2026-10-19T08:00:00Z", "end": "2026-10-19T09:00:00Z"}
+    event.update({"busy": True, "details": {}}, **occurrence)
+    rows = [{"resource_ref": "res-x", "target": "x", "etag": None, "payload": {}, "occurrences": [event]}]
+    _, state = await _sync(household, rows)
+    assert state == "failed"
+    assert household.one("SELECT status,error FROM coverage WHERE calendar_ref='cal-a'") == {
+        "status": "blocked",
+        "error": code,
+    }
+    assert household.one("SELECT count(*) AS n FROM occurrences")["n"] == 0
+
+
 @pytest.fixture
 def operation(household):
     household.grant("family", "adult-a", "cal-a", SCOPES, "details")

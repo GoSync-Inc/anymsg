@@ -135,7 +135,7 @@ def test_subscription_manifest_has_strict_schemas_and_passive_event_read():
             'Accept':'application/json, text/event-stream'},json={'jsonrpc':'2.0','id':1,
             'method':'tools/list','params':{}}).json()['result']['tools']
     tools={tool['name']:tool for tool in listed}
-    assert len(tools)==34
+    assert len(tools)==41
     for method in METHODS:
         tool=tools[method]
         assert tool['inputSchema']['additionalProperties'] is False
@@ -146,7 +146,7 @@ def test_subscription_manifest_has_strict_schemas_and_passive_event_read():
     legacy=tools['get_updates']['inputSchema']['properties']['kinds']
     assert 'file.transcript.ready' not in json.dumps(legacy)
     assert 'file.transcript.ready' in json.dumps(tools[METHODS[0]]['inputSchema'])
-    assert 'ack_subscription_events' not in tools
+    assert 'ack_subscription_events' in tools
 
 
 def test_subscription_backend_conflict_returns_safe_actionable_errors():

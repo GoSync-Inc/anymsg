@@ -11,6 +11,10 @@ on:
       tiden_branch:
         type: string
         default: ''
+    outputs:
+      source_sha:
+        description: Exact commit these checks tested
+        value: ${{ jobs.verify.outputs.source_sha }}
     secrets:
       TIDEN_API_TOKEN:
         required: false
@@ -20,6 +24,8 @@ jobs:
   verify:
     runs-on: ubuntu-latest
     timeout-minutes: 30
+    outputs:
+      source_sha: ${{ steps.source.outputs.sha }}
     services:
       postgres:
         image: postgres:18-bookworm@sha256:afc7e2d441324c0388fa80c3d24f733b4194a4eb7f47dd8ee2b08eb1a24a647c
@@ -40,9 +46,11 @@ jobs:
           ref: ${{ github.sha }}
           path: ci-tools
       - name: Start evidence record
+        id: source
         run: |
           mkdir -p "$RUNNER_TEMP/ci-evidence"
           git rev-parse HEAD > "$RUNNER_TEMP/ci-evidence/source-sha"
+          echo "sha=$(git rev-parse HEAD)" >> "$GITHUB_OUTPUT"
       - uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1 # v6
         with: {python-version: '3.13'}
       - uses: actions/setup-node@249970729cb0ef3589644e2896645e5dc5ba9c38 # v6
@@ -209,6 +217,16 @@ jobs:
           path: ${{ runner.temp }}/ci-evidence
           if-no-files-found: error
           retention-days: 14
+      - name: Require the tested source to be the commit receiving this check
+        # Baseline evidence of another source_ref is still recorded above, but
+        # this check must not report success on a commit it did not test.
+        if: ${{ always() }}
+        env:
+          SOURCE_SHA: ${{ steps.source.outputs.sha }}
+          EXPECTED_SHA: ${{ github.sha }}
+        run: |
+          test -n "$SOURCE_SHA"
+          test "$SOURCE_SHA" = "$EXPECTED_SHA"
       - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
         with:
           name: python-dist

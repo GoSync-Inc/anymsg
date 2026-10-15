@@ -215,7 +215,16 @@ class Worker:
                 ).fetchone()["ok"]
                 if not acquired:
                     raise CalendarError("worker_already_running")
-                self.store.query("UPDATE sync_jobs SET state='prepared' WHERE state='sending'")
+                # A read left 'sending' may itself have killed the process. Re-queueing it
+                # first would repeat the crash and block every sync and operation; fail it
+                # with an explicit coverage error so the agent can request a fresh refresh.
+                self.store.query(
+                    "WITH interrupted AS (UPDATE sync_jobs SET state='failed' WHERE state='sending' "
+                    "RETURNING calendar_ref,start_at,end_at) "
+                    "INSERT INTO coverage(calendar_ref,start_at,end_at,status,error) "
+                    "SELECT DISTINCT ON (calendar_ref) calendar_ref,start_at,end_at,'blocked','sync_interrupted' "
+                    "FROM interrupted ON CONFLICT(calendar_ref) DO UPDATE SET status='blocked',error=excluded.error"
+                )
                 while True:
                     # Loss of the dedicated lease connection stops the process.
                     lease.execute("SELECT 1")

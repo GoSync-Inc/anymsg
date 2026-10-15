@@ -28,9 +28,41 @@ and argument schema. There is no generic arbitrary backend executor. Unknown wri
 are not retried. Capability discovery intersects profile, local grants and current
 backend permissions. An unavailable module leaves platform introspection available.
 
+`platform_capabilities.tools` and a fresh MCP `tools/list` use the same effective
+catalog. Both expose `discovery` metadata (under `_meta["deedkit.discovery"]` for
+`tools/list`): selected tool count, a SHA-256 of the effective public schemas,
+policy revision, and explicit `notifications_supported: false`. Action-enum changes
+also change the hash. A host can cache its registered tools; after an authorized
+profile expansion, compare a fresh list with the host registration and reconnect
+when they differ. Cached tool visibility never bypasses current call authorization.
+This diagnostic does not claim that a particular host has refreshed its registration.
+
+Module capabilities preserve the backend `principal` and add `backend_principal`
+and `gateway_principal`; platform `principal` remains the gateway identity.
+Subscription ownership and receipts continue to use the existing backend credential.
+A missing backend principal is reported as null rather than inferred from a gateway
+label. Safe `backend_tool_manifest` summaries preserve the version, catalog count
+and hash, and the reviewed discovery hint without advertising unselected backend
+methods or a backend-specific REST URL. Platform introspection returns these as
+`backend_tool_manifests` keyed by module.
+
+`gateway_actions` always refers to the `messenger_operations` action group;
+`gateway_actions_scope` makes this explicit. Inspect `gateway_tools` for calendar
+and calls methods. An empty messenger action list and `owner_decision_write: false`
+do not deny a selected calls preparation method. Calls channel, destination, scope
+and owned-brief checks remain the backend's authority; these labels grant no access.
+`calls_list_briefs` and `calls_list_calls` (`calls:read`) page the backend credential's
+own briefs and calls newest first as short summaries; existing profiles do not gain them.
+
+Backend HTTP failures retain only their numeric `backend_status`, a reviewed
+`backend_error` classification (including `query_timeout`), and a UUID-shaped
+`request_id` when supplied. Error bodies, exception text and transport details are
+not forwarded as diagnostics. MCP and REST return the same safe error. A failure
+after a mutation is dispatched still reports `mutation_outcome_unknown` and forbids
+automatic retries, even when a backend error classification is available.
 Calendar capabilities retain a reviewed `constraints` allowlist (write limitations,
-freshness, bounded refresh and request limits), while upstream feature/tool catalogs
-remain hidden. `gateway_tools` is the selected connection's operation ceiling;
+accepted time format, freshness, bounded refresh and request limits), while upstream
+feature/tool catalogs remain hidden. `gateway_tools` is the selected connection's operation ceiling;
 `gateway_actions` describes messenger actions only. Calendar `allowed_event_actions`
 also intersects local/backend scopes and requires both selected plan/apply tools.
 `write_enabled` alone is not a write grant. Slot requests may add explicitly reviewed
@@ -49,7 +81,15 @@ Messenger-operation enums also intersect the backend's explicit supported names
 for each permitted account. A mixed Telegram/WhatsApp key sees their union; each
 preview/execute rechecks the exact account before dispatch. Unsupported operations
 are omitted from account catalogs. Missing support names hide live actions rather
-than inferring them from a provider name or count. Scoped receipt reads remain
+than inferring them from a provider name or count.
+`messages_capabilities` advertises in `gateway_actions_by_account` (and their union
+`gateway_actions`) only actions that are granted, supported and reported in the
+backend's per-account `available_operations` (key permitted and account opt-in).
+`gateway_actions_excluded_by_account` counts the remaining ceiling actions per
+reason (`not_available_for_account`, or `availability_not_reported` for an older
+backend) without listing them; `list_messenger_operations` shows per-row reasons.
+The operation enum and the per-call ceiling are unchanged by this narrower view;
+the backend still enforces account opt-in on every preview and execute. Scoped receipt reads remain
 available across provider changes under the existing action permission ceiling.
 Upgrade the messaging backend before the gateway when adding this contract.
 
@@ -68,12 +108,38 @@ with 8 chunks per second per backend credential. Body reads and upstream chunk
 transfers each have a 10-second deadline.
 Read back the upload's next offset after an uncertain response; writes are not retried.
 
+Subscription consumption and private feedback are separately selected tools.
+`messages_fetch_subscription_events` and `messages_wait_for_subscription_events`
+return owned pages; only the explicit `messages_ack_subscription_events` with
+`subscription-ack` can acknowledge an issued receipt. Delivery configuration and
+synthetic receiver probes require `read` plus `subscription-write`; they accept an
+opaque operator-registered receiver ID. A hint reaching a receiver does not prove
+an agent ran a turn and does not acknowledge any event. Feedback submission requires
+`read` plus `feedback-write`, stays private to the exact backend credential and
+never publishes an external issue or message. Each new tool also requires an exact
+backend manifest entry. Existing profiles gain none of these names automatically.
+
+Long subscription waits and sends with positive `wait_s` use a separate pool with
+2 active and 4 waiting requests; ordinary messaging reads retain their own pool.
+Both waits are bounded to 25 seconds. Cancellation releases waiting capacity.
+`messages_get_updates(start_from="now")` requires `cursor-write` both locally and
+upstream, initializes only a new consumer, and cannot reset an existing consumer's
+ACK state. The legacy default remains `start_from="beginning"`.
+
 Original files are streamed through bounded, short-lived bearer tickets with separate
-connection pools. URLs cannot select another origin or path. Tickets recheck current
-local policy and credential binding, and poll the backend's existing HEAD download
-grant check during long transfers. Revocation terminates an active response; a partial
-file is never converted to a successful error JSON. Clients should verify the advertised
-length and SHA-256. Do not share or log these bearer URLs. Access logging is disabled.
+connection pools. URLs cannot select another origin or path. A ticket's expiry limits
+when a download may start; a started transfer may outlive it. Throughout the transfer
+the gateway rechecks current local policy and credential binding, and polls the
+backend's existing HEAD download grant check. A denial or unexpected answer ends the
+transfer at once; 429, 5xx, timeouts and connection errors end it only after 10
+seconds without a confirmation. For a transfer it is serving, the messaging backend
+answers that HEAD from the current key, scope and file instead of the grant's
+120-second expiry; upgrade it first, or long transfers still end there.
+Revocation terminates an active response; a partial file is never converted to a
+successful error JSON. The final chunk is withheld until length and SHA-256 match, so
+a corrupted original ends short of its Content-Length instead of completing. Clients
+should still verify the advertised length and SHA-256. Do not share or log these
+bearer URLs. Access logging is disabled.
 
 Deployment profiles in `config/profiles/` select managed or external backends. Run
 `python scripts/deedkit.py resolve --profile config/profiles/existing-readers.toml --json`

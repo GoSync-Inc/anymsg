@@ -202,15 +202,18 @@ def test_pending_history_pages_are_not_counted_as_live_capture_backlog(tmp_path)
             for i in range(files): (self.path / f'{i:020d}-synthetic.json').write_text('{}')
             self.drained = []
         def drain(self, apply, limit): self.drained.append(limit); return 0
+        def quarantined(self): return 1
     progress = []
     worker = wa.WhatsAppCollector.__new__(wa.WhatsAppCollector)
+    worker.invalid_messages = 3
     worker.state = SimpleNamespace(apply=lambda item: None,
         capture_progress=lambda *args, **kwargs: progress.append((args, kwargs)))
     events, pages = Spool('events', 2), Spool('pages', 40)
     asyncio.run(worker.drain_captures([events], [pages]))
     assert events.drained == [100] and pages.drained == [100]
     # Live lag counts only callback captures; replayable history is separate.
-    assert progress == [((None, 0, 2), {'history_pending': 40})]
+    assert progress == [((None, 0, 2), {'history_pending': 40, 'quarantined': 2, 'invalid': 3})]
+    assert worker.invalid_messages == 0
 
 
 @pytest.mark.parametrize('outcome,records', [

@@ -102,6 +102,9 @@ docker build --target backup -t anymsg-backup:0.9.9 ..
 Native OCR, transcription, Chromium sandboxing, quotas and encrypted backups need
 their own host acceptance checks. A health response is not proof of complete source
 history or a restorable backup. The adapter docs describe the remaining checks.
+The API, gateway and calendar API Compose healthchecks only show that the HTTP
+process answers its health route (`docker ps` shows `unhealthy` when it hangs);
+Docker does not restart an unhealthy container, so alert on that state.
 
 ## Optional durable subscription worker
 

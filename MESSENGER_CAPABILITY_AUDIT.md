@@ -1,5 +1,9 @@
 # Messenger capability audit
 
+Current extension status and priority: [BACKLOG.md](BACKLOG.md), DK-22–DK-28.
+This dated audit preserves capability/design evidence, not a separate work queue;
+the current account/provider manifest determines actual support.
+
 Source audit: 2026-10-14. Dependencies: **Telethon 1.45.0** and
 **whatsapp-web.js 1.34.7**, as pinned in the lock files. This describes the current
 source candidate, not deployment or successful live use of every operation.
@@ -49,7 +53,7 @@ their own bounded schemas, observation time, revision/coverage rules and refresh
 jobs. In particular, a live Telegram poll/topic result is not yet a searchable,
 complete passive poll/topic archive.
 
-## Next increments: confirmed upstream capabilities still missing
+## Capability-extension design reference
 
 Each increment must extend the allowlist and permission model explicitly. It must
 not grant existing keys new rights. Mutations need a concrete owner-confirmed

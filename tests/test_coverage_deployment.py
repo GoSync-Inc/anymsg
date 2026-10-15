@@ -244,7 +244,135 @@ def test_operator_backup_worker_has_narrow_privilege_exception_and_private_mount
     assert not any(flag in command for flag in ('-p', '--publish', '--privileged', '--pid', '--ipc'))
 
 
-def test_publish_workflow_guards_version_ref_and_uses_verified_artifact_oidc():
+HEALTHCHECKS = {'api': 'deploy/compose.yaml', 'gateway': 'deploy/compose.gateway.yaml',
+                'calendar-api': 'deploy/compose.calendar.yaml'}
+
+
+def healthcheck(name):
+    check = document(HEALTHCHECKS[name])['services'][name]['healthcheck']
+    # Exec form, image Python only: no shell, curl or writes on the read-only rootfs.
+    assert check['test'][:3] == ['CMD', 'python', '-c']
+    assert check['interval'] == '30s' and check['timeout'] == '10s' and check['retries'] == 3
+    assert check['start_period'] == '40s'
+    return check['test'][3], check['test'][4:]
+
+
+def probe(code, *arguments, **environment):
+    # A proxy in the environment must be ignored: probes stay on loopback.
+    env = {'PATH': '/usr/bin:/bin', 'HTTP_PROXY': 'http://127.0.0.1:9', 'http_proxy': 'http://127.0.0.1:9',
+           **environment}
+    result = subprocess.run([sys.executable, '-I', '-c', code, *arguments], env=env, capture_output=True, timeout=30)
+    assert result.stdout == b'' and result.stderr == b''
+    return result.returncode
+
+
+class HostBoundServer:
+    """Synthetic loopback server with the service's Host rule and health path."""
+    def __init__(self, path, allowed):
+        from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+        class Handler(BaseHTTPRequestHandler):
+            def do_GET(self):
+                ok = self.path == path and self.headers.get('Host') in allowed and 'Origin' not in self.headers
+                self.send_response(200 if ok else 403)
+                self.send_header('Content-Length', '2'); self.end_headers(); self.wfile.write(b'{}')
+            def log_message(self, *args):
+                pass
+        self.server = ThreadingHTTPServer(('127.0.0.1', 0), Handler)
+        self.port = self.server.server_address[1]
+        self.thread = threading.Thread(target=self.server.serve_forever, daemon=True)
+    def __enter__(self):
+        self.thread.start(); return self
+    def __exit__(self, *_):
+        self.server.shutdown(); self.server.server_close(); self.thread.join(timeout=5)
+
+
+def test_api_healthcheck_passes_the_real_host_boundary_and_fails_closed(seeded):
+    import socket
+    import uvicorn
+    from messaging_service.app import create_app
+    code, arguments = healthcheck('api')
+    assert arguments == []
+    store, *_ = seeded
+    listener = socket.socket(); listener.bind(('127.0.0.1', 0)); listener.listen()
+    port = listener.getsockname()[1]
+    server = uvicorn.Server(uvicorn.Config(create_app(store, ['anymsg.example.invalid', f'127.0.0.1:{port}']),
+                                           log_level='warning', access_log=False))
+    thread = threading.Thread(target=server.run, kwargs={'sockets': [listener]}, daemon=True); thread.start()
+    try:
+        for _ in range(100):
+            if server.started:
+                break
+            threading.Event().wait(.05)
+        settings = {'PROBE_BIND': '0.0.0.0', 'PROBE_PORT': str(port)}
+        assert probe(code, PROBE_ALLOWED_HOSTS='anymsg.example.invalid,other.invalid', **settings) == 0
+        # A Host the boundary does not allow is a failed probe, never a pass.
+        assert probe(code, PROBE_ALLOWED_HOSTS='other.invalid,anymsg.example.invalid', **settings) == 1
+    finally:
+        server.should_exit = True; thread.join(timeout=10); listener.close()
+    assert probe(code, PROBE_ALLOWED_HOSTS='anymsg.example.invalid', **settings) == 1
+
+
+def test_gateway_healthcheck_uses_the_public_host_and_configured_port():
+    code, arguments = healthcheck('gateway')
+    command = document('deploy/compose.gateway.yaml')['services']['gateway']['command']
+    assert arguments == [command[command.index('--public-url') + 1], command[command.index('--port') + 1]]
+    with HostBoundServer('/healthz', {'gateway.example.invalid'}) as server:
+        assert probe(code, 'https://gateway.example.invalid/deedkit', str(server.port)) == 0
+        assert probe(code, 'https://other.example.invalid', str(server.port)) == 1
+    assert probe(code, 'https://gateway.example.invalid', str(server.port)) == 1
+
+
+@pytest.mark.parametrize('configured', [True, False])
+def test_calendar_healthcheck_uses_the_service_port_bind_and_allowed_hosts(tmp_path, configured):
+    code, arguments = healthcheck('calendar-api')
+    assert arguments == []
+    allowed = set()
+    with HostBoundServer('/health', allowed) as server:
+        # Without allowed_hosts the service accepts localhost/127.0.0.1 with its port.
+        allowed.add('calendar-api:13232' if configured else f'127.0.0.1:{server.port}')
+        settings = {'dsn': 'postgresql://synthetic-secret.invalid/calendar', 'port': server.port, 'bind': '0.0.0.0',
+                    **({'allowed_hosts': ['calendar-api:13232', 'localhost:13232']} if configured else {})}
+        (tmp_path / 'service').mkdir(mode=0o700)
+        (tmp_path / 'service/gateway.json').write_text(json.dumps(settings))
+        assert probe(code, FCS_DATA_DIR=str(tmp_path)) == 0
+        allowed.clear()
+        assert probe(code, FCS_DATA_DIR=str(tmp_path)) == 1
+    assert probe(code, FCS_DATA_DIR=str(tmp_path / 'missing')) == 1
+
+
+def synthetic_release_clone(tmp_path):
+    """A local clone: v1.2.3 is on origin/main, v1.2.5 only on an unmerged branch."""
+    clone = tmp_path / 'clone'
+    env = {'PATH': '/usr/bin:/bin', 'HOME': str(tmp_path), 'GIT_CONFIG_NOSYSTEM': '1',
+           'GIT_AUTHOR_NAME': 'Synthetic', 'GIT_AUTHOR_EMAIL': 'synthetic@example.invalid',
+           'GIT_COMMITTER_NAME': 'Synthetic', 'GIT_COMMITTER_EMAIL': 'synthetic@example.invalid'}
+    def git(*args):
+        return subprocess.run(['git', '-C', str(clone), *args], env=env, check=True, capture_output=True,
+                              text=True, timeout=30).stdout.strip()
+    clone.mkdir()
+    git('init', '--quiet', '--initial-branch=main')
+    commits = {}
+    for name in ('released', 'main-head'):
+        git('commit', '--quiet', '--allow-empty', '-m', name); commits[name] = git('rev-parse', 'HEAD')
+    git('update-ref', 'refs/remotes/origin/main', commits['main-head'])
+    git('tag', 'v1.2.3', commits['released'])
+    git('checkout', '--quiet', '-b', 'unmerged', commits['released'])
+    git('commit', '--quiet', '--allow-empty', '-m', 'unmerged'); commits['unmerged'] = git('rev-parse', 'HEAD')
+    git('tag', 'v1.2.5', commits['unmerged'])
+    return clone, commits
+
+
+def run_release_guard(guard, ref, version, release, sha=None):
+    clone, commits = release
+    # github.sha of a tag dispatch is the tag's commit; default to that.
+    tagged = {'1.2.3': commits['released'], '1.2.5': commits['unmerged']}.get(version, commits['main-head'])
+    env = {'PATH': '/usr/bin:/bin', 'HOME': str(clone.parent), 'GIT_CONFIG_NOSYSTEM': '1',
+           'VERSION': version, 'REF': ref, 'SHA': sha or tagged}
+    return subprocess.run(['bash', '-e', '-c', guard], cwd=clone, env=env, capture_output=True, timeout=30)
+
+
+def test_publish_workflow_guards_version_ref_and_uses_verified_artifact_oidc(tmp_path):
+    release_clone = synthetic_release_clone(tmp_path)
     checks = document('.github/workflows/checks.yml')
     verify = checks['jobs']['verify']
     steps = verify['steps']
@@ -289,15 +417,59 @@ def test_publish_workflow_guards_version_ref_and_uses_verified_artifact_oidc():
         assert any(step.get('with', {}).get('name') == artifact for step in publish['steps'])
         assert not any('checkout' in step.get('uses', '') for step in publish['steps'])
         assert not any('secrets.' in json.dumps(step) or 'NODE_AUTH_TOKEN' in json.dumps(step) for step in publish['steps'])
-        guard = jobs['tag']['steps'][0]['run']
-        allowed = ['refs/tags/v1.2.3'] + (['refs/heads/main'] if kind == 'npm' else [])
+        # Changed assertions (name kept as the Tiden identity): the guard is found by
+        # name, runs like a GitHub step (bash -e) in a synthetic clone whose release
+        # tag is on main, and npm from refs/heads/main is no longer asserted allowed.
+        guard = next(step for step in jobs['tag']['steps'] if step.get('name') == 'Require the version tag')['run']
+        allowed = ['refs/tags/v1.2.3']
         for ref in [*allowed, 'refs/heads/other', 'refs/tags/v1.2.4']:
-            result = subprocess.run(['/bin/sh', '-c', guard], env={'VERSION': '1.2.3', 'REF': ref},
-                                    capture_output=True, timeout=5)
+            result = run_release_guard(guard, ref, '1.2.3', release_clone)
             assert (result.returncode == 0) == (ref in allowed), (kind, ref)
         if kind == 'npm':
             assert jobs['checks']['with']['source_ref'] == 'refs/tags/v${{ inputs.version }}'
             assert publish['steps'][-1]['run'] == 'npm publish ./dist/*.tgz --access public --provenance'
+
+
+def test_checks_verify_fails_on_a_commit_it_did_not_test():
+    checks = document('.github/workflows/checks.yml')
+    trigger = checks.get('on', checks.get(True))['workflow_call']
+    assert trigger['outputs']['source_sha']['value'] == '${{ jobs.verify.outputs.source_sha }}'
+    verify = checks['jobs']['verify']
+    assert verify['outputs']['source_sha'] == '${{ steps.source.outputs.sha }}'
+    steps = verify['steps']
+    source = next(step for step in steps if step.get('id') == 'source')
+    assert 'echo "sha=$(git rev-parse HEAD)" >> "$GITHUB_OUTPUT"' in source['run']
+    index = next(i for i, step in enumerate(steps) if step.get('name', '').startswith('Require the tested source'))
+    guard = steps[index]
+    # Runs even after failed checks, after baseline evidence, before any artifact a release could use.
+    assert guard['if'] == '${{ always() }}'
+    assert steps[index - 1]['name'] == 'Retain test evidence even when a check fails'
+    assert [step['with']['name'] for step in steps[index + 1:]] == ['python-dist', 'npm-dist']
+    assert guard['env'] == {'SOURCE_SHA': '${{ steps.source.outputs.sha }}', 'EXPECTED_SHA': '${{ github.sha }}'}
+    for source_sha, passes in [('a' * 40, True), ('b' * 40, False), ('', False)]:
+        result = subprocess.run(['bash', '-e', '-c', guard['run']],
+                                env={'SOURCE_SHA': source_sha, 'EXPECTED_SHA': 'a' * 40}, capture_output=True)
+        assert (result.returncode == 0) == passes, source_sha
+
+
+@pytest.mark.parametrize('kind', ['pypi', 'npm'])
+def test_release_tag_must_be_the_dispatched_commit_already_on_main(tmp_path, kind):
+    steps = document(f'.github/workflows/publish-{kind}.yml')['jobs']['tag']['steps']
+    checkout, guard = steps
+    assert checkout['uses'].startswith('actions/checkout@') and re.fullmatch(r'[0-9a-f]{40}', checkout['uses'].split('@')[1])
+    assert checkout['with'] == {'persist-credentials': False, 'fetch-depth': 0}
+    assert guard['name'] == 'Require the version tag'
+    assert guard['env'] == {'VERSION': '${{ inputs.version }}', 'REF': '${{ github.ref }}', 'SHA': '${{ github.sha }}'}
+    release = synthetic_release_clone(tmp_path)
+    commits = release[1]
+    cases = [('refs/tags/v1.2.3', '1.2.3', None, True),
+             ('refs/heads/main', '1.2.3', commits['main-head'], False),  # npm no longer publishes from main
+             ('refs/tags/v1.2.5', '1.2.5', None, False),  # tag outside main
+             ('refs/tags/v1.2.3', '1.2.3', commits['main-head'], False),  # tag moved after dispatch
+             ('refs/tags/v1.2.9', '1.2.9', commits['main-head'], False)]  # tag missing
+    for ref, version, sha, passes in cases:
+        result = run_release_guard(guard['run'], ref, version, release, sha)
+        assert (result.returncode == 0) == passes, (kind, ref, version)
 
 
 @pytest.mark.parametrize('name', ['mcp.new-client', 'uvicorn.error', 'psycopg.pool.later',

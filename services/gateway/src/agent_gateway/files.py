@@ -15,6 +15,14 @@ from starlette.responses import JSONResponse, StreamingResponse
 from .policy import Denied, key_from_file
 
 
+WATCH_SECONDS = 0.25
+BACKEND_RECHECK_SECONDS = 1
+# A definitive backend denial ends a transfer at once. Rate limiting, overload,
+# timeouts and transport errors only end it once the backend has confirmed
+# nothing for this long.
+BACKEND_GRACE_SECONDS = 10
+
+
 def origin(value):
     parsed = urlsplit(value)
     return parsed.scheme, parsed.hostname, parsed.port or (443 if parsed.scheme == "https" else 80)
@@ -30,14 +38,17 @@ class FileResponse(StreamingResponse):
         owner = asyncio.current_task()
 
         async def monitor():
-            last_backend_check = time.monotonic()
+            confirmed = checked = time.monotonic()
             while True:
-                await asyncio.sleep(0.25)
+                await asyncio.sleep(WATCH_SECONDS)
                 try:
                     self.check()
-                    if self.backend_check and time.monotonic() - last_backend_check >= 1:
-                        await self.backend_check()
-                        last_backend_check = time.monotonic()
+                    if self.backend_check and time.monotonic() - checked >= BACKEND_RECHECK_SECONDS:
+                        if await self.backend_check():
+                            confirmed = time.monotonic()
+                        elif time.monotonic() - confirmed >= BACKEND_GRACE_SECONDS:
+                            raise Denied("backend_unavailable", 503)
+                        checked = time.monotonic()
                 except Exception:
                     # Also interrupts a blocked upstream read or client send.
                     # Headers may already be sent; abort instead of a second
@@ -119,8 +130,13 @@ class Tickets:
             "notice": "Temporary bearer link; current access and expiry are checked when downloading. Do not share or log.",
         }
 
-    def check(self, row):
-        if row["expires"] <= time.time():
+    def check(self, row, *, admission=False):
+        """Recheck the ticket's current policy and credential binding.
+
+        The TTL bounds admission only: a transfer that has started may outlive
+        it, but never a revocation of the principal, tool, backend or key.
+        """
+        if admission and row["expires"] <= time.time():
             raise Denied("not_found", 404)
         snapshot, agent, _ = self.policy.authorize_digest(row["key_digest"], "messages_get_attachment")
         if (
@@ -134,16 +150,24 @@ class Tickets:
         key_from_file(binding["key_file"], row["backend_key_digest"])
 
     async def check_backend(self, row):
-        # The existing download route validates the grant/key/resource for HEAD
-        # too. Use the independent metadata pool so bulk saturation cannot mask
-        # a backend ACL change. No body is consumed and no new grant is minted.
+        """True if the backend confirms access, False if it could not answer now.
+
+        Raises Denied for any other answer (401/403/404, redirects, unexpected
+        statuses). The existing download route validates the grant/key/resource
+        for HEAD too. Use the independent metadata pool so bulk saturation cannot
+        mask a backend ACL change. No body is consumed and no new grant is minted.
+        """
         try:
             async with asyncio.timeout(2):
                 async with self.clients.metadata["messaging"].stream("HEAD", row["path"]) as response:
-                    if response.status_code != 200:
-                        raise Denied("not_found", 404)
+                    status = response.status_code
         except (TimeoutError, httpx.HTTPError):
-            raise Denied("backend_unavailable", 503) from None
+            return False
+        if status == 200:
+            return True
+        if status == 429 or 500 <= status <= 599:
+            return False
+        raise Denied("not_found", 404)
 
     async def download(self, token, request):
         stack = AsyncExitStack()
@@ -154,7 +178,7 @@ class Tickets:
             if row is None:
                 raise Denied("not_found", 404)
             try:
-                self.check(row)
+                self.check(row, admission=True)
             except Denied:
                 raise Denied("not_found", 404) from None
             if request.headers.get("range") is not None:
@@ -175,19 +199,31 @@ class Tickets:
                 )
             if response.headers.get("content-length") not in (None, str(row["bytes"])):
                 raise Denied("backend_file_integrity_error", 503)
+            if row["bytes"] == 0 and not hmac.compare_digest(hashlib.sha256().hexdigest(), row["sha256"]):
+                # No byte could be held back below; refuse before the headers.
+                raise Denied("backend_file_integrity_error", 503)
             self.check(row)
 
             async def chunks():
-                digest, length = hashlib.sha256(), 0
+                # Hold back the latest chunk until the next one arrives or the
+                # whole file is verified, so a length or SHA-256 mismatch leaves
+                # the response short of Content-Length instead of complete.
+                digest, length, held = hashlib.sha256(), 0, b""
                 async for chunk in response.aiter_raw(65536):
                     self.check(row)
+                    if not chunk:
+                        continue
                     length += len(chunk)
                     if length > row["bytes"]:
                         raise RuntimeError("backend_file_integrity_error")
                     digest.update(chunk)
-                    yield chunk
+                    if held:
+                        yield held
+                    held = chunk
                 if length != row["bytes"] or not hmac.compare_digest(digest.hexdigest(), row["sha256"]):
                     raise RuntimeError("backend_file_integrity_error")
+                if held:
+                    yield held
 
             return FileResponse(
                 chunks(),

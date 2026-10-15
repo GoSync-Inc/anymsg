@@ -10,6 +10,7 @@ import time
 import httpx
 
 from .policy import Denied
+from .diagnostics import CONSUMPTION_OPERATIONS, consumption_failure, failure_details
 
 
 class Budget:
@@ -66,6 +67,7 @@ class Clients:
         self.deployment, self.transports = deployment, transports or {}
         self.metadata, self.bulk, self.budgets, self.bulk_budgets = {}, {}, {}, {}
         self.uploads, self.upload_budgets = {}, {}
+        self.waits, self.wait_budgets = {}, {}
         self.upload_rate = UploadRate()
         self.closed = False
 
@@ -75,7 +77,7 @@ class Clients:
                 target = self.deployment["backends"][module]
                 pools = [(self.metadata, 8), (self.bulk, 2)]
                 if module == "messaging":
-                    pools.append((self.uploads, 2))
+                    pools.extend([(self.uploads, 2), (self.waits, 2)])
                 for container, maximum in pools:
                     container[module] = httpx.AsyncClient(
                         base_url=target["url"].rstrip("/"),
@@ -89,13 +91,14 @@ class Clients:
                 self.budgets[module], self.bulk_budgets[module] = Budget(), Budget(2, 4)
                 if module == "messaging":
                     self.upload_budgets[module] = Budget(2, 4)
+                    self.wait_budgets[module] = Budget(2, 4)
             return self
         except BaseException:
             await self.__aexit__(None, None, None)
             raise
 
     async def __aexit__(self, *args):
-        for client in [*self.metadata.values(), *self.bulk.values(), *self.uploads.values()]:
+        for client in [*self.metadata.values(), *self.bulk.values(), *self.uploads.values(), *self.waits.values()]:
             await client.aclose()
         self.upload_rate.observations.clear()
         self.closed = True
@@ -106,8 +109,16 @@ class Clients:
         uploading = module == "messaging" and operation == "upload_file_chunk"
         if uploading:
             self.upload_rate.admit(key)
-        budget = self.upload_budgets[module] if uploading else self.budgets[module]
-        client = self.uploads[module] if uploading else self.metadata[module]
+        waiting = module == "messaging" and (
+            operation == "wait_for_subscription_events"
+            or operation == "send_message" and arguments.get("wait_s", 0) > 0
+        )
+        if uploading:
+            budget, client = self.upload_budgets[module], self.uploads[module]
+        elif waiting:
+            budget, client = self.wait_budgets[module], self.waits[module]
+        else:
+            budget, client = self.budgets[module], self.metadata[module]
         async with budget.slot():
             try:
                 async with (
@@ -116,15 +127,24 @@ class Clients:
                         "POST", "/v1/" + operation, headers={"Authorization": "Bearer " + key}, json=arguments
                     ) as response,
                 ):
-                    if response.status_code >= 500:
-                        raise Denied("backend_unavailable", 503)
-                    if response.status_code in (301, 302, 303, 307, 308):
-                        raise Denied("backend_unavailable", 503)
+                    failed = response.status_code >= 500 or response.status_code in (301, 302, 303, 307, 308)
                     body = bytearray()
+                    maximum = 65536 if failed else 8 * 1024 * 1024
                     async for chunk in response.aiter_bytes(65536):
-                        if len(body) + len(chunk) > 8 * 1024 * 1024:
+                        if len(body) + len(chunk) > maximum:
+                            if failed:
+                                body.clear()
+                                break
                             raise Denied("backend_response_too_large", 503)
                         body.extend(chunk)
+                    if failed:
+                        try:
+                            failure = json.loads(body)
+                        except (ValueError, UnicodeDecodeError, RecursionError):
+                            failure = None
+                        error = Denied("backend_unavailable", 503)
+                        error.detail = failure_details(response.status_code, failure, response.headers.get("x-request-id"))
+                        raise error
                     result = json.loads(body)
                     if not isinstance(result, dict):
                         raise Denied("backend_unavailable", 503)
@@ -132,8 +152,16 @@ class Clients:
                         error = Denied("backend_denied", response.status_code)
                         # Existing operation receipts/ACK errors remain visible, but
                         # never leak transport exceptions or arbitrary response text.
-                        error.detail = result
+                        error.detail = (
+                            consumption_failure(response.status_code, result, response.headers.get("x-request-id"))
+                            if module == "messaging" and operation in CONSUMPTION_OPERATIONS else result
+                        )
                         raise error
                     return result
-            except (httpx.HTTPError, ValueError, TimeoutError):
-                raise Denied("backend_unavailable", 503) from None
+            except (httpx.HTTPError, ValueError, TimeoutError) as failure:
+                error = Denied("backend_unavailable", 503)
+                error.detail = {"error": "backend_unavailable", "reason":
+                    "gateway_timeout" if isinstance(failure, (TimeoutError, httpx.TimeoutException))
+                    else "invalid_backend_response" if isinstance(failure, ValueError)
+                    else "backend_connection_failed"}
+                raise error from None

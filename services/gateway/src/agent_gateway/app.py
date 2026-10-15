@@ -82,7 +82,10 @@ def create_app(policy_path, public_url, *, transports=None):
             raise ValueError("catalog_cursors_not_supported")
         snapshot, agent, visible, details = await dispatch.discover(current_key.get())
         actions = details["actions"]
-        return ListToolsResult(tools=[Tool(**public(CATALOG[n], actions)) for n in visible])
+        return ListToolsResult(
+            tools=[Tool(**public(CATALOG[n], actions)) for n in visible],
+            _meta={"deedkit.discovery": details["discovery"]},
+        )
 
     async def call_tool(context, params):
         try:

@@ -32,6 +32,36 @@ type Provider struct {
 	cancel      context.CancelFunc
 	workers     sync.WaitGroup
 	failureOnce sync.Once
+	failure     atomic.Value // first failure code (string)
+}
+
+// Connection failures the Python collector retries or blocks on
+// (operational.CONNECTION_ERRORS). Other codes stay behind a generic one.
+var transportFailures = map[string]bool{"whatsapp_logged_out": true, "whatsapp_pairing_required": true, "provider_auth_failed": true, "whatsapp_identity_mismatch": true, "provider_disconnected": true, "provider_not_ready": true, "provider_initialization_failed": true, "durable_capture_failed": true, "capture_overload": true, "spool_full": true, "disk_reserve": true}
+
+// whatsmeow never reconnects after these events, and reconnecting from Python
+// would repeat them: a temporary ban or a session taken over by another client
+// needs the owner (reconnecting during a ban risks extending it), while an
+// outdated client needs an upgrade. The detail stays in .transport-failure.
+func connectionFailure(value any) (code, detail string) {
+	switch value.(type) {
+	case *events.TemporaryBan:
+		return "provider_auth_failed", "whatsapp_temporary_ban"
+	case *events.StreamReplaced:
+		return "provider_auth_failed", "whatsapp_session_replaced"
+	case *events.ClientOutdated:
+		return "provider_initialization_failed", "whatsapp_client_outdated"
+	}
+	return "", ""
+}
+
+// failureError reports the recorded failure when Python understands it, so a
+// terminal code is not replaced by a retryable generic one.
+func (p *Provider) failureError(fallback string) error {
+	if code, _ := p.failure.Load().(string); transportFailures[code] {
+		return errors.New(code)
+	}
+	return errors.New(fallback)
 }
 
 // All lifecycle clients use the same durability settings, including the two
@@ -46,10 +76,17 @@ func nativeClient(device *store.Device) *whatsmeow.Client {
 	return client
 }
 
-func (p *Provider) fail(code string) {
+func (p *Provider) fail(code string) { p.failDetail(code, "") }
+
+func (p *Provider) failDetail(code, detail string) {
 	p.ready.Store(false)
 	p.failureOnce.Do(func() {
-		_ = atomicPrivate(p.Config.EventsDirectory, ".transport-failure", mustJSON(map[string]any{"code": code, "observed_at": time.Now().UTC().Format(time.RFC3339Nano)}))
+		p.failure.Store(code)
+		value := map[string]any{"code": code, "observed_at": time.Now().UTC().Format(time.RFC3339Nano)}
+		if detail != "" {
+			value["detail"] = detail
+		}
+		_ = atomicPrivate(p.Config.EventsDirectory, ".transport-failure", mustJSON(value))
 		if p.cancel != nil {
 			p.cancel()
 		}
@@ -132,6 +169,9 @@ func (p *Provider) start(ctx context.Context) (result any, err error) {
 		case *events.LoggedOut:
 			p.fail("whatsapp_logged_out")
 			return false
+		case *events.TemporaryBan, *events.StreamReplaced, *events.ClientOutdated:
+			p.failDetail(connectionFailure(e))
+			return false
 		case *events.Disconnected:
 			p.ready.Store(false)
 		case *events.Message:
@@ -178,12 +218,17 @@ func (p *Provider) start(ctx context.Context) (result any, err error) {
 	if e = p.Client.ConnectContext(child); e != nil {
 		return nil, errors.New("provider_initialization_failed")
 	}
+	return p.awaitConnected(child, connected, 60*time.Second)
+}
+
+func (p *Provider) awaitConnected(ctx context.Context, connected <-chan struct{}, timeout time.Duration) (any, error) {
 	select {
 	case <-connected:
 		return map[string]any{"ready": true}, nil
-	case <-child.Done():
-		return nil, errors.New("provider_disconnected")
-	case <-time.After(60 * time.Second):
+	case <-ctx.Done():
+		// A failure during connect (e.g. logout or ban) cancels ctx; report it.
+		return nil, p.failureError("provider_disconnected")
+	case <-time.After(timeout):
 		return nil, errors.New("provider_initialization_failed")
 	}
 }
@@ -194,6 +239,7 @@ func (p *Provider) prepareCapture() error {
 	if err != nil {
 		return err
 	}
+	sweepNativeTemp(p.Config)
 	return p.replayPending()
 }
 
@@ -263,7 +309,9 @@ func (p *Provider) handle(ctx context.Context, r request, emit func(any) error) 
 		return p.start(ctx)
 	}
 	if !p.ready.Load() {
-		return nil, errors.New("provider_not_ready")
+		// After a failure the process stays up; the next request tells Python
+		// why (e.g. a replaced session must block, not reconnect).
+		return nil, p.failureError("provider_not_ready")
 	}
 	policy, e := p.policy()
 	if e != nil {
@@ -300,7 +348,9 @@ func (p *Provider) handle(ctx context.Context, r request, emit func(any) error) 
 		for _, m := range messages {
 			value, e := NormalizeMessage(m, p.owner(), p.Capture.OwnerLID)
 			if e != nil {
-				return nil, e
+				// A retained revision the archive cannot represent must not make
+				// the whole chat unreadable; it is omitted from this page.
+				continue
 			}
 			normalized = append(normalized, value)
 		}
@@ -374,7 +424,16 @@ func runLane(ctx context.Context, p *Provider, in io.Reader, out io.Writer, allo
 				return e
 			}
 		} else if e = emit(map[string]any{"id": r.ID, "result": result}); e != nil {
-			return e
+			// An oversized result was never written, so the pipe is still
+			// synchronized. Answer a read (e.g. a large dialogs catalog) with an
+			// error frame, as the Node lane does, instead of ending the native
+			// process. A mutation keeps the lane-exit unknown outcome.
+			if e.Error() != "provider_response_too_large" || r.Method == "send_text" || r.Method == "messenger_operation" {
+				return e
+			}
+			if e = emit(map[string]any{"id": r.ID, "error": "provider_response_too_large"}); e != nil {
+				return e
+			}
 		}
 	}
 	return scanner.Err()
@@ -409,12 +468,15 @@ func (p *Provider) handleMessage(e *events.Message) error {
 	}
 	unwrapped := unwrap(e)
 	if unwrapped.Message.GetProtocolMessage().GetHistorySyncNotification() != nil {
-		return p.Capture.EnqueueHistory(unwrapped)
+		if err = p.Capture.EnqueueHistory(unwrapped); skippableCapture(err) {
+			return p.Capture.skip(err)
+		}
+		return err
 	}
 	if !policy.Allows(LegacyChatID(e.Info.Chat)) {
 		return nil
 	}
-	return p.Capture.Put(e, "live")
+	return p.Capture.putOrSkip(e, "live")
 }
 
 func (p *Provider) retryAllowed(receipt *events.Receipt) bool {
