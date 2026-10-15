@@ -5,11 +5,16 @@ on:
       version:
         description: Version matching the selected vX.Y.Z tag
         required: true
-        default: '0.9.16'
+        default: '0.9.18'
+      verify_only:
+        description: Check OIDC trust without publishing any package
+        type: boolean
+        default: false
 permissions:
   contents: read
 jobs:
   tag:
+    if: ${{ !inputs.verify_only }}
     runs-on: ubuntu-latest
     steps:
       - name: Require the version tag
@@ -33,3 +38,15 @@ jobs:
       - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
         with: {name: python-dist, path: dist}
       - uses: pypa/gh-action-pypi-publish@dc37677b2e1c63e2034f94d8a5b11f265b73ba33 # release/v1
+  verify-trust:
+    if: ${{ inputs.verify_only && github.ref == 'refs/heads/main' }}
+    runs-on: ubuntu-latest
+    environment: pypi
+    permissions:
+      contents: read
+      id-token: write
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4
+        with: {persist-credentials: false}
+      - name: Verify publisher identity without uploading
+        run: python3 scripts/verify_publisher_trust.py pypi

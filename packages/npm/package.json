@@ -29,12 +29,12 @@
   "author": "GoSync",
   "repository": {
     "type": "git",
-    "url": "git+https://github.com/GoSync-Inc/anymsg.git",
+    "url": "git+https://github.com/GoSync-Inc/deedkit.git",
     "directory": "packages/npm"
   },
-  "homepage": "https://github.com/GoSync-Inc/anymsg#readme",
+  "homepage": "https://github.com/GoSync-Inc/deedkit#readme",
   "bugs": {
-    "url": "https://github.com/GoSync-Inc/anymsg/issues"
+    "url": "https://github.com/GoSync-Inc/deedkit/issues"
   },
   "keywords": [
     "mcp",

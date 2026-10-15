@@ -1,8 +1,8 @@
 # DeedKit specifications and verification in Tiden
 
-This is the acceptance plan for the migration, not a declaration that the new
-modules have been delivered. The existing AnyMsg GitHub repository and Tiden
-product remain the authority. A Git worktree is another checkout of that same
+This document defines migration acceptance and evidence boundaries. Gateway,
+calendar and calls are integrated in this same repository alongside messaging.
+The repository is now DeedKit; its GitHub identity and Tiden product are retained. A Git worktree is another checkout of that same
 repository; it does not establish a second product or repository connection.
 
 ## How changes reach Tiden
@@ -33,17 +33,13 @@ not advance a drift watermark just to dismiss a real unprocessed change.
 ## Product areas
 
 Preserve the existing eleven messaging components, specification IDs, test IDs,
-suite identities and historical source anchors. Add the following logical areas
-as their code is integrated: **Platform Gateway**, **Family Calendar**, **Voice
-Calls**, and **Platform Integration & Operations**. These are proposed names,
-not claims that components have been created. Component metadata is global in
-the installed CLI; do not assume an intent branch isolates component edits.
+suite identities and historical source anchors. The integration adds the following logical areas: **Platform Gateway**, **Family Calendar**, **Voice
+Calls**, and **Platform Integration & Operations**. These four components are registered in the existing product.
+Component metadata is global in the installed CLI; do not assume an intent branch isolates component edits.
 
 Existing messaging gateway specs still describe the messaging backend. They do
-not automatically cover the new platform gateway. Calendar/calls tests already
-exist in their source projects; inspect and reuse their assertions rather than
-recreating nominal tests. Their presence outside this repository does not make
-them part of its CI or Tiden coverage.
+not automatically cover the new platform gateway. Calendar/calls tests are imported with their source and run in this repository's CI. Review the assertions before linking any additional behavior; a file
+anchor alone is not coverage.
 
 ## Behavior and proof matrix
 
@@ -61,7 +57,7 @@ whole stated contract.
 | G4 Events | Backend subscription owner, cursor and ACK identity survive routing and gateway-key rotation. Passive reads do not acknowledge events. | Seed events and two backend identities, rotate only the gateway key, verify pending events and exact cursor/ACK state. Prove no loss or replay caused by the migration. Do not claim new delivery guarantees absent from the backend. |
 | G5 Lifecycle | The real SDK transport starts and stops cleanly; unsupported SSE is explicit. | Run initialize/list/call with the actual SDK, test GET `/mcp` rejection, bounded request bodies, shutdown and closed connection pools. Mocks of domain responses are acceptable; replacing the MCP transport is not. |
 | G6 Isolation | Slow calls and bulk files cannot monopolize message/calendar capacity. | Same-data direct API, gateway REST and MCP measurements: p50/p95, explicit budgets, at least 1,000 requests in three runs, including contention. Keep measured results, not inferred PASS. |
-| G7 Actions (later increment) | Permission for one action never enables a neighboring action in a generic operation tool. | Permit rename-group and reject leave-group within the same category, including aliases, preview/execute revocation and digest mismatch. Keep generic mutation tools unexposed until this is proved. |
+| G7 Actions | Permission for one action never enables a neighboring action in a generic operation tool. | Permit rename-group and reject leave-group within the same category, including aliases, preview/execute revocation and digest mismatch. Keep generic mutation tools unexposed until this is proved. |
 | C1 Calendar identity | Connections, members, family roles and agent grants are distinct; group administration does not imply access to a private calendar. | Existing source tests `test_group_admin_cannot_see_ungranted_private_calendar`, `test_calendar_list_intersects_connection_member_and_agent_scopes` and auth account-binding tests. Extend with cross-family/principal transport cases. |
 | C2 Calendar privacy | Busy-only access hides event details and opaque provider identifiers consistently. | Existing `test_busy_only_hides_titles_in_all_agenda_rows` and REST/MCP parity assertions. Check slots, errors, caches and receipts as applicable, not just one agenda row. |
 | C3 Availability | Missing, stale, partial or unbound required sources never become verified free time. | Existing `test_unknown_required_source_never_yields_verified_free_slot`; add all coverage states and mixed-provider windows. Synthetic tests do not prove complete real family coverage. |

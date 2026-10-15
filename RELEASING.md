@@ -3,7 +3,7 @@
 The public repository is a fresh source export, not the Personal OS git history.
 Never publish correspondence, operational state, backups, session data or tokens.
 Python and npm distribution versions must match `messaging_service.__version__`.
-The current source version is 0.9.16 (experimental), with PostgreSQL schema 26.
+The current source version is 0.9.18 (experimental), with PostgreSQL schema 27.
 The published npm/PyPI release remains 0.9.9 until a separate registry release.
 Sending is implemented in the source with explicit account opt-in and per-key
 permissions; see [SENDING.md](SENDING.md).
@@ -18,7 +18,7 @@ permissions; see [SENDING.md](SENDING.md).
    tarball through `npm publish --access public`, completing the registry's
    owner authentication/2FA flow. Do not put OTPs or tokens in an issue/chat.
 5. After that initial npm package exists, configure its Trusted Publisher for
-   `GoSync-Inc/anymsg`, workflow `publish-npm.yml`, environment `npm`. Select
+   `GoSync-Inc/deedkit`, workflow `publish-npm.yml`, environment `npm`. Select
    direct publishing permission if using this workflow (not staged-only).
    A new npm publisher must successfully publish within two days or its
    configuration expires. Validate it with the next reviewed patch release;
@@ -32,7 +32,7 @@ At https://pypi.org/manage/account/publishing/ add a **pending publisher**:
 
 - PyPI project: `anymsg`
 - GitHub owner: `GoSync-Inc`
-- Repository: `anymsg`
+- Repository: `deedkit`
 - Workflow filename: `publish-pypi.yml`
 - Environment: `pypi`
 
@@ -54,3 +54,11 @@ Do not run publication on a pull request from an untrusted contributor.
 
 Official guides: [PyPI pending publishers](https://docs.pypi.org/trusted-publishers/creating-a-project-through-oidc/)
 and [npm trusted publishers](https://docs.npmjs.com/trusted-publishers/).
+
+## Check publisher trust without publishing
+
+Dispatch the existing registry workflow on `main` with `verify_only=true`.
+It exchanges the workflow identity for a short-lived registry credential, keeps
+it only in process memory, and records a sanitized success/failure result. It
+does not build, upload, stage, tag or change a version. This confirms the OIDC
+binding after a repository rename; package release verification remains separate.
