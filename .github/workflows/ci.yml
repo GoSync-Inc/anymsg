@@ -14,6 +14,9 @@ on:
         default: ''
 permissions:
   contents: read
+concurrency:
+  group: ci-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: true
 jobs:
   checks:
     uses: ./.github/workflows/checks.yml
@@ -21,3 +24,27 @@ jobs:
       source_ref: ${{ inputs.source_ref || '' }}
       tiden_branch: ${{ inputs.tiden_branch || '' }}
     secrets: inherit
+  native:
+    uses: ./.github/workflows/whatsmeow.yml
+    with:
+      source_ref: ${{ inputs.source_ref || '' }}
+  images:
+    uses: ./.github/workflows/images.yml
+    with:
+      source_ref: ${{ inputs.source_ref || '' }}
+  gate:
+    name: CI gate
+    needs: [checks, native, images]
+    if: ${{ always() }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 2
+    steps:
+      - name: Require every verification job
+        env:
+          CHECKS_RESULT: ${{ needs.checks.result }}
+          NATIVE_RESULT: ${{ needs.native.result }}
+          IMAGES_RESULT: ${{ needs.images.result }}
+        run: |
+          test "$CHECKS_RESULT" = success
+          test "$NATIVE_RESULT" = success
+          test "$IMAGES_RESULT" = success
