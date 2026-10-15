@@ -7,8 +7,8 @@ queues. Tiden holds maintained behaviour specs and test evidence; its `Active`
 status does not mean a feature passed live acceptance.
 
 Reviewed **2026-10-15** against main
-[`790eaea`](https://github.com/GoSync-Inc/deedkit/commit/7c98979), merged PRs,
-open PRs #24/#26/#27/#28/#29 and the agent-interface remediation branch.
+[`e5e53d1`](https://github.com/GoSync-Inc/deedkit/commit/e5e53d1), including merged production PRs #27/#30,
+open PRs #24/#26/#28/#29 and the agent-interface remediation PR #31.
 The [audit matrix](docs/quality/agent-interface-audit-2026-10-15.md) maps each
 reported defect to its source change and remaining acceptance. This is a source review, not a new
 provider, production or off-site recovery test. GitHub Issues had no open items;
