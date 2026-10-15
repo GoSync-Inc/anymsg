@@ -81,6 +81,41 @@ def test_message_channel_exclusion_precedes_fuzzy_fallback_and_binds_cursor(seed
         authorized(s,a,'search',search,exclude_channels=1)
 
 
+@pytest.mark.parametrize('stable_ids',[False,True],ids=['short-id','stable-id'])
+@pytest.mark.parametrize('order',['asc','desc'])
+def test_archive_channel_exclusion_cursor_keeps_exclusive_before_boundary(seeded,stable_ids,order):
+    from starlette.testclient import TestClient
+    from messaging_service.app import create_app
+    from messaging_service.envelope import stable_id
+    from test_conversation_queries import add
+    s,a,b=seeded
+    ids=sorted(stable_id('msg','synthetic-cursor',str(n)) if stable_ids else 'cursor-'+str(n)
+        for n in range(4))
+    with s.pool.connection() as c:
+        c.execute("UPDATE chats SET chat_type='private' WHERE id='telegram-demo-chat'")
+        for n,mid in enumerate(ids):add(c,mid,str(100+n),body='paginationfixture')
+    options={'query':'paginationfixture','view':'archive','exclude_channels':True,'order':order}
+    first=s.search(b,**options,limit=2)
+    cursor=first['next_cursor']
+    assert cursor.startswith('q1.')
+    assert (len(cursor)>256) is stable_ids
+    anchor=ids[1] if order=='asc' else ids[2]
+    expected_before=sorted([mid for mid in ids if mid<anchor],reverse=order=='desc')
+    expected_after=[mid for mid in ids if mid>anchor] if order=='asc' else expected_before
+    with TestClient(create_app(s,['testserver'])) as client:
+        headers={'Authorization':'Bearer '+b,'Accept':'application/json, text/event-stream'}
+        for boundary,expected in [('before',expected_before),('after',expected_after)]:
+            params={**options,boundary:cursor}
+            assert [row['id'] for row in s.search(b,**params)['items']]==expected
+            rest=client.post('/v1/search',headers=headers,json=params)
+            assert rest.status_code==200,rest.text
+            assert [row['id'] for row in rest.json()['items']]==expected
+            rpc=client.post('/mcp',headers=headers,json={'jsonrpc':'2.0','id':1,'method':'tools/call',
+                'params':{'name':'search','arguments':params}}).json()
+            assert 'error' not in rpc and not rpc['result'].get('isError'),rpc
+            assert [row['id'] for row in rpc['result']['structuredContent']['items']]==expected
+
+
 def test_new_update_consumer_can_start_now_but_existing_receipts_survive_rejection(seeded):
     s,a,b=seeded
     page=authorized(s,a,'get_updates',get_updates,'new-now',start_from='now')

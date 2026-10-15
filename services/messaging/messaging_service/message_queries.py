@@ -90,7 +90,7 @@ def search(store,c,p,query='',account='',chat='',sender='',from_time='',to_time=
     plan=compile_query(query,query_mode,search_language)
     if order not in ('asc','desc','relevance') or type(fuzzy) is not bool:
         raise APIError('invalid_filter')
-    valid_text(after,4096);valid_text(before,4096 if conversation else 256)
+    valid_text(after,4096);valid_text(before,4096)
     if after and before or before and order=='relevance':raise APIError('invalid_filter')
     if fuzzy and (query_mode!='all' or not re.fullmatch(r'\w{3,64}',query,flags=re.UNICODE)):
         raise APIError('invalid_fuzzy_query')
@@ -163,7 +163,7 @@ def search(store,c,p,query='',account='',chat='',sender='',from_time='',to_time=
                     cursor_clause='WHERE (sent_at,source_order,id)'+('<' if before or order=='desc' else '>')+'(%s,%s,%s)'
                     cursor_args=[at,position['source_order'],mid]
                 else:
-                    cursor_clause='WHERE (sent_at,id)'+('<' if order=='desc' else '>')+'(%s,%s)'
+                    cursor_clause='WHERE (sent_at,id)'+('<' if before or order=='desc' else '>')+'(%s,%s)'
                     cursor_args=[at,mid]
         else:
             if order=='relevance' or conversation or exclude_channels:raise APIError('invalid_cursor')
