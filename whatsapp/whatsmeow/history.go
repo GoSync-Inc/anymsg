@@ -126,15 +126,17 @@ func (s *CaptureStore) EnqueueHistory(e *events.Message) error {
 	if notif == nil {
 		return nil
 	}
+	// A notification outside the bounded history contract is permanently
+	// invalid; only a full job queue below is (recoverable) overload.
 	if (len(notif.GetInitialHistBootstrapInlinePayload()) == 0 && notif.GetFileLength() == 0) || notif.GetFileLength() > maxCompressedHistory || len(notif.GetInitialHistBootstrapInlinePayload()) > maxCompressedHistory {
-		return errors.New("capture_overload")
+		return errors.New("invalid_history_notification")
 	}
 	wire, err := proto.Marshal(e.RawMessage)
 	if err != nil {
 		return err
 	}
 	if len(wire) > 512<<10 {
-		return errors.New("capture_overload")
+		return errors.New("invalid_history_notification")
 	}
 	var n int
 	if err = s.db.QueryRow("SELECT COUNT(*) FROM history_jobs").Scan(&n); err != nil {
@@ -224,7 +226,10 @@ func (p *Provider) captureHistory(data *waHistorySync.HistorySync) error {
 	for _, conv := range data.GetConversations() {
 		chat, err := types.ParseJID(conv.GetID())
 		if err != nil {
-			return errors.New("invalid_history_chat")
+			if err = p.Capture.skip(errors.New("invalid_history_chat")); err != nil {
+				return err
+			}
+			continue
 		}
 		policy, err := p.policy()
 		if err != nil {
@@ -247,8 +252,11 @@ func (p *Provider) captureHistory(data *waHistorySync.HistorySync) error {
 				break
 			}
 			wm := item.GetMessage()
-			if wm == nil || wm.GetKey().GetID() == "" || wm.GetMessageTimestamp() == 0 {
-				return errors.New("invalid_history_message")
+			if wm == nil || wm.GetKey().GetID() == "" || wm.GetMessageTimestamp() == 0 || wm.GetMessageTimestamp() > maxEnvelopeUnix {
+				if err = p.Capture.skip(errors.New("invalid_history_message")); err != nil {
+					return err
+				}
+				continue
 			}
 			var message *events.Message
 			if wm.GetMessage() == nil && wm.GetMessageStubType() != 0 {
@@ -256,10 +264,13 @@ func (p *Provider) captureHistory(data *waHistorySync.HistorySync) error {
 			} else {
 				message, err = p.Client.ParseWebMessage(chat, wm)
 				if err != nil {
-					return errors.New("invalid_history_message")
+					if err = p.Capture.skip(errors.New("invalid_history_message")); err != nil {
+						return err
+					}
+					continue
 				}
 			}
-			if err = p.Capture.Put(message, "history"); err != nil {
+			if err = p.Capture.putOrSkip(message, "history"); err != nil {
 				return err
 			}
 		}

@@ -372,13 +372,14 @@ func NormalizeMessage(e *events.Message, owner types.JID, ownerAliases ...types.
 			if meta.Bytes >= 0 {
 				size = meta.Bytes
 			}
-		} else if e.IsViewOnce {
+		} else if e.IsViewOnce || err.Error() == "unsupported_media_type" {
+			// View-once content (also a nested wrapper) is never retained.
 			media = ""
 			filename = nil
 			mime = nil
 			size = nil
 		} else {
-			return nil, err
+			return nil, errors.New("invalid_provider_media")
 		}
 	}
 	// Python counts the body in code points and rejects NUL. Keep the archived

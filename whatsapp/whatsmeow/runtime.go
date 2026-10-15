@@ -300,7 +300,9 @@ func (p *Provider) handle(ctx context.Context, r request, emit func(any) error) 
 		for _, m := range messages {
 			value, e := NormalizeMessage(m, p.owner(), p.Capture.OwnerLID)
 			if e != nil {
-				return nil, e
+				// A retained revision the archive cannot represent must not make
+				// the whole chat unreadable; it is omitted from this page.
+				continue
 			}
 			normalized = append(normalized, value)
 		}
@@ -409,12 +411,15 @@ func (p *Provider) handleMessage(e *events.Message) error {
 	}
 	unwrapped := unwrap(e)
 	if unwrapped.Message.GetProtocolMessage().GetHistorySyncNotification() != nil {
-		return p.Capture.EnqueueHistory(unwrapped)
+		if err = p.Capture.EnqueueHistory(unwrapped); skippableCapture(err) {
+			return p.Capture.skip(err)
+		}
+		return err
 	}
 	if !policy.Allows(LegacyChatID(e.Info.Chat)) {
 		return nil
 	}
-	return p.Capture.Put(e, "live")
+	return p.Capture.putOrSkip(e, "live")
 }
 
 func (p *Provider) retryAllowed(receipt *events.Receipt) bool {

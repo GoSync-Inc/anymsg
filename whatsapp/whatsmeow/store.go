@@ -84,10 +84,45 @@ func OpenCapture(c Config) (*CaptureStore, error) {
 		db.Close()
 		return nil, e
 	}
+	// Content-free counters only: one row per fixed reason code.
+	if _, e = db.Exec(`CREATE TABLE IF NOT EXISTS capture_skips(code TEXT PRIMARY KEY,count INTEGER NOT NULL,last_ms INTEGER NOT NULL)`); e != nil {
+		db.Close()
+		return nil, e
+	}
 	s := &CaptureStore{db: db, Config: c, MaxEntries: 200000, MaxSpoolBytes: 256 << 20, MaxSpoolEntries: 10000}
 	return s, nil
 }
 func (s *CaptureStore) Close() error { return s.db.Close() }
+
+// Provider data that can never satisfy the archive contract. Such a message is
+// acknowledged and counted under its fixed code instead of stopping capture of
+// the whole account and being redelivered forever. Store, disk, spool and
+// identity failures are never in this set.
+var skippedCaptureCodes = map[string]bool{"invalid_provider_message": true, "unsupported_chat": true, "invalid_provider_media": true, "invalid_history_notification": true, "invalid_history_chat": true, "invalid_history_message": true}
+
+func skippableCapture(err error) bool { return err != nil && skippedCaptureCodes[err.Error()] }
+
+// skip records only the reason code; no message content, ID or chat is kept.
+func (s *CaptureStore) skip(err error) error {
+	code := err.Error()
+	if !skippedCaptureCodes[code] {
+		return err
+	}
+	if _, e := s.db.Exec("INSERT INTO capture_skips(code,count,last_ms)VALUES(?,1,?)ON CONFLICT(code)DO UPDATE SET count=count+1,last_ms=excluded.last_ms", code, time.Now().UnixMilli()); e != nil {
+		return e
+	}
+	_ = json.NewEncoder(os.Stderr).Encode(map[string]any{"state": "capture_skipped", "reason": code})
+	return nil
+}
+
+// putOrSkip durably captures a message or counts a permanently invalid one.
+func (s *CaptureStore) putOrSkip(e *events.Message, origin string) error {
+	err := s.Put(e, origin)
+	if skippableCapture(err) {
+		return s.skip(err)
+	}
+	return err
+}
 
 const maxOutgoingRetryBytes = 32 << 20
 const maxOutgoingRetryMessages = 1000
@@ -238,8 +273,14 @@ func (s *CaptureStore) append(chat, id string, stamp int64, raw []byte, envelope
 	if err != nil {
 		return err
 	}
-	if len(data)+len(raw) > 512<<10 {
+	if len(data) > maxCaptureEnvelopeBytes {
 		return errors.New("capture_too_large")
+	}
+	if len(data)+len(raw) > maxCaptureEnvelopeBytes {
+		// The bounded archive envelope always fits; oversized native evidence
+		// (e.g. a long quoted message) is not retained locally. The capture is
+		// still exported, but cannot later serve pages, media or edit lookups.
+		raw = []byte{}
 	}
 	// Observation time/origin do not turn a history replay into a new revision.
 	canonical := map[string]any{}
