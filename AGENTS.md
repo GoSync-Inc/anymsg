@@ -15,3 +15,14 @@ image overlay. Prepare and inspect the candidate before applying it. Preserve
 existing state, sessions and Compose topology; do not prune shared Docker data
 to make space. Changing a deployed service requires the applicable live-session
 authority; synthetic CI is not that authority.
+
+Tiden holds the product specs and test evidence; read TIDEN-CI.md. Never
+rename, move or re-parametrize existing tests (path and name are Tiden IDs)
+or the seven `anymsg-ci::*` checks. For product changes run the intent loop:
+`tiden intent start "<objective>" --promise ...` before editing, then push,
+open the PR with the printed Tiden branch link in its body, run
+`tiden intent link-pr <url>` and `tiden intent close` before asking for review.
+Merging the Tiden branch is the owner's decision. Use `tiden intent skip` for
+questions and read-only work, and `--format json` when parsing CLI output.
+Without a local CLI, run `scripts/tiden_agent_setup.sh` when `TIDEN_API_TOKEN`
+is set; otherwise say in the PR that its specs were not updated.
