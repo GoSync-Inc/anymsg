@@ -280,6 +280,26 @@ def test_calendar_window_budget_is_shared_by_resources(expansions):
     assert len(expansions) == EVENT_LIMIT + 1
 
 
+def test_caldav_window_is_sent_in_utc_whatever_the_session_zone():
+    from zoneinfo import ZoneInfo
+    from family_calendar.service.providers import Providers
+
+    sent = []
+
+    class Adapter:
+        async def read_window(self, collection, start, end):
+            sent.append((start, end))
+            return {"resources": []}
+
+    providers = Providers(None, None)
+    providers.adapters["conn"] = Adapter()
+    cal = {"connection_id": "conn", "provider": "icloud", "target": "t", "ref": "cal", "timezone": "UTC"}
+    local = ZoneInfo("Asia/Makassar")
+    window = (datetime(2026, 10, 19, 8, tzinfo=local), datetime(2026, 10, 20, 8, tzinfo=local))
+    assert asyncio.run(providers.read_window(cal, *window)) == []
+    assert sent == [("20261019T000000Z", "20261020T000000Z")]
+
+
 def _event(times):
     return (
         "BEGIN:VCALENDAR\r\nVERSION:2.0\r\nBEGIN:VEVENT\r\nUID:point\r\n"

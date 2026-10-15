@@ -282,8 +282,9 @@ class Providers:
     async def read_window(self, cal, start, end):
         adapter = await self.adapter(cal)
         if cal["provider"] == "icloud":
+            # timestamptz values arrive in the DB session zone; the CalDAV time-range is UTC.
             result = await adapter.read_window(
-                cal["target"], start.strftime("%Y%m%dT%H%M%SZ"), end.strftime("%Y%m%dT%H%M%SZ")
+                cal["target"], *(t.astimezone(timezone.utc).strftime("%Y%m%dT%H%M%SZ") for t in (start, end))
             )
             budget = expansion_budget()
             rows = [
