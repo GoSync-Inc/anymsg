@@ -430,6 +430,48 @@ def test_publish_workflow_guards_version_ref_and_uses_verified_artifact_oidc(tmp
             assert publish['steps'][-1]['run'] == 'npm publish ./dist/*.tgz --access public --provenance'
 
 
+def test_checks_verify_fails_on_a_commit_it_did_not_test():
+    checks = document('.github/workflows/checks.yml')
+    trigger = checks.get('on', checks.get(True))['workflow_call']
+    assert trigger['outputs']['source_sha']['value'] == '${{ jobs.verify.outputs.source_sha }}'
+    verify = checks['jobs']['verify']
+    assert verify['outputs']['source_sha'] == '${{ steps.source.outputs.sha }}'
+    steps = verify['steps']
+    source = next(step for step in steps if step.get('id') == 'source')
+    assert 'echo "sha=$(git rev-parse HEAD)" >> "$GITHUB_OUTPUT"' in source['run']
+    index = next(i for i, step in enumerate(steps) if step.get('name', '').startswith('Require the tested source'))
+    guard = steps[index]
+    # Runs even after failed checks, after baseline evidence, before any artifact a release could use.
+    assert guard['if'] == '${{ always() }}'
+    assert steps[index - 1]['name'] == 'Retain test evidence even when a check fails'
+    assert [step['with']['name'] for step in steps[index + 1:]] == ['python-dist', 'npm-dist']
+    assert guard['env'] == {'SOURCE_SHA': '${{ steps.source.outputs.sha }}', 'EXPECTED_SHA': '${{ github.sha }}'}
+    for source_sha, passes in [('a' * 40, True), ('b' * 40, False), ('', False)]:
+        result = subprocess.run(['bash', '-e', '-c', guard['run']],
+                                env={'SOURCE_SHA': source_sha, 'EXPECTED_SHA': 'a' * 40}, capture_output=True)
+        assert (result.returncode == 0) == passes, source_sha
+
+
+@pytest.mark.parametrize('kind', ['pypi', 'npm'])
+def test_release_tag_must_be_the_dispatched_commit_already_on_main(tmp_path, kind):
+    steps = document(f'.github/workflows/publish-{kind}.yml')['jobs']['tag']['steps']
+    checkout, guard = steps
+    assert checkout['uses'].startswith('actions/checkout@') and re.fullmatch(r'[0-9a-f]{40}', checkout['uses'].split('@')[1])
+    assert checkout['with'] == {'persist-credentials': False, 'fetch-depth': 0}
+    assert guard['name'] == 'Require the version tag'
+    assert guard['env'] == {'VERSION': '${{ inputs.version }}', 'REF': '${{ github.ref }}', 'SHA': '${{ github.sha }}'}
+    release = synthetic_release_clone(tmp_path)
+    commits = release[1]
+    cases = [('refs/tags/v1.2.3', '1.2.3', None, True),
+             ('refs/heads/main', '1.2.3', commits['main-head'], False),  # npm no longer publishes from main
+             ('refs/tags/v1.2.5', '1.2.5', None, False),  # tag outside main
+             ('refs/tags/v1.2.3', '1.2.3', commits['main-head'], False),  # tag moved after dispatch
+             ('refs/tags/v1.2.9', '1.2.9', commits['main-head'], False)]  # tag missing
+    for ref, version, sha, passes in cases:
+        result = run_release_guard(guard['run'], ref, version, release, sha)
+        assert (result.returncode == 0) == passes, (kind, ref, version)
+
+
 @pytest.mark.parametrize('name', ['mcp.new-client', 'uvicorn.error', 'psycopg.pool.later',
     'httpx.transport', 'httpcore.http11', 'telethon.client', 'personal_os.telegram.transport.new'])
 def test_new_library_logger_redacts_payload_arguments_exception_and_stack(name):

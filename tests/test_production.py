@@ -472,6 +472,20 @@ def test_ci_gate_fails_for_failed_cancelled_or_skipped_dependencies():
         assert (result.returncode == 0) == (checks == native == images == "success")
 
 
+def test_ci_gate_refuses_a_manual_baseline_of_another_revision():
+    workflow = yaml.safe_load((ROOT / ".github/workflows/ci.yml").read_text())
+    step = workflow["jobs"]["gate"]["steps"][0]
+    assert step["env"]["SOURCE_REF"] == "${{ inputs.source_ref || '' }}"
+    assert step["env"]["EXPECTED_SHA"] == "${{ github.sha }}"
+    green = {"CHECKS_RESULT": "success", "NATIVE_RESULT": "success", "IMAGES_RESULT": "success",
+             "EXPECTED_SHA": SHA}
+    for source_ref, passes in [("", True), (SHA, True), ("b" * 40, False), ("main", False),
+                               ("refs/tags/v1.2.3", False)]:
+        result = subprocess.run(["bash", "-e", "-c", step["run"]], env={**green, "SOURCE_REF": source_ref},
+                                capture_output=True)
+        assert (result.returncode == 0) == passes, source_ref
+
+
 def test_disk_pressure_prevents_source_fetch_and_build(tmp_path, monkeypatch):
     settings, calls, _ = fixture(tmp_path, monkeypatch)
     monkeypatch.setattr(p, "check_space", lambda directory: (_ for _ in ()).throw(p.Refused("insufficient disk")))
