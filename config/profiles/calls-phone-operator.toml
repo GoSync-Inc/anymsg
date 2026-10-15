@@ -1,0 +1,9 @@
+version = 1
+id = "calls-phone-operator"
+revision = 1
+[deployment]
+modules = ["calls"]
+connectors = ["calls-phone"]
+external = []
+[exposure]
+tools = ["platform_capabilities", "calls_capabilities", "calls_prepare_external_call", "calls_preflight_call", "calls_dial_call", "calls_stop_call", "calls_get_call_status", "calls_get_call_result", "calls_get_call_analysis", "calls_get_owner_requests", "calls_prepare_followup"]

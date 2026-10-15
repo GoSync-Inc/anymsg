@@ -54,6 +54,11 @@ def test_gateway_scoped_phone_preparation_needs_no_messaging(tmp_path):
         assert (
             brief["owner_principal"] == "alice" and app.state.service.list_calls() == []
         )
+        grok = call(c, "calls_prepare_external_call", {"brief": {**body,
+            "dialog_engine":"grok_realtime", "grok_voice":"rex"}})
+        assert grok["model"] == "grok-voice-3.0" and grok["grok_voice"] == "rex"
+        readiness = call(c, "calls_capabilities", {})["calling_readiness"]
+        assert readiness["channels"]["phone"]["provider_connection"] == "not_probed"
         result = c.post("/v1/calls_preflight_call", json={"brief_id": brief["id"]})
         assert (
             result.status_code == 409 and result.json()["error"] == "calling_disabled"

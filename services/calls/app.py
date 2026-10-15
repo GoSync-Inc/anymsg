@@ -19,13 +19,14 @@ from loguru import logger
 from pydantic import BaseModel, ConfigDict, Field, SecretStr
 
 from anymsg import AnyMsg, UnconfiguredArchive
-from core import ACTIVE, MODEL, PROMPT_VERSION, VOICES, BriefInput, ServiceError, VoiceService
+from core import ACTIVE, MODEL, GROK_MODEL, GROK_VOICES, PROMPT_VERSION, VOICES, BriefInput, ServiceError, VoiceService
 from control import control_key, create_control
 from agent_api import AgentAPI, AgentRegistry
 from learning import LearningWorker, ANALYZER_MODEL
 from supervisor import Supervisor, SUPERVISOR_MODEL
 from outbound import Outbound,CallingSettings,TwilioCalls,ExternalBrief
 from settings import Setup,read_private,write_private
+from call_errors import record_model_error
 from security import OwnerCredential, VoiceBoundary
 
 SOURCE = Path(__file__).resolve()
@@ -37,7 +38,8 @@ class Input(BaseModel):
 
 
 class Credentials(Input):
-    gemini: SecretStr = Field(min_length=1, max_length=512)
+    gemini: SecretStr | None = Field(default=None, min_length=1, max_length=512)
+    xai: SecretStr | None = Field(default=None, min_length=1, max_length=512)
 
 
 class Search(Input):
@@ -136,6 +138,11 @@ def create_app(data_dir=None, archive=None, control_token=None, reviewer=None, a
     archive_config = Path(os.environ.get('VOICE_ANYMSG_CONFIG', str(PRIVATE / 'anymsg.json')))
     archive = archive if archive is not None else AnyMsg.from_config(archive_config) if archive_config.exists() else UnconfiguredArchive()
     keys, session = {}, {}
+    def model_key(brief):
+        return keys.get('xai' if brief.get('dialog_engine')=='grok_realtime' else 'gemini')
+
+    def credential_status():
+        return {name:bool(keys.get(name)) for name in ('gemini','xai')}
     control_token=control_token or control_key(directory)
     lock = asyncio.Lock()
     learner=LearningWorker(service,lambda:keys.get('gemini'),reviewer=reviewer)
@@ -149,7 +156,7 @@ def create_app(data_dir=None, archive=None, control_token=None, reviewer=None, a
         from telegram_audio import TelegramCalls
         providers['telegram']=TelegramCalls({'socket':os.environ['VOICE_TELEGRAM_SOCKET'],
             'token_file':os.environ['VOICE_TELEGRAM_TOKEN_FILE']},service,lambda:keys.get('gemini'),supervisor)
-    outbound=Outbound(service,lambda:keys.get('gemini'),policy,providers)
+    outbound=Outbound(service,lambda:keys.get('gemini'),policy,providers,model_key=model_key)
     persist=os.environ.get('VOICE_PERSIST_CREDENTIALS')=='1'
     browser_enabled=os.environ.get('VOICE_BROWSER_ENABLED','1')=='1'
     if persist:
@@ -168,6 +175,9 @@ def create_app(data_dir=None, archive=None, control_token=None, reviewer=None, a
                 if service.get_call(identity)['channel']!='browser':await outbound.stop(identity,reason)
                 else:service.stop(identity, reason)
             return
+        # UI disconnect cleanup can race the model error callback. Keep the
+        # failure already observed instead of reclassifying it as owner_stop.
+        if session.get('end_reason')=='model_error':reason='model_error'
         session['end_reason'] = reason
         runner = session.get('runner')
         if runner:
@@ -237,9 +247,11 @@ def create_app(data_dir=None, archive=None, control_token=None, reviewer=None, a
         channels={'browser':'available' if browser_enabled else 'local_rehearsal_only'}
         for channel in ('telegram','whatsapp','phone','sip'):
             channels[channel]=('experimental_ready' if connected['telegram']['connected'] else 'not_connected') if channel=='telegram' else ('configured_needs_pilot' if connected['twilio']['configured'] else 'not_connected')
-        return {'credentials':{'gemini':bool(keys.get('gemini'))},'model':MODEL,'voices':VOICES,
+        return {'credentials':credential_status(),'model':MODEL,'voices':VOICES,
+                'voice_providers':{'gemini':{'model':MODEL,'voices':VOICES},
+                                   'xai':{'model':GROK_MODEL,'voices':GROK_VOICES,'scope':['browser','phone','sip']}},
                 'prompt_version':learned['prompt_version'] if learned else PROMPT_VERSION,'framework':'Pipecat 1.12.0', 'transport':'SmallWebRTC',
-                'dialog_engines':['gemini_live','gemini_live_flows'],
+                'dialog_engines':['gemini_live','gemini_live_flows','grok_realtime'],
                 'live_flows':{'scope':'browser_prototype','context_strategy':'APPEND','fixed_tools':True,
                               'dynamic_tools':False,'remote_context_reset':False,'custom_tts':False},
                 'analysis':{'automatic':True,'model':ANALYZER_MODEL,'audio_recorded':False},
@@ -254,7 +266,8 @@ def create_app(data_dir=None, archive=None, control_token=None, reviewer=None, a
         twilio=outbound.providers.get('twilio');telegram=outbound.providers.get('telegram')
         cfg=twilio.config if twilio else {}
         return {'enabled':outbound.settings.enabled,'allowed':outbound.settings.allowed,
-            'model_key_present':bool(keys.get('gemini')),'credential_storage':'private_server_file' if persist else 'memory_only',
+            'model_key_present':any(credential_status().values()),'model_credentials':credential_status(),
+            'credential_storage':'private_server_file' if persist else 'memory_only',
             'twilio':{'configured':bool(cfg.get('account_sid') and cfg.get('auth_token')),
                       **{k:cfg.get(k,'') for k in ('account_sid','phone_from','whatsapp_from','public_url','sip_from','sip_auth_username')}},
             'telegram':await telegram.probe() if telegram else {'connected':False,'error':'telegram_broker_not_configured'},
@@ -289,12 +302,12 @@ def create_app(data_dir=None, archive=None, control_token=None, reviewer=None, a
 
     @app.post('/api/credentials')
     async def credentials(body: Credentials):
-        key=body.gemini.get_secret_value().strip()
-        if not key:
-            raise HTTPException(422,'Введи ключ Gemini.')
-        keys['gemini']=key
+        supplied={name:value.get_secret_value().strip() for name in ('gemini','xai') if (value:=getattr(body,name)) is not None}
+        if not supplied or not all(supplied.values()):
+            raise HTTPException(422,'Введи API-ключ выбранной модели.')
+        keys.update(supplied)
         if persist:write_private(directory/'model-key.json',keys)
-        return {'credentials':{'gemini':True}}
+        return {'credentials':credential_status()}
 
     @app.delete('/api/credentials')
     async def forget():
@@ -305,7 +318,7 @@ def create_app(data_dir=None, archive=None, control_token=None, reviewer=None, a
             keys.clear()
             if persist:(directory/'model-key.json').unlink(missing_ok=True)
             app.state.learning_task=asyncio.create_task(learner.run(),name='voice-post-call-analysis')
-        return {'credentials':{'gemini':False}}
+        return {'credentials':credential_status()}
 
     @app.post('/api/context/search')
     async def search(body: Search):
@@ -413,15 +426,15 @@ def create_app(data_dir=None, archive=None, control_token=None, reviewer=None, a
     async def offer(body: Offer):
         from pipecat.transports.smallwebrtc.request_handler import SmallWebRTCRequest
         identity=body.requestData.call_id
-        if not keys.get('gemini'):
-            raise HTTPException(409,'Введи API-ключ Gemini в этом сервисе.')
         async with lock:
             if session or body.pc_id:
                 raise HTTPException(409,'Браузер уже подключён. Сначала останови разговор.')
             brief=service.get_call(identity)['brief']
             if brief['channel']!='browser':raise ServiceError('browser_brief_required')
+            key=model_key(brief)
+            if not key:
+                raise HTTPException(409,'Введи API-ключ выбранной модели в этом сервисе.')
             service.connecting(identity)
-            key=keys['gemini']
             session.update(call_id=identity,service=service,brief=brief,supervisor=supervisor)
 
             async def connected(connection):
@@ -438,10 +451,10 @@ def create_app(data_dir=None, archive=None, control_token=None, reviewer=None, a
                         raise
                     except TimeoutError:
                         reason='duration_limit'
-                    except Exception:
+                    except Exception as exc:
                         reason='model_error'
-                        connection.send_app_message({'label':'rtvi-ai','type':'server-message','data':{
-                            'kind':'error','message':'Модель или соединение недоступны. Проверь ключ, доступ к модели и Billing.'}})
+                        connection.send_app_message({'label':'rtvi-ai','type':'server-message',
+                            'data':record_model_error(session,exception=exc)})
                     finally:
                         service.stop(identity,reason)
                         try:
@@ -493,8 +506,10 @@ def create_app(data_dir=None, archive=None, control_token=None, reviewer=None, a
                                          outbound=outbound if os.environ.get('VOICE_EXTERNAL_MCP')=='1' else None,
                                          browser_url=os.environ.get('VOICE_BROWSER_URL','http://127.0.0.1:13842/'))
 
+    from readiness import calling_readiness
     app.state.agent_api=AgentAPI(service,AgentRegistry(agent_registry or os.environ.get('VOICE_AGENT_REGISTRY')),
-                                 control_start,control_stop,outbound)
+        control_start,control_stop,outbound,
+        readiness=lambda principal:calling_readiness(principal,outbound,credential_status(),browser_enabled))
 
     @app.post('/v1/{operation}')
     async def agent_operation(operation:str,request:Request):
@@ -557,7 +572,9 @@ def create_app(data_dir=None, archive=None, control_token=None, reviewer=None, a
             transport=FastAPIWebsocketTransport(websocket=socket,params=FastAPIWebsocketParams(
                 audio_in_enabled=True,audio_out_enabled=True,audio_out_sample_rate=8000,
                 audio_out_end_silence_secs=0,serializer=serializer))
-            await asyncio.wait_for(run_transport(transport,call['brief'],keys['gemini'],session),call['brief']['max_duration_secs'])
+            key=model_key(call['brief'])
+            if not key:raise ServiceError('model_key_required')
+            await asyncio.wait_for(run_transport(transport,call['brief'],key,session),call['brief']['max_duration_secs'])
             reason=session.get('end_reason',reason)
         except asyncio.CancelledError:
             reason=session.get('end_reason','owner_stop');raise
