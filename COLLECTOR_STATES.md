@@ -33,6 +33,7 @@ no live backlog, no recent live event; `quiet_but_healthy=true`), `receiving`,
 runs about every 15 seconds only while the provider session is open; older than
 60 seconds is `unconfirmed`. `last_live_event_at` includes receipts and read
 states, not only messages. It does not prove every provider callback arrived.
+The compact view carries only `liveness_state`; `detail=full` has the block.
 
 `alerts` contains `archive_version_conflicts` only while a conflict is unresolved
 (`active_conflicts`). The archive detail code itself stays recorded; without an
