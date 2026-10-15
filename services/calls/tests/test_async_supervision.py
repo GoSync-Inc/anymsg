@@ -4,7 +4,7 @@ from fastapi.testclient import TestClient
 
 from app import create_app
 from core import BriefInput, ServiceError, VoiceService
-from test_tasks import Archive, HEADERS
+from test_tasks import owner_headers, Archive, HEADERS
 from test_decision_workflow import delivery, answer
 
 
@@ -72,7 +72,7 @@ def test_pending_or_superseded_or_refused_decisions_cannot_create_callback(tmp_p
 
 def test_deferred_http_owner_inbox_and_continuation_are_local_only(tmp_path):
     app=create_app(tmp_path,Archive())
-    with TestClient(app) as client:
+    with TestClient(app, headers=owner_headers(tmp_path)) as client:
         store=app.state.service
         brief=store.prepare(BriefInput(goal='Уточнить доставку',counterparty='Поставщик',
             success_fields=['delivery_window','additional_cost'],approval_fields=['additional_cost']),[])

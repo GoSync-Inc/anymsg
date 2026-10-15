@@ -15,7 +15,7 @@ from pipecat.workers.runner import WorkerRunner
 
 import voice
 from app import create_app
-from test_tasks import Archive, BRIEF
+from test_tasks import owner_headers, Archive, BRIEF
 
 
 async def test_cancelled_peer_cleanup_does_not_block_next_browser_call(monkeypatch,tmp_path):
@@ -35,7 +35,7 @@ async def test_cancelled_peer_cleanup_does_not_block_next_browser_call(monkeypat
     async with app.router.lifespan_context(app):
         monkeypatch.setattr(app.state.rtc,'handle_web_request',handle)
         async with httpx.AsyncClient(transport=httpx.ASGITransport(app),base_url='http://testserver',
-            headers={'Origin':'http://testserver','X-Voice-Service':'1'}) as c:
+            headers={**owner_headers(tmp_path),'Origin':'http://testserver','X-Voice-Service':'1'}) as c:
             await c.post('/api/credentials',json={'gemini':'fixture-not-an-api-key'})
             brief=(await c.post('/api/briefs',json=BRIEF)).json()
             first=(await c.post('/api/calls/start',json={'brief_id':brief['id']})).json()
@@ -96,7 +96,7 @@ async def test_rtc_audio_tool_result_and_stop_release_connection(monkeypatch,tmp
     try:
         async with app.router.lifespan_context(app):
             async with httpx.AsyncClient(transport=httpx.ASGITransport(app),base_url='http://testserver',
-                headers={'Origin':'http://testserver','X-Voice-Service':'1'}) as c:
+                headers={**owner_headers(tmp_path),'Origin':'http://testserver','X-Voice-Service':'1'}) as c:
                 await c.post('/api/credentials',json={'gemini':'fixture-not-an-api-key'})
                 brief=(await c.post('/api/briefs',json={**BRIEF,'language':'id'})).json()
                 job=(await c.post('/api/calls/start',json={'brief_id':brief['id']})).json()
