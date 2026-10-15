@@ -1,6 +1,7 @@
 """Scoped message queries and presentation, separate from authentication/ACK."""
 from __future__ import annotations
 
+from .chat_queries import title_sql
 from .policy import scope_filter, targets
 from .search_query import (compile_query, coverage, cursor_binding, decode_cursor,
     encode_cursor, filter_values, fingerprint, output_options, shape_messages, valid_text)
@@ -13,7 +14,7 @@ JOINS = '''JOIN chats ch ON ch.id=m.chat AND ch.account=m.account
     LEFT JOIN message_revisions mr ON mr.message=m.id AND mr.revision=m.revision
     LEFT JOIN message_metadata mm ON mm.message=m.id AND mm.revision=m.revision'''
 META = '''nullif(sp.display_name,'') AS sender_name,nullif(sp.username,'') AS username,
-    ch.title AS chat_title,ch.chat_type,ch.provider_chat AS provider_chat_id,m.provider_id,
+    '''+title_sql('ch')+''' AS chat_title,ch.chat_type,ch.provider_chat AS provider_chat_id,m.provider_id,
     coalesce(mm.metadata,mr.snapshot->'metadata')->>'reply_to_provider_id' AS reply_to_provider_id,
     CASE WHEN jsonb_typeof(coalesce(mm.metadata,mr.snapshot->'metadata')->'forwarded')='boolean'
       THEN (coalesce(mm.metadata,mr.snapshot->'metadata')->>'forwarded')::boolean END AS forwarded,

@@ -13,16 +13,22 @@ def classified(error):
     return getattr(error,'code','temporarily_unavailable')
 
 
+EXPECTED={'invalid_utc_date':'ISO 8601 date-time with an offset, for example 2026-10-15T09:00:00Z',
+    'invalid_limit':'integer from 1 to 100; get_context limit and counts from 0/1 to 50'}
+
+
 def payload(error,operation='',request_id=None):
     code=classified(error)
     retry=code in ('query_timeout','service_busy','service_unavailable','temporarily_unavailable')
     info={'error':code,'request_id':request_id or uuid4().hex,'retryable':retry}
     if hasattr(error,'fields'):info['fields']=error.fields
     if retry:info['retry_after_seconds']=2
-    if operation in ('search','search_files'):
+    if code in EXPECTED:info['expected']=EXPECTED[code]
+    if operation in ('search','search_files'):info['results_state']='not_returned_due_to_error'
+    # Narrowing helps a slow or busy query, not a rejected parameter.
+    if operation in ('search','search_files') and retry:
         info['next_action']='narrow_account_chat_or_date_filters'
         info['fallback']='get_messages_for_known_chat_then_get_context' if operation=='search' else 'get_file_text_for_known_attachment_then_get_context'
-        info['results_state']='not_returned_due_to_error'
     elif code in ('not_found','forbidden'):
         info['next_action']='check_reference_and_permitted_scope'
     elif code=='cursor_changed':info['next_action']='restart_query_without_cursor'

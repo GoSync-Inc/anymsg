@@ -146,8 +146,10 @@ request was answered.
 
 `order='priority'` requires `awaiting_reply=true`. The score is 100 for private
 chats or 25 for explicit group attention, +25 for question punctuation, +10 for
-an observed provider contact, plus waiting days capped at 20. Each row includes
-the score and reasons. This does not infer identity from names or decide whether
+an observed provider contact, plus waiting points: the square root of waiting hours
+(1 hour = 1, 1 day = 4, 4 days = 9), capped at 20 after about 17 days. Each row
+includes the score, `awaiting_reply_waiting_hours` and reasons; `waiting_age` or
+`waiting_age_capped` appear only when waiting points were added. This does not infer identity from names or decide whether
 a statement semantically requires an answer. Contact flags can be unknown.
 Priority cursors retain a scoring timestamp and bind all filters.
 
