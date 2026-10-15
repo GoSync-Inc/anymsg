@@ -46,7 +46,7 @@ def main():
     for snapshot in (before, after):
         if snapshot.get("complete") is not True or snapshot.get("stable_reads") != 2:
             raise SystemExit("refusing incomplete/unverified snapshot")
-        # Do not accept a mutated artifact under a stale signed digest.
+        # Do not accept a modified artifact under a stale inventory hash.
         import importlib.util
         spec = importlib.util.spec_from_file_location("snapshot", Path(__file__).with_name("tiden_snapshot.py"))
         module = importlib.util.module_from_spec(spec)

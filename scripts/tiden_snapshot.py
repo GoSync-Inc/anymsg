@@ -20,13 +20,19 @@ class SnapshotError(RuntimeError):
     pass
 
 
-def canonical(value):
+SET_PATHS = {(name,) for name in ("tests", "requirements", "links", "components", "products", "branches")} | {
+    ("requirements", "[]", "sources"), ("components", "[]", "componentPaths"),
+}
+
+
+def canonical(value, path=()):
     if isinstance(value, dict):
-        return {k: canonical(v) for k, v in sorted(value.items())}
+        return {k: canonical(v, (*path, k)) for k, v in sorted(value.items())}
     if isinstance(value, list):
-        normalized = [canonical(v) for v in value]
-        # Inventories and source/link arrays are sets. Ordered content is stored as strings.
-        return sorted(normalized, key=lambda x: json.dumps(x, sort_keys=True))
+        normalized = [canonical(v, (*path, "[]")) for v in value]
+        # Only known inventory collections are sets. Preserve order in steps,
+        # schema enums or any future structured content returned by the API.
+        return sorted(normalized, key=lambda x: json.dumps(x, sort_keys=True)) if path in SET_PATHS else normalized
     return value
 
 
