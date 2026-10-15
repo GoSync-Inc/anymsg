@@ -81,3 +81,29 @@ def test_notification_stream_is_disabled(household):
     c, key = client(household)
     with c:
         assert c.get("/mcp", headers={"Authorization": "Bearer " + key}).status_code == 405
+
+
+def test_initialize_and_stateless_reconnect_preserve_catalog(household):
+    c, key = client(household)
+    with c:
+        headers = {"Authorization": "Bearer " + key, "Accept": "application/json, text/event-stream"}
+        for _ in range(2):
+            result = c.post(
+                "/mcp",
+                headers=headers,
+                json={
+                    "jsonrpc": "2.0",
+                    "id": 1,
+                    "method": "initialize",
+                    "params": {
+                        "protocolVersion": "2025-06-18",
+                        "capabilities": {},
+                        "clientInfo": {"name": "synthetic", "version": "1"},
+                    },
+                },
+            )
+            assert result.status_code == 200
+            assert result.json()["result"]["serverInfo"]["name"] == "family-calendar-service"
+            assert "mcp-session-id" not in result.headers
+            listed = c.post("/mcp", headers=headers, json={"jsonrpc": "2.0", "id": 2, "method": "tools/list"})
+            assert len(listed.json()["result"]["tools"]) == 10

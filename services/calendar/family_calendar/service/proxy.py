@@ -8,7 +8,7 @@ from pathlib import Path
 import sys
 from urllib.parse import urlsplit
 
-import httpx
+import httpx2
 from mcp import ClientSession
 from mcp.client.streamable_http import streamable_http_client
 from mcp.server import Server
@@ -39,20 +39,18 @@ def proxy_config(url, key_file):
 
 
 async def run(url, key):
-    async with httpx.AsyncClient(
+    async with httpx2.AsyncClient(
         headers={"Authorization": "Bearer " + key}, trust_env=False, follow_redirects=False, timeout=30
     ) as client:
-        async with streamable_http_client(url, http_client=client) as (read, write, _):
+        async with streamable_http_client(url, http_client=client) as (read, write):
             async with ClientSession(read, write) as remote:
                 await remote.initialize()
-                server = Server("family-calendar", version="0.2.0")
 
-                @server.list_tools()
-                async def tools():
-                    return (await remote.list_tools()).tools
+                async def tools(context, params):
+                    return await remote.list_tools(params=params)
 
-                @server.call_tool(validate_input=False)
-                async def call(name, arguments):
+                async def call(context, params):
+                    name, arguments = params.name, params.arguments
                     try:
                         return await remote.call_tool(name, arguments or {})
                     except Exception:
@@ -65,6 +63,8 @@ async def run(url, key):
                             structuredContent=result,
                             isError=True,
                         )
+
+                server = Server("family-calendar", version="0.2.0", on_list_tools=tools, on_call_tool=call)
 
                 async with stdio_server() as (input_stream, output_stream):
                     await server.run(input_stream, output_stream, server.create_initialization_options())
