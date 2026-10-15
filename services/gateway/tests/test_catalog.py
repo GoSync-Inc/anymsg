@@ -31,6 +31,26 @@ def test_every_tool_declares_hints_and_reads_are_never_destructive():
         assert not (hints["readOnlyHint"] and hints["destructiveHint"]), tool["name"]
 
 
+def test_calls_descriptions_are_distinct_and_lead_with_the_effect():
+    calls = {n: t for n, t in CATALOG.items() if t["module"] == "calls"}
+    assert len({t["description"] for t in calls.values()}) == len(calls)
+    for name, tool in calls.items():
+        reads = tool["scopes"] in ([], ["calls:read"])
+        assert (tool["annotations"] == READ) is reads, name
+        assert tool["description"].startswith("Read-only") is reads, name
+    assert calls["calls_dial_call"]["description"].startswith("External effect: places ONE real")
+    assert calls["calls_dial_call"]["annotations"] == {
+        "readOnlyHint": False, "destructiveHint": True, "idempotentHint": True, "openWorldHint": True,
+    }
+    for name in ("prepare_call", "prepare_external_call", "prepare_followup", "start_call", "stop_call"):
+        hints = calls["calls_" + name]["annotations"]
+        assert not hints["destructiveHint"] and not hints["openWorldHint"], name
+    for name in ("list_briefs", "list_calls"):
+        tool = calls["calls_" + name]
+        assert tool["operation"] == name and tool["scopes"] == ["calls:read"]
+        assert tool["inputSchema"] == calls["calls_get_owner_requests"]["inputSchema"]
+
+
 def test_calendar_reads_and_local_plan_are_not_presented_as_provider_writes():
     for name in ("capabilities", "calendars", "members", "agenda", "slots", "operation", "assignments"):
         assert CATALOG["calendar_" + name]["annotations"] == READ

@@ -507,7 +507,7 @@ def create_app(data_dir=None, archive=None, control_token=None, reviewer=None, a
                                          browser_url=os.environ.get('VOICE_BROWSER_URL','http://127.0.0.1:13842/'))
 
     app.state.agent_api=AgentAPI(service,AgentRegistry(agent_registry or os.environ.get('VOICE_AGENT_REGISTRY')),
-                                 control_start,control_stop,outbound)
+                                 control_start,control_stop,outbound,browser=browser_enabled)
 
     @app.post('/v1/{operation}')
     async def agent_operation(operation:str,request:Request):

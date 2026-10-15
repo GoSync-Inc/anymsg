@@ -51,6 +51,8 @@ methods or a backend-specific REST URL. Platform introspection returns these as
 and calls methods. An empty messenger action list and `owner_decision_write: false`
 do not deny a selected calls preparation method. Calls channel, destination, scope
 and owned-brief checks remain the backend's authority; these labels grant no access.
+`calls_list_briefs` and `calls_list_calls` (`calls:read`) page the backend credential's
+own briefs and calls newest first as short summaries; existing profiles do not gain them.
 
 Backend HTTP failures retain only their numeric `backend_status`, a reviewed
 `backend_error` classification (including `query_timeout`), and a UUID-shaped

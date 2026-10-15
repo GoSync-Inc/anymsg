@@ -1,13 +1,37 @@
 """The phone-only gateway uses the real calls ACL without archive/provider sessions."""
 
+import json
 import sys
 from pathlib import Path
 
-sys.path.insert(0, str(Path(__file__).resolve().parents[3] / "tests/platform"))
+ROOT = Path(__file__).resolve().parents[3]
+sys.path.insert(0, str(ROOT / "tests/platform"))
 from runtime_helpers import call, gateway, port, server
+from agent_api import ANNOTATIONS, DESCRIPTIONS, METHODS
 from app import create_app
 from test_agent_api import registry
 from test_tasks import Archive, BRIEF
+
+
+def test_gateway_catalog_mirrors_reviewed_calls_metadata():
+    packaged = json.loads(
+        (ROOT / "services/gateway/src/agent_gateway/catalog.json").read_text()
+    )
+    rows = {row["name"]: row for row in packaged if row["module"] == "calls"}
+    assert set(rows) == {"calls_" + name for name in METHODS}
+    for name, (model, scope) in METHODS.items():
+        row = rows["calls_" + name]
+        assert row["operation"] == name and row["scopes"] == ([scope] if scope else [])
+        assert row["inputSchema"] == model.model_json_schema()
+        assert row["description"] == DESCRIPTIONS[name]
+        assert row["annotations"] == ANNOTATIONS[name]
+        # Effect first: reads say so, everything else is never presented as a read.
+        reads = scope in {"", "calls:read"}
+        assert ANNOTATIONS[name]["readOnlyHint"] is reads
+        assert DESCRIPTIONS[name].startswith("Read-only") is reads
+    assert len(set(DESCRIPTIONS.values())) == len(METHODS)
+    assert [n for n, a in ANNOTATIONS.items() if a["openWorldHint"]] == ["dial_call"]
+    assert [n for n, a in ANNOTATIONS.items() if a["destructiveHint"]] == ["dial_call"]
 
 
 def test_gateway_scoped_phone_preparation_needs_no_messaging(tmp_path):
@@ -28,6 +52,7 @@ def test_gateway_scoped_phone_preparation_needs_no_messaging(tmp_path):
             "preflight_call",
             "get_call_status",
             "get_call_result",
+            "list_briefs",
         ]
     ]
     with (
@@ -54,6 +79,10 @@ def test_gateway_scoped_phone_preparation_needs_no_messaging(tmp_path):
         assert (
             brief["owner_principal"] == "alice" and app.state.service.list_calls() == []
         )
+        listed = call(c, "calls_list_briefs", {"limit": 5})
+        assert [row["id"] for row in listed["items"]] == [brief["id"]]
+        assert listed["next_offset"] is None
+        assert "+12025550123" not in json.dumps(listed)
         result = c.post("/v1/calls_preflight_call", json={"brief_id": brief["id"]})
         assert (
             result.status_code == 409 and result.json()["error"] == "calling_disabled"

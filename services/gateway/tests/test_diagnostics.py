@@ -209,3 +209,34 @@ def test_capability_failure_reports_that_a_mutation_was_not_sent(tmp_path):
                      "request_id": "c" * 32, "phase": "capabilities", "operation_sent": False,
                      "retryable": True, "retry_after_seconds": 2, "next_action": "retry_after_delay"}
     assert attempts == ["/v1/capabilities"]
+
+
+def test_calls_listings_need_read_scope_and_pass_owned_pages_through(tmp_path):
+    permissions, seen = ["calls:read"], []
+    page = {"items": [{"id": "brief-synthetic", "channel": "browser"}], "next_offset": None}
+
+    def backend(request):
+        if request.url.path == "/v1/capabilities":
+            return httpx.Response(200, json={"permissions": permissions})
+        seen.append((request.url.path, json.loads(request.content)))
+        return httpx.Response(200, json=page)
+
+    tools = ["platform_capabilities", "calls_list_briefs", "calls_list_calls"]
+    app, _, _ = configured(tmp_path, backend, module="calls", tools=tools, grants=["calls:read"])
+    with TestClient(app) as client:
+        listed = {t["name"]: t for t in rpc(client, "tools/list").json()["result"]["tools"]}
+        assert set(listed) == set(tools)
+        assert listed["calls_list_calls"]["annotations"]["readOnlyHint"] is True
+        rest = client.post("/v1/calls_list_briefs", json={"limit": 5}, headers=HEADERS)
+        mcp = rpc(client, "tools/call", {"name": "calls_list_calls", "arguments": {}}).json()["result"]
+        assert rest.json() == mcp["structuredContent"] == page
+        assert client.post("/v1/calls_list_calls", json={"limit": 101}, headers=HEADERS).status_code == 422
+        permissions.clear()
+        assert client.post("/v1/calls_list_calls", json={}, headers=HEADERS).status_code == 403
+        assert [t["name"] for t in rpc(client, "tools/list").json()["result"]["tools"]] == [
+            "platform_capabilities"
+        ]
+    assert seen == [
+        ("/v1/list_briefs", {"limit": 5, "offset": 0}),
+        ("/v1/list_calls", {"limit": 100, "offset": 0}),
+    ]

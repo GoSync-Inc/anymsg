@@ -48,6 +48,7 @@ async def test_mcp_separate_auth_browser_job_and_durable_result(tmp_path):
                     inbox=await client.call_tool('get_owner_requests',{})
                     assert inbox.structured_content['items']==[]
                     assert inbox.structured_content['notification_channel']=='not_connected'
+                    assert 'tell the owner yourself' in inbox.structured_content['notification_explanation']
                     service=app.state.service
                     second=await client.call_tool('prepare_call',{'brief':{**BRIEF,'approval_fields':['delivery_window']}})
                     created=await client.call_tool('start_call',{'brief_id':second.structured_content['id']})
