@@ -7,14 +7,17 @@ try {
   const {values, positionals} = parseArgs({allowPositionals: true, options: {
     help: {type: 'boolean', short: 'h'}, version: {type: 'boolean', short: 'v'},
     url: {type: 'string'}, 'token-file': {type: 'string'}, json: {type: 'string'},
+    file: {type: 'string'},
   }});
   if (values.version) console.log(JSON.parse(readFileSync(new URL('../package.json', import.meta.url), 'utf8')).version);
   else if (values.help || !positionals.length) console.log(
     'AnyMsg HTTP client (an existing server is required)\n' +
     'Usage: anymsg <operation> --url https://host/base --token-file /private/key --json \'{}\'\n' +
+    'Stage a file: anymsg upload_file --file /local/file --url https://host/base --token-file /private/key --json \'{"account":"...","chat_id":"...","request_id":"...","mime":"image/jpeg"}\'\n' +
     'Operations: ' + tools.join(', '));
   else {
-    if (positionals.length !== 1 || !tools.includes(positionals[0]) || !values.url || !values['token-file'])
+    if (positionals.length !== 1 || (!tools.includes(positionals[0]) && positionals[0]!=='upload_file') ||
+        !values.url || !values['token-file'] || (positionals[0]==='upload_file')!==Boolean(values.file))
       throw new TypeError('Provide one operation, --url and --token-file');
     const file = values['token-file'];
     const fd = openSync(file, constants.O_RDONLY | constants.O_NOFOLLOW | constants.O_NONBLOCK);
@@ -26,7 +29,9 @@ try {
       token = readFileSync(fd, 'utf8').trim();
     } finally { closeSync(fd); }
     const client = new AnyMsgClient({baseUrl: values.url, token});
-    const result = await client.call(positionals[0], JSON.parse(values.json ?? '{}'));
+    const args=JSON.parse(values.json ?? '{}');
+    const result = positionals[0]==='upload_file'
+      ? await client.uploadFile(values.file,args) : await client.call(positionals[0],args);
     console.log(JSON.stringify(result, null, 2));
   }
 } catch (error) {

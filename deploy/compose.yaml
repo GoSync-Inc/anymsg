@@ -37,6 +37,7 @@ services:
     volumes:
       - ./private/app.dsn:/run/secrets/database_url:ro
       - files:/data:ro
+      - file_uploads:/data/files/.uploads
     ports:
       - "127.0.0.1:18940:8080"
     networks:
@@ -57,6 +58,7 @@ services:
 volumes:
   database: {}
   files: {}
+  file_uploads: {}
 networks:
   backend:
     internal: true

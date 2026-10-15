@@ -170,6 +170,52 @@ def archive_reference(job,receipt):
     return ref
 
 
+def validate_send_receipt(value):
+    """Private exact correlation journal, not a public API or body/time heuristic."""
+    from .envelope import utc
+    if (not isinstance(value,dict) or set(value)!={'kind','account','send_id','requested_chat',
+        'provider_message_id','archive_reference','observed_at'} or value['kind']!='outgoing_send_receipt'
+        or not isinstance(value['account'],str) or not re.fullmatch(r'[a-zA-Z0-9_.-]{1,64}',value['account'])
+        or not isinstance(value['send_id'],str) or not re.fullmatch(r'send_[a-f0-9]{32}',value['send_id'])
+        or not isinstance(value['requested_chat'],str) or
+        not re.fullmatch(r'[a-zA-Z0-9_.:-]{1,140}@(c\.us|g\.us|lid)',value['requested_chat'])
+        or not isinstance(value['provider_message_id'],str)):
+        raise ValueError('invalid_send_receipt')
+    try:
+        reference=archive_reference({'provider_chat':value['requested_chat']},value)
+    except (RuntimeError,TypeError,KeyError):raise ValueError('invalid_send_receipt') from None
+    return {**value,'archive_reference':reference,'observed_at':utc(value['observed_at'])}
+
+
+def reconcile_send_receipt(state,value):
+    """Collector-only repair after exact provider acknowledgement survived IPC loss.
+
+    The current fenced account owner can record a previous dispatch's fact. No
+    mutation is retried, and a queued/rejected/conflicting row is never promoted.
+    """
+    value=validate_send_receipt(value)
+    if value['account']!=state.account:raise ValueError('foreign_send_receipt')
+    if state.lease is None:raise RuntimeError('collector_lease_lost')
+    with state.archive.store.pool.connection() as c:
+        state.archive.fence(c,state.account,state.lease)
+        row=c.execute('''SELECT o.* FROM outgoing_messages o JOIN accounts a ON a.id=o.account
+            WHERE o.id=%s AND o.account=%s AND a.platform='whatsapp' FOR UPDATE OF o''',
+            (value['send_id'],state.account)).fetchone()
+        if not row or row['provider_chat']!=value['requested_chat']:
+            raise ValueError('send_receipt_target_mismatch')
+        reference=value['archive_reference'];provider_id=value['provider_message_id']
+        if row['status']=='sent':
+            if row['provider_message_id']!=provider_id or row['archive_reference']!=reference:
+                raise ValueError('send_receipt_conflict')
+            return {'outcome':'duplicate_send_receipt'}
+        if row['status'] not in ('dispatching','unknown'):
+            raise ValueError('send_receipt_state_mismatch')
+        c.execute('''UPDATE outgoing_messages SET status='sent',provider_message_id=%s,
+            archive_reference=%s,error_code=NULL,finished_at=clock_timestamp() WHERE id=%s''',
+            (provider_id,Jsonb(reference),row['id']))
+        return {'outcome':'send_reconciled'}
+
+
 def project_reference(c,p,account,reference):
     """Actual wire proof is metadata, never an implicit read grant to its alias."""
     actual=None;reference_state='legacy_requested'
@@ -408,8 +454,12 @@ class OutgoingWorker:
             code=str(exc) if str(exc) in ('send_expired','sending_disabled','send_target_invalid','send_access_changed') else 'send_rejected'
             terminal='expired' if code=='send_expired' else 'cancelled' if code=='send_access_changed' else 'failed'
             await asyncio.to_thread(self.finish,job,terminal,None,code)
-        except Exception:
-            await asyncio.to_thread(self.finish,job,'unknown',None,'send_result_unknown')
+        except Exception as exc:
+            # Never expose arbitrary provider error text or turn uncertainty
+            # into a retry. Preserve only useful, content-free diagnostics.
+            code=str(exc) if str(exc) in ('send_receipt_mismatch','send_receipt_missing',
+                'provider_disconnected','provider_page_stalled','provider_operation_uncertain') else 'send_result_unknown'
+            await asyncio.to_thread(self.finish,job,'unknown',None,code)
         else:
             await asyncio.to_thread(self.finish,job,'sent',provider_id)
         return True

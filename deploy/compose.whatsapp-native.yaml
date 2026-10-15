@@ -3,12 +3,12 @@
 # Never point a browser auth volume at this image as a conversion mechanism.
 services:
   whatsapp1:
-    image: anymsg-whatsapp-native:${MESSAGING_VERSION:-0.9.18}
+    image: anymsg-whatsapp-native:${MESSAGING_VERSION:-0.9.19}
     security_opt: !override [no-new-privileges:true]
     mem_limit: ${PROBE_WHATSAPP_NATIVE_MEMORY:-768m}
     pids_limit: 64
   whatsapp2:
-    image: anymsg-whatsapp-native:${MESSAGING_VERSION:-0.9.18}
+    image: anymsg-whatsapp-native:${MESSAGING_VERSION:-0.9.19}
     security_opt: !override [no-new-privileges:true]
     mem_limit: ${PROBE_WHATSAPP_NATIVE_MEMORY:-768m}
     pids_limit: 64

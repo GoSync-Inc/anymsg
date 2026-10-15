@@ -28,7 +28,7 @@ COPY services/messaging/requirements-telemetry.lock ./requirements-telemetry.loc
 ARG ANYMSG_INSTALL_TELEMETRY=0
 RUN if [ "$ANYMSG_INSTALL_TELEMETRY" = "1" ]; then pip install --no-cache-dir --require-hashes -r requirements-telemetry.lock; fi
 RUN groupadd -g 10001 probe && useradd -u 10001 -g probe -M probe \
-    && mkdir -p /data/files && chown -R probe:probe /data
+    && mkdir -p /data/files/.uploads && chmod 0700 /data/files/.uploads && chown -R probe:probe /data
 USER probe
 
 FROM python-dependencies AS runtime

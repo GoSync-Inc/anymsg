@@ -29,9 +29,9 @@ def test_schema26_manifest_includes_definitions_sources_and_exact_match_referenc
     _, definition, event = _subscription(store, 'synthetic-manifest-subscriber')
     match_subscriptions(store)
     with store.pool.connection() as connection:
-        assert connection.execute("SELECT value FROM probe_metadata WHERE name='schema_version'").fetchone()['value'] == '28'
+        assert connection.execute("SELECT value FROM probe_metadata WHERE name='schema_version'").fetchone()['value'] == '29'
         manifest = database_manifest(connection)
-    assert len(manifest) == 51
+    assert len(manifest) == 52
     assert all(manifest[name]['rows'] == 1 for name in (
         'subscriptions', 'subscription_sources', 'subscription_matches'))
     assert all(len(manifest[name]['sha256']) == 64 for name in (
@@ -62,6 +62,7 @@ def test_native_schema26_quarantine_closes_versions_preserves_refs_and_revokes_r
         restored.migrate()
         restored.seed()
         token, active, _ = _subscription(restored, 'synthetic-quarantine-subscriber')
+        credential=restored.capabilities(token)['credential_id']
         paused = restored.create_subscription(token, ['telegram-demo-chat'])
         paused = restored.update_subscription(token, paused['subscription_id'], paused['version'], action='pause')
         match_subscriptions(restored)
@@ -72,6 +73,11 @@ def test_native_schema26_quarantine_closes_versions_preserves_refs_and_revokes_r
                 SELECT id,'synthetic-restore-collector',1,clock_timestamp()+interval '1 hour' FROM accounts""")
             connection.execute("""INSERT INTO source_status(account,status,coverage,detail_code)
                 SELECT id,'receiving','partial','synthetic' FROM accounts""")
+            connection.execute("""INSERT INTO file_uploads(principal,key_id,account,chat,filename,mime,
+                bytes,sha256,received,state,volume_key,request_id)
+                VALUES('synthetic-quarantine-subscriber',%s,'telegram-demo','telegram-demo-chat',
+                'synthetic.txt','text/plain',1,%s,1,'ready','fs:synthetic','synthetic-restore-upload')""",
+                (credential,'a'*64))
             before_versions = {str(row['id']): row['version'] for row in
                 connection.execute('SELECT id,version FROM subscriptions').fetchall()}
             before = database_manifest(connection)
@@ -85,7 +91,8 @@ def test_native_schema26_quarantine_closes_versions_preserves_refs_and_revokes_r
             policies = connection.execute('SELECT enabled,send_enabled,operations_enabled FROM account_policies').fetchall()
             leases = connection.execute('SELECT expires_at<clock_timestamp() AS expired FROM collector_leases').fetchall()
             statuses = connection.execute('SELECT status,coverage,detail_code FROM source_status').fetchall()
-        assert len(after) == 51 and after['subscriptions']['rows'] == 2
+            assert connection.execute('SELECT state FROM file_uploads').fetchone()['state']=='expired'
+        assert len(after) == 52 and after['subscriptions']['rows'] == 2
         assert all(row['state'] == 'closed' and row['version'] == before_versions[str(row['id'])] + 1
             for row in definitions)
         assert after['subscription_sources'] == before['subscription_sources']

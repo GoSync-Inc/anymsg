@@ -33,3 +33,4 @@ GRANT SELECT ON messenger_commands TO messaging_collector;
 GRANT UPDATE(status,started_at,finished_at,lease_epoch,result,error_code)
     ON messenger_commands TO messaging_collector;
 GRANT SELECT,INSERT,UPDATE ON chat_read_observations TO messaging_collector;
+GRANT SELECT ON file_uploads TO messaging_collector;

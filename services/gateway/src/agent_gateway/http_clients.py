@@ -1,8 +1,11 @@
 """Independent bounded pools; no provider libraries and no automatic retries."""
 
 import asyncio
+from collections import deque
 from contextlib import asynccontextmanager
+import hashlib
 import json
+import time
 
 import httpx
 
@@ -33,17 +36,47 @@ class Budget:
             self.pending -= 1
 
 
+class UploadRate:
+    """Bound both byte-bearing request rate and retained credential state."""
+
+    def __init__(self):
+        self.observations = {}
+
+    def admit(self, key):
+        now = time.monotonic()
+        digest = hashlib.sha256(key.encode()).digest()
+        if digest not in self.observations:
+            if len(self.observations) >= 1024:
+                self.observations = {
+                    k: times for k, times in self.observations.items() if times and times[-1] > now - 1
+                }
+                if len(self.observations) >= 1024:
+                    raise Denied("backend_busy", 503)
+            self.observations[digest] = deque()
+        times = self.observations[digest]
+        while times and times[0] <= now - 1:
+            times.popleft()
+        if len(times) >= 8:
+            raise Denied("upload_rate_limited", 429)
+        times.append(now)
+
+
 class Clients:
     def __init__(self, deployment, transports=None):
         self.deployment, self.transports = deployment, transports or {}
         self.metadata, self.bulk, self.budgets, self.bulk_budgets = {}, {}, {}, {}
+        self.uploads, self.upload_budgets = {}, {}
+        self.upload_rate = UploadRate()
         self.closed = False
 
     async def __aenter__(self):
         try:
             for module in self.deployment["modules"]:
                 target = self.deployment["backends"][module]
-                for container, maximum in ((self.metadata, 8), (self.bulk, 2)):
+                pools = [(self.metadata, 8), (self.bulk, 2)]
+                if module == "messaging":
+                    pools.append((self.uploads, 2))
+                for container, maximum in pools:
                     container[module] = httpx.AsyncClient(
                         base_url=target["url"].rstrip("/"),
                         timeout=httpx.Timeout(35, connect=5, pool=0.25),
@@ -54,24 +87,35 @@ class Clients:
                         headers={"Host": target["host_header"]} if target.get("host_header") else None,
                     )
                 self.budgets[module], self.bulk_budgets[module] = Budget(), Budget(2, 4)
+                if module == "messaging":
+                    self.upload_budgets[module] = Budget(2, 4)
             return self
         except BaseException:
             await self.__aexit__(None, None, None)
             raise
 
     async def __aexit__(self, *args):
-        for client in [*self.metadata.values(), *self.bulk.values()]:
+        for client in [*self.metadata.values(), *self.bulk.values(), *self.uploads.values()]:
             await client.aclose()
+        self.upload_rate.observations.clear()
         self.closed = True
 
     async def call(self, module, operation, key, arguments):
         if module not in self.metadata:
             raise Denied("backend_unavailable", 503)
-        async with self.budgets[module].slot():
+        uploading = module == "messaging" and operation == "upload_file_chunk"
+        if uploading:
+            self.upload_rate.admit(key)
+        budget = self.upload_budgets[module] if uploading else self.budgets[module]
+        client = self.uploads[module] if uploading else self.metadata[module]
+        async with budget.slot():
             try:
-                async with self.metadata[module].stream(
-                    "POST", "/v1/" + operation, headers={"Authorization": "Bearer " + key}, json=arguments
-                ) as response:
+                async with (
+                    asyncio.timeout(10 if uploading else 35),
+                    client.stream(
+                        "POST", "/v1/" + operation, headers={"Authorization": "Bearer " + key}, json=arguments
+                    ) as response,
+                ):
                     if response.status_code >= 500:
                         raise Denied("backend_unavailable", 503)
                     if response.status_code in (301, 302, 303, 307, 308):
@@ -91,5 +135,5 @@ class Clients:
                         error.detail = result
                         raise error
                     return result
-            except (httpx.HTTPError, ValueError):
+            except (httpx.HTTPError, ValueError, TimeoutError):
                 raise Denied("backend_unavailable", 503) from None

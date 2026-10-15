@@ -5,8 +5,11 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"io"
 	"math"
+	"os"
+	"path/filepath"
 	"regexp"
 	"strings"
 	"time"
@@ -32,11 +35,14 @@ type sendDependencies struct {
 	ownerLID types.JID
 	lidForPN func(context.Context, types.JID) (types.JID, error)
 	pnForLID func(context.Context, types.JID) (types.JID, error)
+	journal  func(string, string, map[string]any) error
+	receipt  func(map[string]any) error
 }
 
 func (p *Provider) sendDependencies() sendDependencies {
 	owner, _ := ParseChatID(p.Config.ExpectedWID)
 	return sendDependencies{policy: p.policy, get: p.Capture.Get, put: p.Capture.Put, owner: owner,
+		journal:  p.journalSendReceipt,
 		ownerLID: p.Client.Store.GetLID(),
 		lidForPN: p.Client.Store.LIDs.GetLIDForPN, pnForLID: p.Client.Store.LIDs.GetPNForLID,
 		newID: func() string { return p.Client.GenerateMessageID() },
@@ -46,6 +52,7 @@ func (p *Provider) sendDependencies() sendDependencies {
 }
 
 type textRequest struct {
+	SendID          string  `json:"send_id,omitempty"`
 	Chat            string  `json:"chat"`
 	Text            string  `json:"text"`
 	ExpiresAt       float64 `json:"expires_at"`
@@ -131,6 +138,12 @@ func sendText(ctx context.Context, req textRequest, d sendDependencies) (any, er
 	if err := check(); err != nil {
 		return nil, err
 	}
+	if req.SendID != "" {
+		if !regexp.MustCompile(`^send_[a-f0-9]{32}$`).MatchString(req.SendID) || d.journal == nil {
+			return nil, errors.New("send_target_invalid")
+		}
+		d.receipt = func(receipt map[string]any) error { return d.journal(req.SendID, req.Chat, receipt) }
+	}
 	// Native WhatsApp does not fetch arbitrary links. Enabling rich previews needs
 	// a separate bounded URL-fetch contract; do not silently claim it happened.
 	if req.LinkPreview != nil && *req.LinkPreview {
@@ -190,17 +203,50 @@ func sendAndCaptureReceipt(ctx context.Context, d sendDependencies, to types.JID
 		source.AddressingMode = types.AddressingModePN
 	}
 	event := &events.Message{Info: types.MessageInfo{MessageSource: source, ID: id, Timestamp: resp.Timestamp}, Message: message, RawMessage: message}
-	if err = d.put(event, "live"); err != nil {
-		return nil, errors.New("provider_operation_uncertain")
-	}
 	// The existing outbox contract references the requested public chat ID. This
 	// receipt projection is not written back to capture and never rewrites archive
 	// IDs or broadens policy to another namespace.
 	public := *event
 	public.Info.Chat, public.Info.Sender = to, d.owner
-	return map[string]any{"provider_message_id": LegacyMessageID(&public), "archive_reference": map[string]any{
+	receipt := map[string]any{"provider_message_id": LegacyMessageID(&public), "archive_reference": map[string]any{
 		"provider_chat_id": LegacyChatID(event.Info.Chat), "provider_message_id": LegacyMessageID(event),
-	}}, nil
+	}}
+	// Only a verified provider acknowledgement reaches this journal. It is durable
+	// before capture/IPC can fail, and carries the exact internal dispatch ID.
+	if d.receipt != nil {
+		if err = d.receipt(receipt); err != nil {
+			return nil, errors.New("provider_operation_uncertain")
+		}
+	}
+	if err = d.put(event, "live"); err != nil {
+		return nil, errors.New("provider_operation_uncertain")
+	}
+	return receipt, nil
+}
+
+func (p *Provider) journalSendReceipt(sendID, requested string, receipt map[string]any) error {
+	dir := filepath.Join(p.Config.EventsDirectory, "send-receipts")
+	if err := privateRoot(dir); err != nil {
+		return err
+	}
+	data := mustJSON(map[string]any{"kind": "outgoing_send_receipt", "account": p.Config.Account,
+		"send_id": sendID, "requested_chat": requested, "provider_message_id": receipt["provider_message_id"],
+		"archive_reference": receipt["archive_reference"], "observed_at": time.Now().UTC().Format(time.RFC3339Nano)})
+	entries, err := os.ReadDir(dir)
+	if err != nil {
+		return err
+	}
+	usage, err := measureSpool(entries)
+	if err != nil {
+		return err
+	}
+	if usage.count >= 1000 || usage.bytes+int64(len(data)) > 4<<20 {
+		return errors.New("spool_full")
+	}
+	if err = p.Capture.checkDisk(int64(len(data))); err != nil {
+		return err
+	}
+	return atomicPrivate(dir, fmt.Sprintf("%020d-%s.json", time.Now().UnixNano(), digestBytes(data)), data)
 }
 
 // Pinned SendMessage only rewrites PN destinations to LID, never groups or the

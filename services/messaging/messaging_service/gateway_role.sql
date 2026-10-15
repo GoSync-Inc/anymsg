@@ -42,3 +42,5 @@ GRANT SELECT,INSERT ON subscription_sources TO messaging_gateway;
 GRANT SELECT ON subscription_matches TO messaging_gateway;
 GRANT SELECT ON chat_read_observations TO messaging_gateway;
 GRANT SELECT,INSERT,UPDATE ON reply_dismissals TO messaging_gateway;
+GRANT SELECT,INSERT,UPDATE ON file_uploads TO messaging_gateway;
+GRANT SELECT ON media_reservations TO messaging_gateway;

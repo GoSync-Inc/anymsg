@@ -9,7 +9,7 @@ use SHA-256 deduplication; references to every source message stay separate.
 [Conversation view and compatibility](CONVERSATION.md) explain message kinds,
 ordering uncertainty and the last known dialogue turn.
 
-Development version: **0.9.18 — experimental**, PostgreSQL schema 28.
+Development version: **0.9.19 — experimental**, PostgreSQL schema 29.
 
 The expanded live-operation catalog covers messages, registered attachments,
 reactions, groups, contacts and profile fields. Access requires explicit per-key
@@ -86,6 +86,36 @@ from anymsg import Client
 with Client('https://messages.example.com', os.environ['ANYMSG_TOKEN']) as client:
     result = client.search(query='contract', limit=10)
 ```
+
+The source SDK also stages local files separately from sending:
+
+```python
+with Client('https://messages.example.com', os.environ['ANYMSG_TOKEN']) as client:
+    staged = client.upload_file('/local/photo.jpg', account='whatsapp-primary',
+        chat_id='chat_resolved_with_this_account', mime='image/jpeg',
+        request_id='photo-upload-2026-001')
+# Nothing was sent. The ready receipt contains upload_id and sha256.
+```
+
+`upload_file` accepts regular non-symlink files of 1 byte–32 MiB, hashes in a
+stream, uploads 256 KiB chunks and rejects changes to the original. It keeps one
+descriptor open and sends only the basename, metadata and bytes, never local paths
+or source URLs. `filename` is optional; MIME defaults to
+`application/octet-stream`. Low-level methods are `prepare_file_upload`,
+`upload_file_chunk` and passive `get_file_upload`. All require explicit scoped
+upload/send/read permission and account `send_file` policy; the gateway retains
+its existing download ceiling for that action. Other requests keep the 16 KiB
+SDK limit; only a chunk may use a 360448-byte JSON body.
+
+On timeout the SDK stops. Inspect the upload receipt, or explicitly invoke the
+helper again with the same request ID, bytes and metadata to reconcile/resume.
+It never invents another ID, retries an unknown mutation or sends automatically.
+Chunks from one helper are paced below eight per second; concurrent helpers
+sharing a key can still hit the server's limit. A source change can leave a staged
+upload that expires normally, but never triggers a send. Sending uses a separate
+reviewed `send_file` preview/action with exactly one `upload_id` or `attachment_id`,
+the matching SHA-256 and `mode='photo'` or `mode='document'`, after owner approval.
+The helper is synchronous; cleanup runs on completion, error or interruption.
 
 Point a Streamable HTTP MCP client at `https://messages.example.com/mcp` and set
 `Authorization: Bearer <agent key>`. Use each agent's own scoped key. The server

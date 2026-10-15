@@ -250,6 +250,102 @@ def test_whatsapp_chat_count_does_not_assert_exact_message_was_read(seeded):
     assert row['provider_unread'] is False and row['read_by_owner'] is None
 
 
+def test_native_whatsapp_read_basis_is_valid_and_inventory_uses_existing_schema(seeded):
+    from messaging_service.collector_state import CollectorState
+    from messaging_service.reply_state import validate_observation
+    s,_,_=seeded;ar=Archive(s)
+    ar.register('wa-native-read','whatsapp','Synthetic native',discover=True)
+    at=datetime.now(timezone.utc).isoformat()
+    observation={'observed_at':at,'unread_count':None,
+        'basis':'whatsmeow_captured_chat','is_self_chat':True}
+    assert validate_observation(observation)['basis']=='whatsapp_cached_chat'
+    epoch=ar.acquire('wa-native-read','synthetic-native-read',60)
+    state=CollectorState(ar,'wa-native-read',('synthetic-native-read',epoch))
+    try:
+        state.inventory([('100@c.us','user','Synthetic self','private',observation)],None)
+        with s.pool.connection() as c:
+            row=c.execute('SELECT * FROM chat_read_observations WHERE account=%s',
+                          ('wa-native-read',)).fetchone()
+        assert row['basis']=='whatsapp_cached_chat' and row['is_self_chat'] is True
+        assert row['unread_count'] is None and row['read_inbox_max_id'] is None
+    finally:
+        ar.release('wa-native-read','synthetic-native-read',epoch)
+
+
+def test_native_whatsapp_basis_cannot_claim_telegram_boundary_or_account(inbox):
+    from messaging_service.reply_state import observe,validate_observation
+    s,_,_,add,_=inbox;add('100',1,1)
+    observation={'observed_at':datetime.now(timezone.utc).isoformat(),
+        'basis':'whatsmeow_captured_chat','unread_count':None}
+    with pytest.raises(ValueError,match='invalid_read_observation'):
+        validate_observation({**observation,'read_inbox_max_id':10})
+    with s.pool.connection() as c:
+        with pytest.raises(ValueError,match='invalid_read_observation'):
+            observe(c,'queue-test','100',observation)
+
+
+@pytest.mark.parametrize('native_self',[None,False])
+def test_native_unknown_does_not_erase_or_refresh_previous_whatsapp_unread(seeded,native_self):
+    from messaging_service.reply_state import observe
+    s,_,_=seeded;ar=Archive(s)
+    ar.register('wa-read-handover','whatsapp','Synthetic handover',discover=True)
+    key=s.issue_key('wa-read-reader',['wa-read-handover'])
+    chat='100@c.us';at=datetime.now(timezone.utc)-timedelta(minutes=10)
+    ar.ingest(event(account='wa-read-handover',platform='whatsapp',chat=chat,
+        provider_id='false_100@c.us_x',sent_at=(at-timedelta(minutes=1)).isoformat(),
+        updated_at=(at-timedelta(minutes=1)).isoformat(),metadata={'chat_type':'private'}))
+    with s.pool.connection() as c:
+        observe(c,'wa-read-handover',chat,{'observed_at':at.isoformat(),
+            'unread_count':3,'basis':'whatsapp_cached_chat'})
+        before=c.execute('SELECT * FROM chat_read_observations WHERE account=%s',
+                         ('wa-read-handover',)).fetchone()
+        observe(c,'wa-read-handover',chat,{'observed_at':datetime.now(timezone.utc).isoformat(),
+            'unread_count':None,'basis':'whatsmeow_captured_chat','is_self_chat':native_self})
+        after=c.execute('SELECT * FROM chat_read_observations WHERE account=%s',
+                        ('wa-read-handover',)).fetchone()
+    assert after['observed_at']==before['observed_at']
+    assert after['unread_count']==3 and after['read_inbox_max_id'] is None
+    assert after['is_self_chat'] is native_self
+    row=s.list_chats(key,awaiting_reply=True)['items'][0]
+    assert row['read_state']=='stale' and row['provider_unread'] is None
+    assert not s.list_chats(key,awaiting_reply=True,only_unread=True)['items']
+
+
+@pytest.mark.parametrize('partial',[
+    {'unread_count':None,'read_inbox_max_id':None},
+    {'unread_count':None,'read_inbox_max_id':11},
+    {'unread_count':2,'read_inbox_max_id':None},
+])
+def test_partial_owner_read_snapshot_preserves_known_evidence_and_time(inbox,partial):
+    from messaging_service.reply_state import observe
+    s,_,_,add,_=inbox;add('100',1,1)
+    at=datetime.now(timezone.utc)-timedelta(minutes=10)
+    with s.pool.connection() as c:
+        observe(c,'queue-test','100',{'observed_at':at.isoformat(),
+            'unread_count':0,'read_inbox_max_id':10,'basis':'telegram_dialog','is_self_chat':False})
+        before=c.execute('SELECT * FROM chat_read_observations WHERE account=%s',('queue-test',)).fetchone()
+        observe(c,'queue-test','100',{'observed_at':datetime.now(timezone.utc).isoformat(),
+            'basis':'telegram_dialog','is_self_chat':None,**partial})
+        after=c.execute('SELECT * FROM chat_read_observations WHERE account=%s',('queue-test',)).fetchone()
+    assert after==before
+
+
+def test_unknown_can_update_proven_self_without_refreshing_read_or_accepting_delayed_self(inbox):
+    from messaging_service.reply_state import observe
+    s,_,_,add,_=inbox;add('100',1,1)
+    at=datetime.now(timezone.utc)-timedelta(minutes=10)
+    with s.pool.connection() as c:
+        observe(c,'queue-test','100',{'observed_at':at.isoformat(),
+            'unread_count':0,'read_inbox_max_id':1,'basis':'telegram_dialog'})
+        before=c.execute('SELECT * FROM chat_read_observations WHERE account=%s',('queue-test',)).fetchone()
+        observe(c,'queue-test','100',{'observed_at':datetime.now(timezone.utc).isoformat(),
+            'basis':'telegram_dialog','is_self_chat':True})
+        observe(c,'queue-test','100',{'observed_at':(at-timedelta(seconds=1)).isoformat(),
+            'basis':'telegram_dialog','is_self_chat':False})
+        after=c.execute('SELECT * FROM chat_read_observations WHERE account=%s',('queue-test',)).fetchone()
+    assert after=={**before,'is_self_chat':True}
+
+
 def test_edit_delete_and_old_backfill_respect_exact_dismissal(inbox):
     s, ar, key, add, queue=inbox
     mid=add('100',5,5)
@@ -291,7 +387,7 @@ def test_backup_hashes_exact_owner_observations_and_key_local_dismissal(inbox):
         observe(c,'queue-test','100',{'observed_at':datetime.now(timezone.utc).isoformat(),
             'unread_count':0,'read_inbox_max_id':1,'basis':'telegram_dialog'})
         manifest=database_manifest(c)
-        assert len(manifest)==51
+        assert len(manifest)==52
         assert manifest['reply_dismissals']['rows']==manifest['chat_read_observations']['rows']==1
         c.execute('UPDATE chat_read_observations SET unread_count=1 WHERE chat=%s',(chat,))
         changed=database_manifest(c)

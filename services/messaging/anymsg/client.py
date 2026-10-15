@@ -1,10 +1,16 @@
 """Bounded, credential-safe REST calls without automatic retries or redirects."""
 from __future__ import annotations
 
+import base64
+import binascii
+import hashlib
 import ipaddress
 import json
 import math
+import os
 import re
+import stat
+import time
 from datetime import datetime
 from urllib.parse import urlsplit
 
@@ -29,7 +35,80 @@ SAFE_ERROR_CODES = frozenset({
     'operation_expired','operation_rejected','invalid_operation_result',
     'reply_target_changed','invalid_subscription','subscription_limit','subscription_conflict','subscription_closed',
     'subscription_access_changed','invalid_subscription_state',
+    'invalid_upload','invalid_upload_chunk','upload_limit','upload_capacity',
+    'upload_expired','upload_offset_conflict','upload_hash_mismatch',
 })
+
+_UPLOAD_CHUNK_BYTES = 262144
+_UPLOAD_BODY_BYTES = 360448
+_UPLOAD_MAX_BYTES = 32 * 1024**2
+_UPLOAD_FIELDS = {
+    'prepare_file_upload': {'account','chat_id','filename','mime','bytes','sha256','request_id'},
+    'upload_file_chunk': {'upload_id','offset','data_base64'},
+    'get_file_upload': {'upload_id'},
+}
+
+
+def _upload_parameters(operation, parameters):
+    if parameters.keys() != _UPLOAD_FIELDS[operation]:
+        raise ValueError('invalid_upload_parameters')
+    for name, value in parameters.items():
+        if name in ('account','chat_id'):
+            valid = isinstance(value,str) and bool(re.fullmatch(r'[^\x00-\x20\x7f]{1,256}',value))
+        elif name == 'filename':
+            valid = isinstance(value,str) and 1 <= len(value) <= 255 and value not in ('.','..') and not any(
+                ord(c)<32 or ord(c)==127 or 0xD800<=ord(c)<=0xDFFF or c in '/\\' for c in value)
+        elif name == 'mime':
+            valid = isinstance(value,str) and len(value)<=128 and bool(re.fullmatch(
+                r'[a-zA-Z0-9!#$&^_.+-]+/[a-zA-Z0-9!#$&^_.+-]+',value))
+        elif name == 'bytes':valid = type(value) is int and 1<=value<=_UPLOAD_MAX_BYTES
+        elif name == 'sha256':valid = isinstance(value,str) and bool(re.fullmatch(r'[a-f0-9]{64}',value))
+        elif name == 'request_id':valid = isinstance(value,str) and bool(re.fullmatch(r'[a-zA-Z0-9_.:-]{8,128}',value))
+        elif name == 'upload_id':valid = isinstance(value,str) and bool(re.fullmatch(r'up_[a-f0-9]{32}',value))
+        elif name == 'offset':valid = type(value) is int and 0<=value<=_UPLOAD_MAX_BYTES
+        else:
+            valid = isinstance(value,str) and 1<=len(value)<=349528
+            if valid:
+                try:
+                    decoded=base64.b64decode(value,validate=True)
+                    valid=1<=len(decoded)<=_UPLOAD_CHUNK_BYTES and base64.b64encode(decoded).decode()==value
+                except (ValueError,binascii.Error):valid=False
+        if not valid:raise ValueError('invalid_upload_parameters')
+
+
+def _file_snapshot(fd):
+    info=os.fstat(fd)
+    if not stat.S_ISREG(info.st_mode) or not 1<=info.st_size<=_UPLOAD_MAX_BYTES:
+        raise ValueError('invalid_upload_file')
+    return (info.st_dev,info.st_ino,info.st_size,info.st_mtime_ns,info.st_ctime_ns)
+
+
+def _file_hash(fd):
+    os.lseek(fd,0,os.SEEK_SET)
+    digest=hashlib.sha256()
+    total=0
+    while chunk:=os.read(fd,_UPLOAD_CHUNK_BYTES):
+        total+=len(chunk)
+        if total>_UPLOAD_MAX_BYTES:raise AnyMsgError('upload_file_changed')
+        digest.update(chunk)
+    return digest.hexdigest()
+
+
+def _upload_receipt(value, metadata, *, upload_id=None, offset=None):
+    if (not isinstance(value,dict) or any(value.get(k)!=v for k,v in metadata.items() if k!='request_id')
+            or not isinstance(value.get('upload_id'),str)
+            or not re.fullmatch(r'up_[a-f0-9]{32}',value['upload_id'])
+            or upload_id is not None and value['upload_id']!=upload_id
+            or type(value.get('offset')) is not int or not 0<=value['offset']<=metadata['bytes']
+            or offset is not None and value['offset']!=offset
+            or type(value.get('chunk_bytes')) is not int or value['chunk_bytes']!=_UPLOAD_CHUNK_BYTES
+            or value.get('changes_provider_state') is not False
+            or value.get('owner_approval_verified_by_server') is not False
+            or value.get('status') not in ('uploading','ready','expired')
+            or (value['offset']==metadata['bytes']) != (value.get('status')=='ready') and value.get('status')!='expired'):
+        raise AnyMsgError('invalid_upload_response')
+    if value['status']=='expired':raise AnyMsgError('upload_expired')
+    return value
 
 
 _MESSENGER_FIELDS = {
@@ -184,11 +263,13 @@ class Client:
             _messenger_parameters(operation, parameters)
         if operation in _SUBSCRIPTION_FIELDS:
             _subscription_parameters(operation,parameters)
+        if operation in _UPLOAD_FIELDS:
+            _upload_parameters(operation,parameters)
         try:
             body=json.dumps(parameters,ensure_ascii=False,allow_nan=False,separators=(",",":")).encode("utf-8")
         except (ValueError,TypeError,RecursionError):
             raise ValueError("invalid_parameters") from None
-        if len(body)>16384:
+        if len(body)>(_UPLOAD_BODY_BYTES if operation=='upload_file_chunk' else 16384):
             raise ValueError("request_too_large")
         try:
             with self._http.stream("POST",self.base_url+"/v1/"+operation,content=body,
@@ -219,6 +300,70 @@ class Client:
 
     def capabilities(self):
         return self.call("capabilities")
+
+    def prepare_file_upload(self, *, account, chat_id, filename, mime, bytes, sha256, request_id):
+        """Stage scoped metadata only. Preserve request_id after an uncertain response."""
+        return self.call('prepare_file_upload',dict(account=account,chat_id=chat_id,filename=filename,
+            mime=mime,bytes=bytes,sha256=sha256,request_id=request_id))
+
+    def upload_file_chunk(self, *, upload_id, offset, data_base64):
+        """Append at most 256 KiB; no automatic retry and no messenger action."""
+        return self.call('upload_file_chunk',dict(upload_id=upload_id,offset=offset,data_base64=data_base64))
+
+    def get_file_upload(self, *, upload_id):
+        """Inspect an existing upload without sending it or changing its bytes."""
+        return self.call('get_file_upload',{'upload_id':upload_id})
+
+    def upload_file(self, file, *, account, chat_id, request_id, filename=None,
+                    mime='application/octet-stream'):
+        """Hash and stage a local regular file, at most 32 MiB, without sending it.
+
+        The same descriptor stays open for hashing and transfer. Changes reject
+        the operation; only a basename enters the protocol. An explicit repeated
+        invocation with the same request_id may resume the same upload. Unknown
+        requests are never retried automatically. Chunks are paced below 8/sec.
+        """
+        try:path=os.fspath(file)
+        except TypeError:raise ValueError('invalid_upload_file') from None
+        if not isinstance(path,str) or not path or '://' in path or '\x00' in path:
+            raise ValueError('invalid_upload_file')
+        name=os.path.basename(path) if filename is None else filename
+        content_type=mime.lower() if isinstance(mime,str) else mime
+        _upload_parameters('prepare_file_upload',dict(account=account,chat_id=chat_id,filename=name,
+            mime=content_type,bytes=1,sha256='0'*64,request_id=request_id))
+        fd=None
+        try:
+            if not all(hasattr(os,name) for name in ('O_NOFOLLOW','O_NONBLOCK')):
+                raise AnyMsgError('upload_file_unavailable')
+            fd=os.open(path,os.O_RDONLY|os.O_NOFOLLOW|os.O_NONBLOCK)
+            snapshot=_file_snapshot(fd)
+            digest=_file_hash(fd)
+            if _file_snapshot(fd)!=snapshot:raise AnyMsgError('upload_file_changed')
+            metadata=dict(account=account,chat_id=chat_id,filename=name,
+                mime=content_type,bytes=snapshot[2],sha256=digest,request_id=request_id)
+            _upload_parameters('prepare_file_upload',metadata)
+            receipt=_upload_receipt(self.prepare_file_upload(**metadata),metadata)
+            upload_id=receipt['upload_id']
+            offset=receipt['offset']
+            os.lseek(fd,offset,os.SEEK_SET)
+            last_chunk=None
+            while offset<snapshot[2]:
+                if _file_snapshot(fd)!=snapshot:raise AnyMsgError('upload_file_changed')
+                size=min(receipt['chunk_bytes'],snapshot[2]-offset)
+                chunk=os.read(fd,size)
+                if len(chunk)!=size:raise AnyMsgError('upload_file_changed')
+                if last_chunk is not None:time.sleep(max(0,0.15-(time.monotonic()-last_chunk)))
+                last_chunk=time.monotonic()
+                receipt=_upload_receipt(self.upload_file_chunk(upload_id=upload_id,offset=offset,
+                    data_base64=base64.b64encode(chunk).decode('ascii')),metadata,
+                    upload_id=upload_id,offset=offset+len(chunk))
+                offset=receipt['offset']
+            if _file_snapshot(fd)!=snapshot or _file_hash(fd)!=digest or _file_snapshot(fd)!=snapshot:
+                raise AnyMsgError('upload_file_changed')
+            return receipt
+        except OSError:raise AnyMsgError('upload_file_unavailable') from None
+        finally:
+            if fd is not None:os.close(fd)
 
     def search(self, query, **filters):
         return self.call("search",{"query":query,**filters})

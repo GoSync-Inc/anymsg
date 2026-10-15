@@ -449,7 +449,7 @@ def test_missing_send_receipt_is_unknown_and_has_no_second_attempt(receipt, monk
     worker = Worker(SimpleNamespace(), provider)
     assert asyncio.run(worker._once()) and not asyncio.run(worker._once())
     assert calls == ['native-send'] and timeouts == [30]
-    assert finishes == [('unknown', 'send_result_unknown')]
+    assert finishes == [('unknown', 'send_receipt_missing')]
 
 
 def test_catalog_covers_explicit_families_and_provider_differences():
@@ -498,8 +498,17 @@ def test_catalog_covers_explicit_families_and_provider_differences():
         assert 'exact archive revision' in catalog['edit_message']['limitation']
         assert 'plain text only' in catalog['edit_message']['limitation']
         assert set(catalog['forward_message']['parameters_schema']) == {'source_message_id', 'source_revision'}
-        assert set(catalog['send_file']['parameters_schema']) == {'attachment_id', 'sha256', 'mode', 'caption'}
+        assert set(catalog['send_file']['parameters_schema']) == {'attachment_id', 'upload_id', 'sha256', 'mode', 'caption'}
+        assert catalog['send_file']['parameters_schema']['sha256']['required'] is True
         assert '32 MiB' in catalog['send_file']['limitation']
+    for platform in ('telegram','whatsapp'):
+        for source in ({'attachment_id':'att_'+'a'*32},{'upload_id':'up_'+'c'*32}):
+            parameters=validate_operation(platform,'send_file',{**source,'sha256':'b'*64})
+            assert all(parameters[key]==value for key,value in source.items())
+            assert parameters['sha256']=='b'*64
+        for source in ({},{'attachment_id':'att_'+'a'*32,'upload_id':'up_'+'c'*32}):
+            with pytest.raises(ValueError,match='^invalid_operation_parameters$'):
+                validate_operation(platform,'send_file',{**source,'sha256':'b'*64})
 
 
 @pytest.mark.parametrize('operation, parameters', [

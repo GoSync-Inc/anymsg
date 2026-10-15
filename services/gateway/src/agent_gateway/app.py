@@ -2,6 +2,7 @@
 
 from contextlib import asynccontextmanager
 from contextvars import ContextVar
+import asyncio
 import json
 import logging
 import re
@@ -21,6 +22,36 @@ from .policy import Denied, Policy
 
 current_key = ContextVar("deedkit_key", default="")
 HEADERS = {"Cache-Control": "no-store", "Referrer-Policy": "no-referrer", "X-Content-Type-Options": "nosniff"}
+NORMAL_BODY_LIMIT = 65536
+UPLOAD_BODY_LIMIT = 360448
+UPLOAD_CHUNK_TOOL = "messages_upload_file_chunk"
+
+
+def is_chunk_call(path, body):
+    """Only one reviewed tool can use the larger envelope; never batches/other RPCs."""
+    if path == "/v1/" + UPLOAD_CHUNK_TOOL:
+        return True
+    if path.rstrip("/") != "/mcp":
+        return False
+
+    def unique(pairs):
+        result = {}
+        for name, value in pairs:
+            if name in result:
+                raise ValueError
+            result[name] = value
+        return result
+
+    try:
+        value = json.loads(body, object_pairs_hook=unique)
+        return (
+            isinstance(value, dict)
+            and value.get("method") == "tools/call"
+            and isinstance(value.get("params"), dict)
+            and value["params"].get("name") == UPLOAD_CHUNK_TOOL
+        )
+    except (ValueError, UnicodeDecodeError, RecursionError):
+        return False
 
 
 def create_app(policy_path, public_url, *, transports=None):
@@ -79,7 +110,9 @@ def create_app(policy_path, public_url, *, transports=None):
     transport = server.streamable_http_app(
         stateless_http=True,
         json_response=True,
-        max_request_body_size=65536,
+        # The outer boundary enforces 64 KiB for every request except the
+        # explicitly authorized upload chunk tool, including other MCP RPCs.
+        max_request_body_size=UPLOAD_BODY_LIMIT,
         transport_security=TransportSecuritySettings(
             enable_dns_rebinding_protection=True,
             allowed_hosts=[origin.netloc],
@@ -170,22 +203,39 @@ def create_app(policy_path, public_url, *, transports=None):
                         headers={"Allow": "POST"},
                     )(scope, receive, protected_send)
                 if request.method == "POST":
+                    limit = NORMAL_BODY_LIMIT
+                    chunk_route = request.url.path == "/v1/" + UPLOAD_CHUNK_TOOL
+                    mcp_route = request.url.path.rstrip("/") == "/mcp"
+                    if chunk_route or mcp_route:
+                        try:
+                            policy.authorize(key, UPLOAD_CHUNK_TOOL)
+                            limit = UPLOAD_BODY_LIMIT
+                        except Denied:
+                            if chunk_route:
+                                raise
                     try:
                         declared = int(request.headers.get("content-length", "0"))
                     except ValueError:
                         raise Denied("invalid_body", 422) from None
-                    if not 0 <= declared <= 65536:
+                    if not 0 <= declared <= limit:
                         raise Denied("body_too_large", 413)
                     body = bytearray()
-                    while True:
-                        event = await receive()
-                        if event["type"] == "http.disconnect":
-                            return
-                        body.extend(event.get("body", b""))
-                        if len(body) > 65536:
-                            raise Denied("body_too_large", 413)
-                        if not event.get("more_body"):
-                            break
+                    try:
+                        async with asyncio.timeout(10):
+                            while True:
+                                event = await receive()
+                                if event["type"] == "http.disconnect":
+                                    return
+                                chunk = event.get("body", b"")
+                                if len(body) + len(chunk) > limit:
+                                    raise Denied("body_too_large", 413)
+                                body.extend(chunk)
+                                if not event.get("more_body"):
+                                    break
+                    except TimeoutError:
+                        raise Denied("body_timeout", 408) from None
+                    if len(body) > NORMAL_BODY_LIMIT and not is_chunk_call(request.url.path, body):
+                        raise Denied("body_too_large", 413)
                     sent = False
                     original_receive = receive
 

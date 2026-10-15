@@ -8,7 +8,8 @@ MESSENGER_PERMISSIONS = frozenset(('read-live', 'contacts-read', 'profile-read',
     'message-edit', 'message-delete', 'message-react', 'message-pin', 'read-state',
     'chat-manage', 'contacts-manage', 'groups-manage', 'profile-manage'))
 SUBSCRIPTION_PERMISSIONS = frozenset(('subscription-write',))
-PERMISSIONS = LEGACY_PERMISSIONS | MESSENGER_PERMISSIONS | SUBSCRIPTION_PERMISSIONS
+UPLOAD_PERMISSIONS = frozenset(('upload',))
+PERMISSIONS = LEGACY_PERMISSIONS | MESSENGER_PERMISSIONS | SUBSCRIPTION_PERMISSIONS | UPLOAD_PERMISSIONS
 
 
 def effective_permissions(principal_permissions, key_permissions):
@@ -31,6 +32,7 @@ OPERATION_PERMISSIONS = {
     'create_subscription':'subscription-write', 'list_subscriptions':'read',
     'get_subscription':'read', 'update_subscription':'subscription-write',
     'get_subscription_events':'read',
+    'prepare_file_upload':'upload','upload_file_chunk':'upload','get_file_upload':'upload',
 }
 AUDIT_OPERATIONS = frozenset(OPERATION_PERMISSIONS) | {
     'issue_key', 'revoke_key', 'set_access', 'http_boundary', 'send_dispatch', 'set_sending',
@@ -54,6 +56,8 @@ AUDIT_CODES = frozenset({
     'operation_access_changed','operation_result_unknown','operation_target_changed','operation_rejected',
     'reply_target_changed','invalid_subscription','subscription_limit','subscription_conflict','subscription_closed',
     'subscription_access_changed','invalid_subscription_state',
+    'invalid_upload','invalid_upload_chunk','upload_limit','upload_capacity','upload_expired',
+    'upload_offset_conflict','upload_hash_mismatch',
 })
 UNSET = object()
 

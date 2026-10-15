@@ -1,3 +1,12 @@
+import {createHash} from 'node:crypto';
+import {constants} from 'node:fs';
+import {open} from 'node:fs/promises';
+import {basename} from 'node:path';
+import {setTimeout as delay} from 'node:timers/promises';
+
+const UPLOAD_CHUNK_BYTES = 262144;
+const UPLOAD_BODY_BYTES = 360448;
+const UPLOAD_MAX_BYTES = 32 * 1024 * 1024;
 const METHODS = Object.freeze([
   'capabilities', 'list_chats', 'search', 'search_people', 'search_files',
   'get_messages', 'get_context', 'get_sync_status', 'resolve_reference',
@@ -6,6 +15,7 @@ const METHODS = Object.freeze([
   'preview_message','send_message','get_send_status',
   'list_messenger_operations','preview_messenger_operation','execute_messenger_operation','get_messenger_operation',
   'create_subscription','list_subscriptions','get_subscription','update_subscription','get_subscription_events',
+  'prepare_file_upload','upload_file_chunk','get_file_upload',
 ]);
 export const tools = METHODS;
 const SAFE_ERRORS = new Set([
@@ -26,7 +36,81 @@ const SAFE_ERRORS = new Set([
   'operation_expired','operation_rejected','invalid_operation_result',
   'reply_target_changed','invalid_subscription','subscription_limit','subscription_conflict','subscription_closed',
   'subscription_access_changed','invalid_subscription_state',
+  'invalid_upload','invalid_upload_chunk','upload_limit','upload_capacity',
+  'upload_expired','upload_offset_conflict','upload_hash_mismatch',
 ]);
+
+const UPLOAD_FIELDS = Object.freeze({
+  prepare_file_upload:['account','chat_id','filename','mime','bytes','sha256','request_id'],
+  upload_file_chunk:['upload_id','offset','data_base64'],
+  get_file_upload:['upload_id'],
+});
+function uploadArguments(method,args) {
+  const fields=UPLOAD_FIELDS[method];
+  if (!plainObject(args) || !operationJson(args) || fields.some(key=>!Object.hasOwn(args,key)) ||
+      Reflect.ownKeys(args).some(key=>!fields.includes(key))) throw new TypeError('Invalid upload arguments');
+  for (const [name,value] of Object.entries(args)) {
+    let valid;
+    if (['account','chat_id'].includes(name)) valid=subscriptionReference(value);
+    else if (name==='filename') valid=typeof value==='string' && value.isWellFormed() &&
+      [...value].length>=1 && [...value].length<=255 && !['.','..'].includes(value) && !/[\x00-\x1f\x7f/\\]/.test(value);
+    else if (name==='mime') valid=typeof value==='string' && value.length<=128 &&
+      /^[a-zA-Z0-9!#$&^_.+-]+\/[a-zA-Z0-9!#$&^_.+-]+$/.test(value);
+    else if (name==='bytes') valid=Number.isSafeInteger(value) && value>=1 && value<=UPLOAD_MAX_BYTES;
+    else if (name==='sha256') valid=typeof value==='string' && /^[a-f0-9]{64}$/.test(value);
+    else if (name==='request_id') valid=typeof value==='string' && /^[a-zA-Z0-9_.:-]{8,128}$/.test(value);
+    else if (name==='upload_id') valid=typeof value==='string' && /^up_[a-f0-9]{32}$/.test(value);
+    else if (name==='offset') valid=Number.isSafeInteger(value) && value>=0 && value<=UPLOAD_MAX_BYTES;
+    else {
+      valid=typeof value==='string' && value.length>=1 && value.length<=349528;
+      if (valid) {
+        const decoded=Buffer.from(value,'base64');
+        valid=decoded.length>=1 && decoded.length<=UPLOAD_CHUNK_BYTES && decoded.toString('base64')===value;
+      }
+    }
+    if (!valid) throw new TypeError('Invalid upload arguments');
+  }
+  return args;
+}
+
+function uploadReceipt(value,metadata,{uploadId,offset}={}) {
+  if (!plainObject(value) || Object.entries(metadata).some(([key,item])=>key!=='request_id' && value[key]!==item) ||
+      typeof value.upload_id!=='string' || !/^up_[a-f0-9]{32}$/.test(value.upload_id) ||
+      uploadId!==undefined && value.upload_id!==uploadId ||
+      !Number.isSafeInteger(value.offset) || value.offset<0 || value.offset>metadata.bytes ||
+      offset!==undefined && value.offset!==offset ||
+      value.chunk_bytes!==UPLOAD_CHUNK_BYTES || value.changes_provider_state!==false ||
+      value.owner_approval_verified_by_server!==false ||
+      !['uploading','ready','expired'].includes(value.status) ||
+      value.status!=='expired' && (value.offset===metadata.bytes)!==(value.status==='ready'))
+    throw new AnyMsgError('invalid_upload_response');
+  if (value.status==='expired') throw new AnyMsgError('upload_expired');
+  return value;
+}
+
+async function fileSnapshot(handle) {
+  const value=await handle.stat({bigint:true});
+  if (!value.isFile() || value.size<1n || value.size>BigInt(UPLOAD_MAX_BYTES))
+    throw new AnyMsgError('invalid_upload_file');
+  return {size:Number(value.size),identity:[value.dev,value.ino,value.size,value.mtimeNs,value.ctimeNs].join(':')};
+}
+function uploadAbort(signal) {
+  if (signal?.aborted) throw new AnyMsgError('request_aborted');
+}
+async function hashFile(handle,size,signal) {
+  const hash=createHash('sha256');
+  const buffer=Buffer.allocUnsafe(UPLOAD_CHUNK_BYTES);
+  let position=0;
+  while(position<size) {
+    uploadAbort(signal);
+    const length=Math.min(buffer.length,size-position);
+    const {bytesRead}=await handle.read(buffer,0,length,position);
+    if (bytesRead!==length) throw new AnyMsgError('upload_file_changed');
+    hash.update(buffer.subarray(0,bytesRead));
+    position+=bytesRead;
+  }
+  return hash.digest('hex');
+}
 
 const MESSENGER_FIELDS = Object.freeze({
   list_messenger_operations: [['account'],['account']],
@@ -224,9 +308,11 @@ export class AnyMsgClient {
       throw new TypeError('Arguments must be an object without a token field');
     if (Object.hasOwn(MESSENGER_FIELDS,method)) messengerArguments(method,arguments_);
     if (Object.hasOwn(SUBSCRIPTION_FIELDS,method)) subscriptionArguments(method,arguments_);
+    if (Object.hasOwn(UPLOAD_FIELDS,method)) uploadArguments(method,arguments_);
     let body;
     try { body = JSON.stringify(arguments_); } catch { throw new TypeError('Arguments must be JSON serializable'); }
-    if (!body || Buffer.byteLength(body) > 16384) throw new TypeError('Request exceeds 16384 bytes');
+    const requestMaximum=method==='upload_file_chunk'?UPLOAD_BODY_BYTES:16384;
+    if (!body || Buffer.byteLength(body)>requestMaximum) throw new TypeError(`Request exceeds ${requestMaximum} bytes`);
     const controller = new AbortController();
     const timer = setTimeout(() => controller.abort(), this.#timeout);
     const activeSignal = signal ? AbortSignal.any([signal, controller.signal]) : controller.signal;
@@ -255,6 +341,61 @@ export class AnyMsgClient {
     } finally { clearTimeout(timer); }
   }
   capabilities(args = {}) { return this.call('capabilities', args); }
+  prepareFileUpload(args,options) {
+    return this.call('prepare_file_upload',uploadArguments('prepare_file_upload',args),options);
+  }
+  uploadFileChunk(args,options) {
+    return this.call('upload_file_chunk',uploadArguments('upload_file_chunk',args),options);
+  }
+  getFileUpload(args,options) {
+    return this.call('get_file_upload',uploadArguments('get_file_upload',args),options);
+  }
+  async uploadFile(file,options={}) {
+    // Paths are consumed only here. The HTTP protocol contains a basename and bytes.
+    if (typeof file!=='string' || !file || file.includes('://') || file.includes('\x00') || !plainObject(options) ||
+        Reflect.ownKeys(options).some(key=>!['account','chat_id','request_id','filename','mime','signal'].includes(key) ||
+          !('value' in Object.getOwnPropertyDescriptor(options,key)))) throw new TypeError('Invalid local upload arguments');
+    const {account,chat_id,request_id,filename=basename(file),mime='application/octet-stream',signal}=options;
+    if (signal!==undefined && !(signal instanceof AbortSignal)) throw new TypeError('Invalid upload signal');
+    uploadArguments('prepare_file_upload',{account,chat_id,request_id,filename,mime,bytes:1,sha256:'0'.repeat(64)});
+    let handle;
+    try {
+      uploadAbort(signal);
+      if (!Number.isInteger(constants.O_NOFOLLOW)) throw new AnyMsgError('upload_file_unavailable');
+      handle=await open(file,constants.O_RDONLY|constants.O_NOFOLLOW|constants.O_NONBLOCK);
+      const snapshot=await fileSnapshot(handle);
+      const digest=await hashFile(handle,snapshot.size,signal);
+      if ((await fileSnapshot(handle)).identity!==snapshot.identity) throw new AnyMsgError('upload_file_changed');
+      const metadata={account,chat_id,request_id,filename,mime:mime.toLowerCase(),bytes:snapshot.size,sha256:digest};
+      let receipt=uploadReceipt(await this.prepareFileUpload(metadata,{signal}),metadata);
+      const uploadId=receipt.upload_id;
+      let offset=receipt.offset;
+      let previous=0;
+      const buffer=Buffer.allocUnsafe(UPLOAD_CHUNK_BYTES);
+      while(offset<snapshot.size) {
+        uploadAbort(signal);
+        if ((await fileSnapshot(handle)).identity!==snapshot.identity) throw new AnyMsgError('upload_file_changed');
+        const length=Math.min(receipt.chunk_bytes,snapshot.size-offset);
+        const {bytesRead}=await handle.read(buffer,0,length,offset);
+        if (bytesRead!==length) throw new AnyMsgError('upload_file_changed');
+        const remaining=150-(performance.now()-previous);
+        if (previous && remaining>0) await delay(remaining,undefined,{signal});
+        previous=performance.now();
+        receipt=uploadReceipt(await this.uploadFileChunk({upload_id:uploadId,offset,
+          data_base64:buffer.subarray(0,bytesRead).toString('base64')},{signal}),metadata,
+          {uploadId,offset:offset+bytesRead});
+        offset=receipt.offset;
+      }
+      if ((await fileSnapshot(handle)).identity!==snapshot.identity ||
+          await hashFile(handle,snapshot.size,signal)!==digest ||
+          (await fileSnapshot(handle)).identity!==snapshot.identity) throw new AnyMsgError('upload_file_changed');
+      uploadAbort(signal);
+      return receipt;
+    } catch(error) {
+      if (error instanceof AnyMsgError) throw error;
+      throw new AnyMsgError(signal?.aborted?'request_aborted':'upload_file_unavailable');
+    } finally { await handle?.close(); }
+  }
   dismissReply(args) { return this.call('dismiss_reply', args); }
   listChats(args = {}) { return this.call('list_chats', args); }
   search(args = {}) { return this.call('search', args); }
