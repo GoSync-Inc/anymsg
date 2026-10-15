@@ -64,27 +64,22 @@ func nativeMediaMetadata(m *events.Message) (nativeMediaInfo, error) {
 	default:
 		return out, errors.New("unsupported_media_type")
 	}
-	if out.Payload.GetFileLength() > uint64(^uint64(0)>>1) {
-		return out, errors.New("media_size_limit")
+	// A declared size the archive cannot represent stays unknown (-1); it is
+	// never clamped into a plausible value. Such an original is not fetched.
+	out.Bytes = -1
+	if out.Payload.GetFileLength() <= maxEnvelopeMediaBytes {
+		out.Bytes = int64(out.Payload.GetFileLength())
 	}
-	out.Bytes = int64(out.Payload.GetFileLength())
-	out.Mime = strings.ToLower(strings.TrimSpace(strings.SplitN(out.Payload.GetMimetype(), ";", 2)[0]))
-	if out.Mime == "" {
-		out.Mime = "application/octet-stream"
-	}
+	out.Mime = envelopeMime(out.Payload.GetMimetype())
 	if out.Filename == "" {
-		id := LegacyMessageID(m)
-		if len(id) > 120 {
-			id = id[:120]
-		}
-		out.Filename = id + ".bin"
+		out.Filename = envelopeText(LegacyMessageID(m), 120) + ".bin"
 	}
-	out.Filename = strings.Map(func(r rune) rune {
+	out.Filename = envelopeFilename(strings.Map(func(r rune) rune {
 		if r < 32 || r == 127 || r == '/' || r == '\\' {
 			return '_'
 		}
 		return r
-	}, out.Filename)
+	}, out.Filename))
 	return out, nil
 }
 
@@ -167,6 +162,9 @@ func downloadMedia(ctx context.Context, req mediaRequest, cfg Config, policy fun
 	meta, err := nativeMediaMetadata(m)
 	if err != nil {
 		return err
+	}
+	if meta.Bytes < 0 {
+		return errors.New("media_size_limit")
 	}
 	if req.Descriptor.ProviderID != req.Message || req.Descriptor.Bytes != meta.Bytes || req.Descriptor.Filename != meta.Filename || req.Descriptor.Mime != meta.Mime {
 		return errors.New("media_reference_changed")

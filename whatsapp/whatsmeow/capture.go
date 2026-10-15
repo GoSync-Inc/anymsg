@@ -11,9 +11,86 @@ import (
 	"go.mau.fi/whatsmeow/types/events"
 	"google.golang.org/protobuf/proto"
 	"os"
+	"regexp"
 	"strings"
 	"time"
+	"unicode/utf8"
 )
+
+// Archive envelope bounds enforced by services/messaging envelope.validate and
+// adapters.whatsapp_message. Python counts code points; for valid UTF-8 that is
+// the Go rune count. Provider content is end-to-end encrypted and sender
+// controlled, so display fields are sanitized here instead of being rejected.
+const (
+	maxEnvelopeBody       = 65536
+	maxEnvelopeSenderName = 512
+	maxEnvelopeFilename   = 255
+	maxEnvelopeMime       = 127
+	maxEnvelopeProviderID = 256
+	maxEnvelopeSender     = 160
+	maxEnvelopeMediaBytes = 8 << 30
+	maxEnvelopeUnix       = 253402300799 // 9999-12-31T23:59:59Z, Python datetime bound
+)
+
+var envelopeMimePattern = regexp.MustCompile(`^[a-z0-9_.+-]+/[a-z0-9_.+-]+$`)
+
+// envelopeText returns valid UTF-8 without NUL and at most limit code points.
+// Each invalid byte becomes U+FFFD exactly as encoding/json would emit it, so
+// a value echoed back by Python (e.g. a media descriptor) compares equal.
+func envelopeText(s string, limit int) string {
+	if utf8.ValidString(s) && !strings.ContainsRune(s, 0) && utf8.RuneCountInString(s) <= limit {
+		return s
+	}
+	var b strings.Builder
+	for i, n := 0, 0; i < len(s) && n < limit; {
+		r, size := utf8.DecodeRuneInString(s[i:])
+		i += size
+		if r == 0 {
+			continue
+		}
+		b.WriteRune(r)
+		n++
+	}
+	return b.String()
+}
+
+// envelopeIdentifier reports whether a provider reference can be archived
+// unchanged. References are never truncated: a shortened ID names another message.
+func envelopeIdentifier(s string, limit int) bool {
+	return s != "" && utf8.ValidString(s) && !strings.ContainsRune(s, 0) && utf8.RuneCountInString(s) <= limit
+}
+
+// envelopeMime keeps only the media type and falls back to the generic type when
+// the archive pattern would reject it.
+func envelopeMime(raw string) string {
+	mime := strings.ToLower(strings.TrimSpace(strings.SplitN(raw, ";", 2)[0]))
+	if len(mime) > maxEnvelopeMime || !envelopeMimePattern.MatchString(mime) {
+		return "application/octet-stream"
+	}
+	return mime
+}
+
+// envelopeFilename shortens a display-only name, keeping a short extension.
+func envelopeFilename(name string) string {
+	name = envelopeText(name, len(name))
+	if utf8.RuneCountInString(name) <= maxEnvelopeFilename {
+		return name
+	}
+	ext := ""
+	if i := strings.LastIndexByte(name, '.'); i > 0 && utf8.RuneCountInString(name[i:]) <= 16 {
+		ext = name[i:]
+	}
+	return envelopeText(strings.TrimSuffix(name, ext), maxEnvelopeFilename-utf8.RuneCountInString(ext)) + ext
+}
+
+// envelopeEditStamp drops sender-controlled edit times the archive cannot
+// represent: before the original send or past Python's datetime range.
+func envelopeEditStamp(ms int64, sent int64) any {
+	if ms <= 0 || ms < sent*1000 || ms > maxEnvelopeUnix*1000 {
+		return nil
+	}
+	return ms
+}
 
 // Small deterministic offline bridge lets the existing Python validator check
 // real native envelopes. It cannot initialize or touch a WhatsApp session.
@@ -31,6 +108,7 @@ func normalizeFixture(path string) error {
 		Mentions                                                             []string
 		SenderAlt                                                            string `json:"sender_alt"`
 		RecipientAlt                                                         string `json:"recipient_alt"`
+		SenderName                                                           string `json:"sender_name"`
 	}
 	data, err := readPrivate(path, 1<<20)
 	if err != nil {
@@ -72,7 +150,7 @@ func normalizeFixture(path string) error {
 	default:
 		msg = &waE2E.Message{ExtendedTextMessage: &waE2E.ExtendedTextMessage{Text: proto.String(v.Text), ContextInfo: ctx}}
 	}
-	event := &events.Message{Info: types.MessageInfo{MessageSource: types.MessageSource{Chat: chat, Sender: sender, IsGroup: chat.Server == types.GroupServer, IsFromMe: v.FromMe}, ID: v.ID, Timestamp: time.Unix(v.Timestamp, 0)}, Message: msg, RawMessage: msg}
+	event := &events.Message{Info: types.MessageInfo{MessageSource: types.MessageSource{Chat: chat, Sender: sender, IsGroup: chat.Server == types.GroupServer, IsFromMe: v.FromMe}, ID: v.ID, Timestamp: time.Unix(v.Timestamp, 0), PushName: v.SenderName}, Message: msg, RawMessage: msg}
 	if v.SenderAlt != "" {
 		event.Info.SenderAlt, _ = ParseChatID(v.SenderAlt)
 	}
@@ -134,13 +212,27 @@ func observedPair(id, other types.JID, at string) any {
 	if pn.Server == types.HiddenUserServer {
 		pn, lid = other, id
 	}
-	if pn.Server != types.DefaultUserServer || lid.Server != types.HiddenUserServer || pn.User == "" || lid.User == "" {
+	if pn.Server != types.DefaultUserServer || lid.Server != types.HiddenUserServer || !personalUser(pn.User) || !personalUser(lid.User) {
 		return nil
 	}
 	return map[string]any{"identity_id": LegacyChatID(id), "pn": LegacyChatID(pn), "lid": LegacyChatID(lid), "provenance": "whatsmeow_message_alt_v1", "observed_at": at}
 }
+
+// The archive accepts PN/LID evidence only for 1-20 digit personal IDs and
+// rejects the whole capture otherwise; unverifiable pairs are simply omitted.
+func personalUser(user string) bool {
+	if user == "" || len(user) > 20 {
+		return false
+	}
+	for _, c := range []byte(user) {
+		if c < '0' || c > '9' {
+			return false
+		}
+	}
+	return true
+}
 func NormalizeMessage(e *events.Message, owner types.JID, ownerAliases ...types.JID) (map[string]any, error) {
-	if e == nil || e.Info.ID == "" || len(e.Info.ID) > 120 || e.Info.Timestamp.Unix() <= 0 {
+	if e == nil || e.Info.ID == "" || len(e.Info.ID) > 120 || e.Info.Timestamp.Unix() <= 0 || e.Info.Timestamp.Unix() > maxEnvelopeUnix {
 		return nil, errors.New("invalid_provider_message")
 	}
 	chat := LegacyChatID(e.Info.Chat)
@@ -148,11 +240,15 @@ func NormalizeMessage(e *events.Message, owner types.JID, ownerAliases ...types.
 		return nil, errors.New("unsupported_chat")
 	}
 	e = unwrap(e)
+	messageID, sender := LegacyMessageID(e), LegacyChatID(e.Info.Sender)
+	if !envelopeIdentifier(messageID, maxEnvelopeProviderID) || (sender != "" && !envelopeIdentifier(sender, maxEnvelopeSender)) {
+		return nil, errors.New("invalid_provider_message")
+	}
 	m := e.Message
 	body, kind, media := "", "unknown", ""
 	var filename, mime, size, duration, reply, mentions, replyOwner, forwarded, edited any
 	if e.IsEdit && e.Info.MsgBotInfo.EditSenderTimestampMS.UnixMilli() > 0 {
-		edited = e.Info.MsgBotInfo.EditSenderTimestampMS.UnixMilli()
+		edited = envelopeEditStamp(e.Info.MsgBotInfo.EditSenderTimestampMS.UnixMilli(), e.Info.Timestamp.Unix())
 	}
 	service := false
 	if m == nil {
@@ -240,7 +336,8 @@ func NormalizeMessage(e *events.Message, owner types.JID, ownerAliases ...types.
 		}
 		if ctx := messageContext(m); ctx != nil {
 			forwarded = ctx.GetIsForwarded()
-			if ctx.GetStanzaID() != "" {
+			// An unarchivable reference is omitted, never shortened into another ID.
+			if envelopeIdentifier(ctx.GetStanzaID(), maxEnvelopeProviderID) {
 				reply = ctx.GetStanzaID()
 				replyOwner = nil
 				if j, err := types.ParseJID(ctx.GetParticipant()); err == nil && !owner.IsEmpty() {
@@ -267,10 +364,14 @@ func NormalizeMessage(e *events.Message, owner types.JID, ownerAliases ...types.
 		}
 	}
 	if media != "" {
+		// Metadata is already normalized to the archive descriptor contract.
 		if meta, err := nativeMediaMetadata(e); err == nil {
 			filename = meta.Filename
 			mime = meta.Mime
-			size = meta.Bytes
+			size = nil
+			if meta.Bytes >= 0 {
+				size = meta.Bytes
+			}
 		} else if e.IsViewOnce {
 			media = ""
 			filename = nil
@@ -280,14 +381,15 @@ func NormalizeMessage(e *events.Message, owner types.JID, ownerAliases ...types.
 			return nil, err
 		}
 	}
-	if len(body) > 65536 {
-		return nil, errors.New("invalid_provider_message")
-	}
-	if v, ok := mime.(string); ok {
-		if strings.ContainsAny(v, "\r\n\x00") {
-			return nil, errors.New("invalid_provider_mime")
-		}
-		mime = strings.ToLower(strings.TrimSpace(strings.Split(v, ";")[0]))
+	// Python counts the body in code points and rejects NUL. Keep the archived
+	// text instead of failing capture; a changed body is no longer the exact
+	// native wire, so it carries no wire digest claim.
+	wire := body
+	body = envelopeText(body, maxEnvelopeBody)
+	formatting := map[string]any{"version": 1, "state": "unknown", "basis": nil, "wire_sha256": nil, "entities": nil, "unsupported_entities": []any{}, "warnings": []string{"native_entities_not_captured"}}
+	if body == wire {
+		h := sha256.Sum256([]byte(body))
+		formatting = map[string]any{"version": 1, "state": "wire_observed", "basis": "whatsapp_native_wire", "wire_sha256": hex.EncodeToString(h[:]), "entities": nil, "unsupported_entities": []any{}, "warnings": []string{"syntax_interpretation_unknown"}}
 	}
 	var self any
 	if e.Info.IsGroup {
@@ -295,7 +397,6 @@ func NormalizeMessage(e *events.Message, owner types.JID, ownerAliases ...types.
 	} else if !owner.IsEmpty() && (e.Info.Chat.Server == owner.Server || (!lidEmpty(ownerAliases) && e.Info.Chat.Server == types.HiddenUserServer)) {
 		self = identityObservation(e.Info.Chat, append(ownerAliases, owner)...)
 	}
-	h := sha256.Sum256([]byte(body))
 	observations := []any{}
 	at := time.Now().UTC().Format(time.RFC3339Nano)
 	if pair := observedPair(e.Info.Sender, e.Info.SenderAlt, at); pair != nil {
@@ -304,7 +405,7 @@ func NormalizeMessage(e *events.Message, owner types.JID, ownerAliases ...types.
 	if pair := observedPair(e.Info.Chat, e.Info.RecipientAlt, at); pair != nil && LegacyChatID(e.Info.Chat) != LegacyChatID(e.Info.Sender) {
 		observations = append(observations, pair)
 	}
-	return map[string]any{"chatId": chat, "chatName": chat, "messageId": LegacyMessageID(e), "messageType": kind, "timestampResolution": "second", "durationSeconds": duration, "isService": service, "isSelfChat": self, "senderId": LegacyChatID(e.Info.Sender), "senderName": e.Info.PushName, "body": body, "timestamp": e.Info.Timestamp.Unix(), "fromMe": e.Info.IsFromMe, "hasMedia": media != "", "filename": filename, "mimetype": mime, "filesize": size, "replyToId": reply, "mentionsOwner": mentions, "replyToOwner": replyOwner, "forwarded": forwarded, "mediaKind": nilString(media), "editedTimestampMs": edited, "identityObservations": observations, "formatting": map[string]any{"version": 1, "state": "wire_observed", "basis": "whatsapp_native_wire", "wire_sha256": hex.EncodeToString(h[:]), "entities": nil, "unsupported_entities": []any{}, "warnings": []string{"syntax_interpretation_unknown"}}}, nil
+	return map[string]any{"chatId": chat, "chatName": chat, "messageId": messageID, "messageType": kind, "timestampResolution": "second", "durationSeconds": duration, "isService": service, "isSelfChat": self, "senderId": sender, "senderName": envelopeText(e.Info.PushName, maxEnvelopeSenderName), "body": body, "timestamp": e.Info.Timestamp.Unix(), "fromMe": e.Info.IsFromMe, "hasMedia": media != "", "filename": filename, "mimetype": mime, "filesize": size, "replyToId": reply, "mentionsOwner": mentions, "replyToOwner": replyOwner, "forwarded": forwarded, "mediaKind": nilString(media), "editedTimestampMs": edited, "identityObservations": observations, "formatting": formatting}, nil
 }
 func lidEmpty(ids []types.JID) bool {
 	for _, id := range ids {
@@ -385,7 +486,7 @@ func captureEnvelope(account string, e *events.Message, owner types.JID, origin 
 		return nil, err
 	}
 	if change == "edit" && editStamp > 0 {
-		v["editedTimestampMs"] = editStamp
+		v["editedTimestampMs"] = envelopeEditStamp(editStamp, e.Info.Timestamp.Unix())
 	}
 	return map[string]any{"kind": "whatsapp_event", "account": account, "event": v, "change": change, "observed_at": at, "origin": origin}, nil
 }
