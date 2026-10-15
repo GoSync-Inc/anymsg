@@ -36,9 +36,9 @@ class Refused(RuntimeError):
     pass
 
 
-def run(argv, *, cwd=None):
+def run(argv, *, cwd=None, umask=-1):
     # Never include command output in an exception: Compose can contain secrets.
-    result = subprocess.run(argv, cwd=cwd, text=True, capture_output=True, timeout=1800)
+    result = subprocess.run(argv, cwd=cwd, text=True, capture_output=True, timeout=1800, umask=umask)
     if result.returncode:
         raise Refused(f"{argv[0]} failed (exit {result.returncode}); production was not accepted")
     return result.stdout
@@ -245,7 +245,9 @@ def prepare(settings, sha):
     run(["git", "-C", str(source), "fetch", "--depth=1", "origin", "refs/heads/main"])
     if run(["git", "-C", str(source), "rev-parse", "FETCH_HEAD"]).strip() != sha:
         raise Refused("main moved while retrieving source; prepare the new verified commit")
-    run(["git", "-C", str(source), "checkout", "--quiet", "--detach", sha])
+    # Docker COPY preserves checkout modes. Public code must be readable by
+    # image UID 10001; private release parents and snapshots retain 0700/0600.
+    run(["git", "-C", str(source), "checkout", "--quiet", "--detach", sha], umask=0o022)
     snapshots = []
     for project in settings["projects"]:
         document, running = snapshot(project)
