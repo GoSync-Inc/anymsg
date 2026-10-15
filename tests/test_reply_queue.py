@@ -309,7 +309,7 @@ def test_gateway_can_dismiss_but_cannot_forge_provider_read_state(inbox):
     s, ar, key, add, queue=inbox
     mid=add('100',1,1);chat=stable_id('chat','queue-test','100')
     role='test_reply_gateway_'+uuid4().hex
-    ddl=Path(__file__).resolve().parents[1].joinpath('messaging_service/gateway_role.sql').read_text().replace('messaging_gateway',role)
+    ddl=Path(__file__).resolve().parents[1].joinpath('services/messaging/messaging_service/gateway_role.sql').read_text().replace('messaging_gateway',role)
     class RestrictedPool:
         @contextmanager
         def connection(self):

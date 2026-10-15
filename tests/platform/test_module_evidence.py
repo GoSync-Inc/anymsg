@@ -38,7 +38,7 @@ def test_module_reports_add_identities_without_changing_existing_checks(tmp_path
         ]
         == "failed"
     )
-    assert summary["test_counts"] == {"passed": 3, "failed": 1}
+    assert summary["test_counts"] == {"passed": len(ci.MODULE_REPORTS) - 1, "failed": 1}
     gateway = next(ET.parse(tmp_path / "normalized-gateway.xml").iter("testcase"))
     calendar = next(ET.parse(tmp_path / "normalized-calendar.xml").iter("testcase"))
     assert gateway.get("file") == "services/gateway/tests/test_api.py"

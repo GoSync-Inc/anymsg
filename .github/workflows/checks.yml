@@ -19,7 +19,7 @@ permissions:
 jobs:
   verify:
     runs-on: ubuntu-latest
-    timeout-minutes: 20
+    timeout-minutes: 30
     services:
       postgres:
         image: postgres:18-bookworm@sha256:afc7e2d441324c0388fa80c3d24f733b4194a4eb7f47dd8ee2b08eb1a24a647c
@@ -59,10 +59,10 @@ jobs:
           python - <<'PYCODE'
           import os,tomllib
           from pathlib import Path
-          version=tomllib.loads(Path('pyproject.toml').read_text())['project']['version']
+          version=tomllib.loads(Path('services/messaging/pyproject.toml').read_text())['project']['version']
           with open(os.environ['GITHUB_OUTPUT'],'a') as output:output.write(f'version={version}\n')
           PYCODE
-          uv build
+          uv build --project services/messaging --out-dir dist
           mkdir -p dist
           cd packages/npm
           npm pack --pack-destination ../../dist --ignore-scripts
@@ -165,13 +165,19 @@ jobs:
           npm install --ignore-scripts --no-audit --no-fund "$GITHUB_WORKSPACE"/dist/*.tgz
           ./node_modules/.bin/anymsg --version
           node --input-type=module -e "import {AnyMsgClient} from 'anymsg'; if(typeof AnyMsgClient !== 'function')process.exit(1)"
+      - name: Paired gateway load and isolation budgets
+        id: load
+        if: ${{ !cancelled() && steps.gateway.outcome == 'success' }}
+        run: |
+          uv sync --project tools/dev --locked
+          uv run --project tools/dev --locked python tests/platform/benchmarks/gateway_read_load.py --config tests/platform/benchmarks/budgets.json --output "$RUNNER_TEMP/ci-evidence/load.json" --junit "$RUNNER_TEMP/ci-evidence/load.xml"
       - name: Prepare honest CI evidence
         if: ${{ always() }}
         env:
           CHECK_OUTCOMES: >-
             {"build":"${{ steps.build.outcome }}","release":"${{ steps.release.outcome }}","python":"${{ steps.python.outcome }}","collector":"${{ steps.collector.outcome }}","npm":"${{ steps.npm.outcome }}","smoke":"${{ steps.smoke.outcome }}","distributions":"${{ steps.distributions.outcome }}"}
           MODULE_OUTCOMES: >-
-            {"gateway":"${{ steps.gateway.outcome }}","calendar":"${{ steps.calendar.outcome }}","calls":"${{ steps.calls.outcome }}","calls_frontend":"${{ steps.calls_frontend.outcome }}"}
+            {"gateway":"${{ steps.gateway.outcome }}","calendar":"${{ steps.calendar.outcome }}","calls":"${{ steps.calls.outcome }}","calls_frontend":"${{ steps.calls_frontend.outcome }}","load":"${{ steps.load.outcome }}"}
           SOURCE_BRANCH: ${{ github.head_ref || github.ref_name }}
           TIDEN_BRANCH_OVERRIDE: ${{ inputs.tiden_branch }}
         run: |

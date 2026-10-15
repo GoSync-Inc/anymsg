@@ -24,7 +24,7 @@ def test_common_locks_are_equal_with_independent_domain_dependencies():
 def test_resolved_drift_cannot_hide_behind_declared_version(tmp_path):
     for relative in [
         "config/stack.toml",
-        "uv.lock",
+        "services/messaging/uv.lock",
         *[f"services/{m}/uv.lock" for m in ("calendar", "calls", "gateway")],
     ]:
         path = tmp_path / relative

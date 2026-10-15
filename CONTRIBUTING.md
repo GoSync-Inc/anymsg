@@ -9,7 +9,7 @@ uv sync --group dev
 PROBE_TEST_DSN_FILE=/private/test.dsn uv run pytest tests
 node --test whatsapp/tests/*.test.mjs
 npm test --prefix packages/npm
-uv build
+python scripts/build.py
 npm pack --prefix packages/npm --dry-run
 ```
 

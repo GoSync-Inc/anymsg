@@ -8,13 +8,14 @@ import tomllib
 import zipfile
 
 root = Path(__file__).resolve().parents[1]
-version = tomllib.loads((root/'pyproject.toml').read_text())['project']['version']
+service = root/'services/messaging'
+version = tomllib.loads((service/'pyproject.toml').read_text())['project']['version']
 if len(sys.argv)>1:
     assert re.fullmatch(r'\d+\.\d+\.\d+(?:[a-z]+\d+)?',sys.argv[1])
     assert version == sys.argv[1], 'release version differs'
 assert json.loads((root/'packages/npm/package.json').read_text())['version'] == version
-assert f"__version__ = '{version}'" in (root/'messaging_service/__init__.py').read_text() or f'__version__ = "{version}"' in (root/'messaging_service/__init__.py').read_text()
-assert version in (root/'anymsg/__init__.py').read_text()
+assert f"__version__ = '{version}'" in (service/'messaging_service/__init__.py').read_text() or f'__version__ = "{version}"' in (service/'messaging_service/__init__.py').read_text()
+assert version in (service/'anymsg/__init__.py').read_text()
 
 def safe(names):
     for name in names:
@@ -28,9 +29,9 @@ sdist = root/'dist'/f'anymsg-{version}.tar.gz'
 with zipfile.ZipFile(wheel) as z:
     safe(z.namelist())
     for folder in ('messaging_service','anymsg'):
-        for path in (root/folder).rglob('*'):
+        for path in (service/folder).rglob('*'):
             if path.suffix in ('.sql','.py'):
-                assert z.read(path.relative_to(root).as_posix()) == path.read_bytes()
+                assert z.read(path.relative_to(service).as_posix()) == path.read_bytes()
 with tarfile.open(sdist) as t:
     safe(t.getnames())
     for required in ('Dockerfile','media_benchmark.py','LICENSE','SETUP.md','licenses/age-LICENSE'):

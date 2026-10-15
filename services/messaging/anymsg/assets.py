@@ -18,7 +18,9 @@ def source_directory():
     package=Path(messaging_service.__file__).resolve().parent
     bundled=package/'whatsapp_assets'
     if bundled.is_dir():return bundled
-    return package.parent/'whatsapp'
+    legacy=package.parent/'whatsapp'
+    if legacy.is_dir():return legacy
+    return package.parents[2]/'whatsapp'
 
 
 def _parent_fd(path):

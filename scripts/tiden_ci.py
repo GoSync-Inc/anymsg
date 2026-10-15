@@ -19,6 +19,7 @@ import xml.etree.ElementTree as ET
 CHECKS = ("build", "release", "python", "collector", "npm", "smoke", "distributions")
 REPORTS = {"python": "python.xml", "collector": "collector.xml", "npm": "npm.xml"}
 MODULE_REPORTS = {
+    "load": ("load.xml", "python", ""),
     "gateway": ("gateway.xml", "python", "services/gateway"),
     "calendar": ("calendar.xml", "python", "services/calendar"),
     "calls": ("calls.xml", "python", "services/calls"),

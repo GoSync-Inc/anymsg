@@ -1,4 +1,33 @@
-# AnyMsg
+# DeedKit
+
+**A modular platform where agents delegate messaging, calendar and voice tasks.**
+
+This is the existing AnyMsg repository. The messaging packages keep the names
+`anymsg` and `messaging_service`; their accounts, database and APIs remain compatible.
+
+| Module | Source | Runtime |
+| --- | --- | --- |
+| Common MCP gateway | `services/gateway` | Selected tools, per-agent credentials and exact action ceilings |
+| Messaging (AnyMsg) | `services/messaging` | Telegram/WhatsApp archive and domain operations |
+| Family calendar | `services/calendar` | Google API/CalDAV, family roles, explicit coverage and plans |
+| Voice calls | `services/calls` | Scoped briefs, calls, results and owner decisions |
+
+Each module has its own environment and state. Install only the modules you need.
+The gateway communicates over HTTP and does not install provider libraries.
+
+```sh
+python scripts/deedkit.py resolve --profile config/profiles/calendar-reader.toml --json
+uv sync --project services/gateway --locked
+uv sync --project services/calendar --locked
+```
+
+See [runtime and access](docs/platform-runtime.md), [architecture](ARCHITECTURE.md),
+[verification boundaries](docs/quality/platform-acceptance.md) and
+[messaging layout](docs/migrations/messaging-layout.md).
+Deployment profiles require explicit private configuration before `up`; resolving a
+profile does not connect accounts or authorize external actions.
+
+## Messaging compatibility
 
 **Self-hosted Telegram and WhatsApp archive for AI agents. A GoSync open-source project.**
 

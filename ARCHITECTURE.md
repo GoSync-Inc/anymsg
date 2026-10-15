@@ -1,6 +1,11 @@
 # Architecture and verification boundaries
 
-AnyMsg is one repository and a shared PostgreSQL archive, with independently
+DeedKit is one repository with independent gateway, messaging, calendar and calls
+services. Each service keeps its own lockfile, process, API and durable state. The
+common MCP exposes only explicitly selected tools and never imports provider code.
+See [module runtime contracts](docs/platform-runtime.md).
+
+The AnyMsg messaging module has a shared PostgreSQL archive, with independently
 invoked workers and two HTTP client packages. Logical components describe
 responsibility and verification boundaries. They are not a promise of one
 container, package or database per component.
@@ -26,7 +31,7 @@ not proof that its behavior has been tested.
 | JavaScript Client | `packages/npm/` | Dependency-free HTTP client, local argument validation, TypeScript declarations and token-file CLI |
 
 Unless otherwise specified, Python module names in the table are under
-`messaging_service/`. `store.py` supplies shared transaction/authorization and
+`services/messaging/messaging_service/`. `store.py` supplies shared transaction/authorization and
 dispatch infrastructure; components may intentionally overlap there. The
 operator entry point and schema migrations likewise cross domain boundaries.
 Do not interpret a change in a shared file as coverage of every affected domain.

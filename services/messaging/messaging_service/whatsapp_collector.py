@@ -132,6 +132,8 @@ def whatsapp_asset(name):
     if bundled.is_file():return bundled
     legacy=package.parent/'whatsapp'/name
     if legacy.is_file():return legacy
+    monorepo=package.parents[2]/'whatsapp'/name
+    if monorepo.is_file():return monorepo
     raise RuntimeError('whatsapp_assets_missing')
 
 

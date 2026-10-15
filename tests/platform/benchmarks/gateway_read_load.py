@@ -16,6 +16,7 @@ import subprocess
 import sys
 import tempfile
 import time
+import xml.etree.ElementTree as ET
 
 import httpx
 import psutil
@@ -310,6 +311,7 @@ def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--config", type=Path, required=True)
     parser.add_argument("--output", type=Path, required=True)
+    parser.add_argument("--junit", type=Path)
     args = parser.parse_args()
     config = json.loads(args.config.read_text())
     assert config["samples"] >= 1000 and config["repeats"] >= 3
@@ -374,6 +376,28 @@ def main():
             }
         )
     )
+    if args.junit:
+        suite = ET.Element("testsuite", name="gateway_load", tests=str(len(results)))
+        for row in results:
+            identity = (
+                f"{row['repeat']}/{row['mode']}/{row['operation']}/{row['transport']}"
+            )
+            case = ET.SubElement(
+                suite,
+                "testcase",
+                name=identity,
+                classname="tests.platform.benchmarks.gateway_read_load",
+                file="tests/platform/benchmarks/gateway_read_load.py",
+            )
+            errors = [
+                failure for failure in failures if failure.startswith(identity + ":")
+            ]
+            if errors:
+                ET.SubElement(case, "failure", message="; ".join(errors))
+        args.junit.parent.mkdir(parents=True, exist_ok=True)
+        args.junit.write_bytes(
+            ET.tostring(suite, encoding="utf-8", xml_declaration=True)
+        )
     return bool(failures)
 
 
