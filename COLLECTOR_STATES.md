@@ -16,9 +16,27 @@ account queues, processing profile summaries or lease observations.
   not marked stale because no new message arrived. A healthy empty drain also
   does not prove the provider delivered every callback.
 - `history`: traversal evidence, partial history and gaps; it never claims full
-  history. A WhatsApp gap can coexist with connected/receiving live capture.
+  history. A WhatsApp gap can coexist with connected/receiving live capture: the
+  legacy account `status` stays `receiving` with `detail_code=whatsapp_catchup_gap`,
+  and the gap remains in `history.gap_chats` and the `provider_history_gaps` alert.
+  Reconciliation and backfill pages use their own durable spool (WhatsApp pages,
+  Telegram `history/` beside the live spool); `history.pending_events` counts them,
+  so they never make `live_capture` look backlogged.
 - `media`: separate queued/processing/failed original counts and bounded error
   codes with recommended actions. A failed original does not stop live messages.
+
+Account-scoped readers also receive `liveness`, a summary of the live session
+that does not depend on new messages or history: `idle_connected` (open session,
+no live backlog, no recent live event; `quiet_but_healthy=true`), `receiving`,
+`capture_backlogged`, `unconfirmed`, `not_connected`, `blocked` or
+`collector_not_running`. `session_confirmed_at` is the drain loop's refresh, which
+runs about every 15 seconds only while the provider session is open; older than
+60 seconds is `unconfirmed`. `last_live_event_at` includes receipts and read
+states, not only messages. It does not prove every provider callback arrived.
+
+`alerts` contains `archive_version_conflicts` only while a conflict is unresolved
+(`active_conflicts`). The archive detail code itself stays recorded; without an
+unresolved conflict it is reported as `coverage_not_reconciled`.
 
 Connection failures survive Node exits through a private fsynced side-channel
 file. No unsolicited stdout frame can interleave with a page/media RPC. Raw

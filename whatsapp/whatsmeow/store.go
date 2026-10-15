@@ -602,6 +602,9 @@ func (s *CaptureStore) Dialogs(limit int, policy Policy) ([]any, error) {
 			self = false
 		} else if j, e := ParseChatID(chat); e == nil && j.Server == s.Owner.Server {
 			self = j == s.Owner.ToNonAD()
+		} else if e == nil && j.Server == types.HiddenUserServer && !s.OwnerLID.IsEmpty() {
+			// The owner's own chat may be addressed by LID instead of phone number.
+			self = j == s.OwnerLID.ToNonAD()
 		}
 		out = append(out, []any{chat, kind, title, typ, map[string]any{"observed_at": at, "unread_count": nil, "basis": "whatsmeow_captured_chat", "is_self_chat": self}})
 		if len(out) >= limit {

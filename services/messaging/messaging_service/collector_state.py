@@ -135,8 +135,10 @@ class CollectorState:
             remaining=max(0,(datetime.fromisoformat(deadline)-row['observed']).total_seconds()) if deadline else 0
             return {'blocked':phase.get('state')=='blocked','remaining_seconds':remaining}
 
-    def capture_progress(self,last,count,pending):
+    def capture_progress(self,last,count,pending,*,history_pending=None):
         if type(count) is not int or count<0 or type(pending) is not int or not 0<=pending<=20000:
+            raise ValueError('invalid_capture_progress')
+        if history_pending is not None and (type(history_pending) is not int or not 0<=history_pending<=20000):
             raise ValueError('invalid_capture_progress')
         capture=validate_capture(last) if last is not None else None
         with self.archive.store.pool.connection() as c:
@@ -156,6 +158,8 @@ class CollectorState:
                     'mcp_available_after_commit':True,'measurement':'upper_bound_after_archive_commit' if observed else 'capture_time_not_recorded'}
             self._phase(value,'live_capture','backlogged' if pending else 'receiving',
                 'capture_draining' if pending else 'capture_ready',now,**extra)
+            if history_pending is not None:
+                value['history']={**value.get('history',{}),'pending_events':history_pending}
             self._save_operations(c,value)
 
     def policy(self):

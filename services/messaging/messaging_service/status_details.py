@@ -34,6 +34,8 @@ DETAILS={
     'media_size_mismatch':('The downloaded original size did not match its descriptor.','wait_for_media_retry'),
     'spool_full':('The durable capture queue reached its bound.','check_capture_backlog'),
     'disk_reserve':('The configured disk reserve prevents additional writes.','check_free_disk'),
+    'storage_unavailable':('The local originals or media temporary directory could not be written (missing, permissions or read-only). Provider attempts are not consumed; downloads resume after the storage path is fixed.','check_media_storage_path'),
+    'media_storage_unavailable':('The native media temporary directory could not be written. Provider attempts are not consumed.','check_media_storage_path'),
     'paused_storage':('Original download is deferred by local storage admission. Message capture and searchable metadata remain independent; provider attempts are not consumed.','check_media_storage_capacity'),
     'durable_capture_failed':('A callback could not be durably saved; reconnect reconciliation is required.','check_collector_health'),
 }

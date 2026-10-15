@@ -279,8 +279,9 @@ def test_live_capture_is_durable_before_database_and_overload_fails_closed(tmp_p
 def test_live_drain_retries_database_failure_and_then_applies_tombstones(monkeypatch):
     import psycopg
     collector = TelegramCollector.__new__(TelegramCollector)
-    collector.spool = object(); seen = []; sleeps = []
-    async def drain(spools):
+    collector.spool = object(); collector._history_spool = object(); seen = []; sleeps = []
+    async def drain(spools, history_spools):
+        assert spools == [collector.spool] and history_spools == [collector._history_spool]
         seen.append('drain')
         if seen.count('drain') == 1: raise psycopg.OperationalError('synthetic database failure')
     collector.drain_captures = drain

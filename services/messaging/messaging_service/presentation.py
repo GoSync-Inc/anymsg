@@ -79,7 +79,10 @@ def render(method, result, detail):
         compact['sources']=[]
         for source in result['sources']:
             row={k:source[k] for k in ('account','platform','status','detail_code',
-                'archive_detail_code','oldest_message_at','newest_message_at','last_ingest_at','alerts') if k in source}
+                'archive_detail_code','active_conflicts','oldest_message_at','newest_message_at','last_ingest_at','alerts') if k in source}
+            if 'liveness' in source:
+                row['liveness']={k:v for k,v in source['liveness'].items()
+                    if k in ('state','connected','quiet_but_healthy','session_confirmed_at','last_live_event_at','pending_live_events')}
             row['freshness']={k:v for k,v in source.get('freshness',{}).items()
                 if k in ('state','last_successful_scan_at','scan_age_seconds','basis')}
             row['history']={k:v for k,v in source.get('history',{}).items()

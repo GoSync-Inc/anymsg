@@ -119,7 +119,8 @@ def test_pending_history_is_not_reported_as_exhausted_and_gap_is_visible(wa):
     p=w.state.progress('123@c.us','user');assert p['gap']
     with s.pool.connection() as c:
         row=c.execute("SELECT * FROM source_status WHERE account='wa-one'").fetchone()
-    assert row['status']=='degraded' and row['detail_code']=='whatsapp_catchup_gap' and row['coverage']=='partial'
+    # Missing history does not make live receiving look broken.
+    assert row['status']=='receiving' and row['detail_code']=='whatsapp_catchup_gap' and row['coverage']=='partial'
 
 
 def test_node_raw_spool_is_compatible_with_python_validator(tmp_path):

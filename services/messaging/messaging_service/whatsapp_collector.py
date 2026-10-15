@@ -400,6 +400,10 @@ class WhatsAppCollector(TelegramCollector):
     coverage_code='whatsapp_history_partial'
     connect_timeout=300
     retry_connect=True
+    @property
+    def history_spool(self):
+        # WhatsApp pages already have their own spool; live events use events_spool.
+        return self.spool
     def __init__(self,*args,events_spool,**kwargs):
         kwargs.setdefault('max_dialogs',2000)
         super().__init__(*args,**kwargs); self.events_spool=events_spool
@@ -425,7 +429,7 @@ class WhatsAppCollector(TelegramCollector):
             if e.get('chatId')!=chat: raise RuntimeError('provider_chat_mismatch')
             item={'kind':'whatsapp_event','account':self.account,'event':{**e,'chatName':title},
                   'change':'message','observed_at':datetime.now(timezone.utc).isoformat(),'origin':origin}
-            await asyncio.to_thread(self.spool.put,item)
+            await asyncio.to_thread(self.history_spool.put,item)
             await asyncio.to_thread(self.state.apply,item)
             points.append(position(e))
         return sorted(points)
@@ -474,10 +478,13 @@ class WhatsAppCollector(TelegramCollector):
                 unavailable=True
                 await asyncio.to_thread(self.state.failed,chat,'provider_unavailable')
         missing=set(self.policy['include_chats'])-set(self.policy['exclude_chats'])-seen
-        code='whatsapp_catchup_gap' if gap else ('configured_chat_unavailable' if missing else
-            ('whatsapp_chat_unavailable' if unavailable else
+        # A catch-up gap is missing history, not a live-capture failure: it stays
+        # visible as history.gap_chats and the detail code, while live receiving
+        # is reported as such. Unavailable chats still degrade collection.
+        code='configured_chat_unavailable' if missing else ('whatsapp_chat_unavailable' if unavailable else
+            ('whatsapp_catchup_gap' if gap else
              ('dialog_discovery_limited' if len(dialogs)>=self.max_dialogs else self.coverage_code)))
-        await asyncio.to_thread(self.state.status,'degraded' if gap or missing or unavailable else 'receiving',code)
+        await asyncio.to_thread(self.state.status,'degraded' if missing or unavailable else 'receiving',code)
         await asyncio.to_thread(self.state.phase,'history','waiting','history_scan_finished')
     async def reconcile_loop(self):
         while True:
@@ -494,7 +501,7 @@ class WhatsAppCollector(TelegramCollector):
                 from .outgoing import reconcile_send_receipt
                 await asyncio.to_thread(self.send_receipts.drain,
                     lambda item:reconcile_send_receipt(self.state,item),100)
-                await self.drain_captures([self.events_spool,self.spool])
+                await self.drain_captures([self.events_spool],[self.history_spool])
                 await asyncio.to_thread(self.state.apply_tombstones)
             except (psycopg.OperationalError,PoolTimeout): await asyncio.sleep(1)
             await asyncio.sleep(.25)

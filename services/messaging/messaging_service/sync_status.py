@@ -4,7 +4,7 @@ from datetime import datetime, timezone
 from .envelope import stable_id
 from .policy import scope_filter
 from .status_details import describe,freshness
-from .operational import operations
+from .operational import liveness, operations
 
 
 DOWNLOAD_STATES = ('queued', 'leased', 'ready', 'failed', 'superseded')
@@ -181,6 +181,15 @@ def get_sync_status(c, p):
     if sources:
         checkpoints = _checkpoints(c, p, {row['id'] for row in catalog})
         downloads, files = _files(c, p)
+    conflicts = {}
+    if sources and not scoped:
+        # The archive detail code is sticky once any conflict was observed; the
+        # alert follows conflicts which are still unresolved.
+        conflicts = {r['account']: r for r in c.execute('''SELECT m.account,
+            count(*) FILTER(WHERE mc.resolved_at IS NULL) AS active_conflicts,
+            count(*) FILTER(WHERE mc.resolved_at IS NOT NULL) AS historical_conflicts
+            FROM message_conflicts mc JOIN messages m ON m.id=mc.message
+            WHERE m.account=ANY(%s) GROUP BY m.account''', ([row['account'] for row in sources],))}
     for row in sources:
         account = row['account']
         data = messages.get(account, {})
@@ -188,13 +197,18 @@ def get_sync_status(c, p):
                    newest_message_at=data.get('newest_message_at'))
         row['history'] = _history(row['platform'], catalog_ids.get(account, set()), checkpoints.get(account, []))
         if not scoped:
+            counts=conflicts.get(account,{})
+            row['active_conflicts']=counts.get('active_conflicts',0)
+            row['historical_conflicts']=counts.get('historical_conflicts',0)
+            if row.get('archive_detail_code')=='version_conflict' and not row['active_conflicts']:
+                row['archive_detail_code']='coverage_not_reconciled'
             row['detail']=describe(row.get('detail_code'))
             row['archive_detail']=describe(row.get('archive_detail_code'))
             row['freshness']=freshness(row['history'].get('last_scan_at'))
             row['alerts']=[]
             if row['freshness']['state']=='scan_stale':row['alerts'].append('successful_scan_older_than_5_minutes')
             if row['history'].get('gap_chats'):row['alerts'].append('provider_history_gaps')
-            if row.get('archive_detail_code')=='version_conflict':row['alerts'].append('archive_version_conflicts')
+            if row['active_conflicts']:row['alerts'].append('archive_version_conflicts')
         row['files'] = files.get(account, {'stored_files': 0, 'stored_bytes': 0,
             'extraction': dict.fromkeys(EXTRACTION_STATES, 0),
             'enrichment': dict.fromkeys(ENRICHMENT_STATES, 0),
@@ -202,6 +216,7 @@ def get_sync_status(c, p):
         row['files']['download'] = {**dict.fromkeys(DOWNLOAD_STATES, 0), **downloads.get(account, {})}
         if not scoped:
             row['operations']=operations(row,row['history'],row['files'])
+            row['liveness']=liveness(row['operations'])
             row['processing_profiles']=c.execute('''SELECT kind,provider,model,enabled AS configured,
                 observed_at,expires_at,expires_at>clock_timestamp() AND enabled AS worker_current,
                 pause_reason,paused_until

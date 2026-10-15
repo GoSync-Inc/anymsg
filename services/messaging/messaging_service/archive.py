@@ -372,8 +372,9 @@ class Archive:
         with self.store.pool.connection() as c:StorageAdmission.release(c,job)
 
     def fail_media(self,job,code,*,permanent=False,retry_after=None,collector_lease=None):
-        from .operational import MEDIA_ERRORS
-        allowed={'unavailable','size_limit','rate_limited','network_error','disk_reserve','paused_storage','integrity_error'}
+        from .operational import LOCAL_STORAGE_ERRORS,MEDIA_ERRORS
+        allowed={'unavailable','size_limit','rate_limited','network_error','disk_reserve','paused_storage',
+            'integrity_error','storage_unavailable'}
         if code not in allowed|MEDIA_ERRORS: raise ValueError('invalid_error_code')
         if retry_after is not None and (type(retry_after) is not int or not 1<=retry_after<2**31):
             raise ValueError('invalid_retry_delay')
@@ -381,11 +382,15 @@ class Archive:
             self.fence(c,job['account'],collector_lease)
             row=self.job_fence(c,job)
             local_pause=code in ('disk_reserve','paused_storage')
-            attempts=max(0,row['attempts']-1) if local_pause else row['attempts']
-            terminal=not local_pause and (permanent or attempts>=5)
+            # Unwritable local storage is operator-fixable: it never consumes a
+            # provider attempt or fails the original terminally.
+            local_storage=code in LOCAL_STORAGE_ERRORS
+            attempts=max(0,row['attempts']-1) if local_pause or local_storage else row['attempts']
+            terminal=not (local_pause or local_storage) and (permanent or attempts>=5)
+            stored='paused_storage' if local_pause else 'storage_unavailable' if code=='media_storage_unavailable' else code
             c.execute('''UPDATE media_jobs SET state=%s,error_code=%s,lease_until=NULL,attempts=%s,
                 next_due=clock_timestamp()+%s*interval '1 second' WHERE id=%s''',
-                ('failed' if terminal else 'queued','paused_storage' if local_pause else code,attempts,
-                 60 if local_pause else max(min(3600,10*2**attempts),retry_after or 0),job['id']))
+                ('failed' if terminal else 'queued',stored,attempts,
+                 60 if local_pause else 300 if local_storage else max(min(3600,10*2**attempts),retry_after or 0),job['id']))
             from .storage_admission import StorageAdmission
             StorageAdmission.release(c,job)

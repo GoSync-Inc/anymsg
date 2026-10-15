@@ -16,8 +16,11 @@ RANGE_SQL='''SELECT m.* FROM messages m WHERE m.account=%s AND m.chat=%s
     AND CASE WHEN m.provider_id ~ '^[1-9][0-9]{0,18}$' THEN m.provider_id::numeric ELSE NULL END<=%s
     ORDER BY CASE WHEN m.provider_id ~ '^[1-9][0-9]{0,18}$' THEN m.provider_id::numeric ELSE NULL END,m.id
     LIMIT %s'''
-ROW_PROOFS_SQL='''SELECT m.id,r.state,r.basis,r.audience,r.observed_at FROM messages m
-    JOIN chats ch ON ch.id=m.chat AND ch.account=m.account JOIN accounts a ON a.id=m.account
+SELF_CHAT_SQL='''(coalesce(ro.is_self_chat,false) OR coalesce(md.metadata->'is_self_chat'='true'::jsonb,false))'''
+ROW_PROOFS_SQL='''SELECT m.id,r.state,r.basis,r.audience,r.observed_at,'''+SELF_CHAT_SQL+''' AS self_chat
+    FROM messages m JOIN chats ch ON ch.id=m.chat AND ch.account=m.account JOIN accounts a ON a.id=m.account
+    LEFT JOIN chat_read_observations ro ON ro.chat=m.chat
+    LEFT JOIN message_metadata md ON md.message=m.id AND md.revision=m.revision
     LEFT JOIN LATERAL (
         (SELECT r.state,r.basis,r.audience,r.observed_at FROM message_receipts r
             WHERE r.account=m.account AND r.provider_chat=ch.provider_chat AND r.platform='telegram'
@@ -88,6 +91,13 @@ def _evidence(rows):
     return proof
 
 
+def self_chat_evidence(proof):
+    """A message to one's own chat has no recipient. Provider ACKs from the owner's
+    devices differ by account and device, so recipient delivery is not applicable."""
+    return {**proof,'provider_state':proof['state'],'state':'not_applicable','basis':'self_chat',
+        'audience':'self','recipient_delivery_confirmed':False}
+
+
 def unknown_evidence():
     """Fresh explicit unknown object for queued/unobserved messages."""
     return _evidence([])
@@ -124,9 +134,20 @@ def for_rows(c,rows):
     if not ids:return {}
     found=c.execute(ROW_PROOFS_SQL,(ids,)).fetchall()
     grouped={r['id']:[] for r in found}
+    own={r['id'] for r in found if r['self_chat']}
     for row in found:
         if row['state'] is not None:grouped[row['id']].append(row)
-    return {mid:_evidence(proofs) for mid,proofs in grouped.items()}
+    return {mid:self_chat_evidence(_evidence(proofs)) if mid in own else _evidence(proofs)
+        for mid,proofs in grouped.items()}
+
+
+def _reference_self_chat(c,account,provider_chat,provider_id):
+    row=c.execute('''SELECT coalesce(bool_or('''+SELF_CHAT_SQL+'''),false) AS self_chat
+        FROM chats ch LEFT JOIN chat_read_observations ro ON ro.chat=ch.id
+        LEFT JOIN messages m ON m.chat=ch.id AND m.account=ch.account AND m.provider_id=%s
+        LEFT JOIN message_metadata md ON md.message=m.id AND md.revision=m.revision
+        WHERE ch.account=%s AND ch.provider_chat=%s''',(provider_id,account,provider_chat)).fetchone()
+    return bool(row and row['self_chat'])
 
 
 def for_reference(c,account,provider_chat,provider_id,platform=None):
@@ -138,15 +159,16 @@ def for_reference(c,account,provider_chat,provider_id,platform=None):
         if not isinstance(provider_id,str) or not re.fullmatch(r'[1-9][0-9]{0,18}',provider_id):
             return unknown_evidence()
         if int(provider_id)>=2**63:return unknown_evidence()
-        return _evidence(c.execute(REFERENCE_TG_SQL,(account,provider_chat,int(provider_id))).fetchall())
-    if platform!='whatsapp':return unknown_evidence()
-    rows=c.execute('''SELECT DISTINCT ON(r.state) r.state,r.basis,r.audience,r.observed_at
-        FROM message_receipts r JOIN accounts a ON a.id=r.account
-        WHERE r.account=%s AND r.provider_chat=%s AND r.platform=a.platform
-        AND r.platform='whatsapp' AND r.provider_id=%s
-        ORDER BY r.state,r.observed_at,r.id''',
-        (account,provider_chat,provider_id)).fetchall()
-    return _evidence(rows)
+        proof=_evidence(c.execute(REFERENCE_TG_SQL,(account,provider_chat,int(provider_id))).fetchall())
+    elif platform=='whatsapp':
+        proof=_evidence(c.execute('''SELECT DISTINCT ON(r.state) r.state,r.basis,r.audience,r.observed_at
+            FROM message_receipts r JOIN accounts a ON a.id=r.account
+            WHERE r.account=%s AND r.provider_chat=%s AND r.platform=a.platform
+            AND r.platform='whatsapp' AND r.provider_id=%s
+            ORDER BY r.state,r.observed_at,r.id''',
+            (account,provider_chat,provider_id)).fetchall())
+    else:return unknown_evidence()
+    return self_chat_evidence(proof) if _reference_self_chat(c,account,provider_chat,provider_id) else proof
 
 
 def publish(c,account,limit=100):
@@ -180,6 +202,7 @@ def publish(c,account,limit=100):
             scanned+=1
             previous=c.execute('SELECT state FROM receipt_event_publications WHERE message=%s',(row['id'],)).fetchone()
             receipt_evidence=proofs[row['id']]
+            if receipt_evidence['basis']=='self_chat':continue  # No recipient status to publish.
             if previous and RANK[previous['state']]>=RANK[receipt_evidence['state']]:continue
             snapshot={k:row[k] for k in ('account','chat','body','revision','sent_at','deleted','direction','sender','provider_id')}
             snapshot.update(message=row['id'],provider_chat=row['provider_chat'],delivery_receipt=receipt_evidence)

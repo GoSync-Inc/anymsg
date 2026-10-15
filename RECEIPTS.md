@@ -10,7 +10,7 @@ and updates, including compact responses. Missing evidence is `state: unknown`.
 
 | Field | Meaning |
 | --- | --- |
-| `state` | Strongest observation: unknown, pending, error, server, delivered, read or played |
+| `state` | Strongest observation: unknown, pending, error, server, delivered, read or played; not_applicable for a self chat |
 | `basis` | Telegram outgoing-read boundary or WhatsApp message ACK |
 | `audience` | Private peer or provider aggregate for a group |
 | `observed_at` | When the selected proof of this state was observed by the collector |
@@ -18,6 +18,13 @@ and updates, including compact responses. Missing evidence is `state: unknown`.
 | `delivered_at`, `read_at`, `played_at` | Exact provider times; currently null |
 | `delivered_observed_at`, `read_observed_at`, `played_observed_at` | Separately observed stages; missing stages stay null |
 | `recipient_delivery_confirmed` | True only for delivery/read/played proof for a private peer |
+
+A message in the owner's own chat (WhatsApp note to self, Telegram Saved
+Messages) has no recipient. Its evidence is `state: not_applicable`,
+`basis: self_chat`, `audience: self`, with any raw device ACK kept as
+`provider_state`, and it publishes no `message.status` event. The self chat is
+known from the captured message or the dialog observation, including a WhatsApp
+chat addressed by the owner's LID.
 
 A read observation implies arrival without inventing a delivery timestamp.
 Pending/error/server alone do not confirm recipient delivery. Weaker or duplicate
