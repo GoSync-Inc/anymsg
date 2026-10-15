@@ -27,6 +27,14 @@ ASSETS = (
     "package-lock.json",
 )
 
+# Reviewed source inputs only. Never include the native runtime's auth, journal,
+# media cache, pairing QR or a platform-specific executable in a distribution.
+NATIVE_SOURCES = (
+    "go.mod", "go.sum", "main.go", "config.go", "runtime.go", "capture.go",
+    "history.go", "store.go", "send.go", "media.go", "operations.go",
+    "runtime_test.go", "send_test.go", "media_test.go", "operations_test.go",
+)
+
 
 class CustomBuildHook(BuildHookInterface):
     def initialize(self, version, build_data):
@@ -46,6 +54,11 @@ class CustomBuildHook(BuildHookInterface):
             )
             force[str(path)] = target + "/" + name
         if self.target_name == "sdist":
+            for name in NATIVE_SOURCES:
+                path = repository / "whatsapp" / "whatsmeow" / name
+                if not path.is_file() or path.is_symlink():
+                    raise ValueError("missing reviewed native WhatsApp build asset")
+                force[str(path)] = "whatsapp/whatsmeow/" + name
             for name in (
                 "SETUP.md",
                 "media_benchmark.py",

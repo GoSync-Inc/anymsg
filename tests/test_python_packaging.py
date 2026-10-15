@@ -96,6 +96,8 @@ def test_built_sdist_keeps_build_inputs_without_runtime_data():
         names=set(archive.getnames())
         prefix=f'anymsg-{__version__}/'
         for expected in ['pyproject.toml','README.md','LICENSE','anymsg/client.py',
-                'messaging_service/schema.sql','whatsapp/provider.mjs','whatsapp/package-lock.json']:
+                'messaging_service/schema.sql','whatsapp/provider.mjs','whatsapp/package-lock.json',
+                'whatsapp/whatsmeow/go.mod','whatsapp/whatsmeow/go.sum',
+                'whatsapp/whatsmeow/runtime.go','whatsapp/whatsmeow/runtime_test.go']:
             assert prefix+expected in names
         assert not any('node_modules/' in name or '/private/' in name or name.endswith(('.dsn','.token','.session','.pyc')) for name in names)

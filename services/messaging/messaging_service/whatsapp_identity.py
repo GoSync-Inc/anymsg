@@ -5,6 +5,7 @@ from .envelope import utc,stable_id
 from .policy import scope_filter
 
 PROVENANCE='webjs_contact_cache_v1'
+PROVENANCES=frozenset((PROVENANCE,'whatsmeow_message_alt_v1','whatsmeow_lid_store_v1'))
 
 
 def personal_id(value):
@@ -24,7 +25,7 @@ def observations(value,envelope):
         if (not isinstance(item['pn'],str) or not isinstance(item['lid'],str) or
             personal_id(item['pn'])!=item['pn'] or not item['pn'].endswith('@c.us') or
             personal_id(item['lid'])!=item['lid'] or not item['lid'].endswith('@lid') or
-            identity not in (item['pn'],item['lid']) or item['provenance']!=PROVENANCE):
+            identity not in (item['pn'],item['lid']) or item['provenance'] not in PROVENANCES):
             raise ValueError('invalid_identity_observation')
         result.append({**item,'observed_at':utc(item['observed_at'])})
     return result

@@ -149,26 +149,28 @@ def _registered_file(store,c,p,account,parameters,*,verify=False):
 def _resolve(store,c,p,account,operation,chat_id,message_id,expected_revision,parameters,
              *,ready=False,verify_file=False,validate_parameters=True):
     from .messenger_operations import validate_operation,operation_manifest,CATALOG_VERSION
+    from .whatsapp_capabilities import account_provider
     spec=_spec(operation);account_row=_account(c,p,account)
+    provider=account_provider(c,account,account_row['platform'])
     required=_required_permissions(spec['permission'],operation)
     if set(required)-set(p['permissions']):raise APIError('forbidden',403)
     if spec['full_account'] and p['chat_ids'] is not None:raise APIError('forbidden',403)
     if validate_parameters:
-        try:parameters=validate_operation(account_row['platform'],operation,parameters)
+        try:parameters=validate_operation(account_row['platform'],operation,parameters,provider=provider)
         except (ValueError,TypeError,UnicodeError) as exc:
             code=str(exc) if str(exc) in ('unsupported_operation','invalid_operation_parameters') else 'invalid_operation_parameters'
             raise APIError(code) from None
     else:
         # Persisted normalized parameters are immutable. Do not apply a newer
         # normalizer to an idempotent retry or a collector dispatch.
-        supported={entry['operation'] for entry in operation_manifest(account_row['platform']) if entry['supported']}
+        supported={entry['operation'] for entry in operation_manifest(account_row['platform'],provider=provider) if entry['supported']}
         if operation not in supported:raise APIError('unsupported_operation')
         if not isinstance(parameters,dict):raise APIError('invalid_operation_parameters')
     if (not isinstance(chat_id,str) or not isinstance(message_id,str) or
         type(expected_revision) is not int or expected_revision<0):
         raise APIError('invalid_operation_parameters')
     payload={'platform':account_row['platform'],'catalog_version':CATALOG_VERSION,
-        'operation':operation,'account':account,
+        'operation':operation,'account':account,**({'adapter':provider} if provider=='whatsmeow' else {}),
         'authorization_binding':{'target':spec['target'],'full_account':spec['full_account'],
                                  'required_permissions':required},
         'chat_id':chat_id,'message_id':message_id,'expected_revision':expected_revision,
@@ -220,10 +222,12 @@ def preview(store,c,p,account,operation,chat_id='',message_id='',expected_revisi
 
 def manifest(c,p,account):
     from .messenger_operations import operation_manifest
+    from .whatsapp_capabilities import account_provider
     row=_account(c,p,account)
+    provider=account_provider(c,account,row['platform'])
     policy=c.execute('SELECT * FROM account_policies WHERE account=%s',(account,)).fetchone()
     items=[]
-    for entry in operation_manifest(row['platform']):
+    for entry in operation_manifest(row['platform'],provider=provider):
         required=_required_permissions(entry['permission'],entry['operation'])
         permitted_here=(not(set(required)-set(p['permissions'])) and
                         (not entry['full_account'] or p['chat_ids'] is None) and
@@ -231,7 +235,7 @@ def manifest(c,p,account):
         enabled=bool(policy and policy['enabled'] and entry['operation'] in policy['operations_enabled'])
         items.append({**entry,'required_permissions':required,'key_permitted':permitted_here,'account_enabled':enabled,
             'available':bool(entry['supported'] and permitted_here and enabled)})
-    return {'account':account,'platform':row['platform'],'items':items,
+    return {'account':account,'platform':row['platform'],'provider':provider,'items':items,
             'owner_approval_verified_by_server':False,'automatic_retry':False}
 
 

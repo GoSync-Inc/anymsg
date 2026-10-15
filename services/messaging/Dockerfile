@@ -1,6 +1,17 @@
 ARG PYTHON_IMAGE=python:3.13-slim-bookworm@sha256:a1165e272e578941b84abc79e4ab38a0305cd12803a5c4247979ac7655f4d641
 ARG NODE_IMAGE=node:24-bookworm-slim@sha256:51b1100cc2a83d370c6a60952e3f2989c8a43159d0e38586e090f3b3326efefd
 ARG POSTGRES_IMAGE=postgres:18-bookworm@sha256:afc7e2d441324c0388fa80c3d24f733b4194a4eb7f47dd8ee2b08eb1a24a647c
+ARG GO_IMAGE=golang:1.26.2-bookworm@sha256:47ce5636e9936b2c5cbf708925578ef386b4f8872aec74a67bd13a627d242b19
+FROM ${GO_IMAGE} AS whatsmeow-build
+WORKDIR /src
+COPY whatsapp/whatsmeow/go.mod whatsapp/whatsmeow/go.sum ./
+RUN go mod download
+COPY whatsapp/whatsmeow ./
+RUN CGO_ENABLED=0 go build -trimpath -o /out/anymsg-whatsmeow . \
+    && mkdir -p /out/licenses \
+    && go list -m all > /out/licenses/modules.txt \
+    && find /go/pkg/mod -type f \( -iname "license*" -o -iname "copying*" -o -iname "notice*" \) -exec cp --parents {} /out/licenses \;
+
 FROM ${NODE_IMAGE} AS node-runtime
 FROM node-runtime AS whatsapp-dependencies
 WORKDIR /whatsapp
@@ -47,6 +58,8 @@ COPY services/messaging/anymsg ./anymsg
 COPY pyproject.toml README.md LICENSE ./
 COPY services/messaging/pyproject.toml ./services/messaging/pyproject.toml
 COPY --from=node-runtime /usr/local/bin/node /usr/local/bin/node
+COPY --from=whatsmeow-build /out/anymsg-whatsmeow /usr/local/bin/anymsg-whatsmeow
+ENV ANYMSG_WHATSMEOW_TEST_BINARY=/usr/local/bin/anymsg-whatsmeow
 COPY whatsapp ./whatsapp
 COPY services/messaging/requirements-test.lock ./requirements-test.lock
 RUN pip install --no-cache-dir --require-hashes -r requirements-test.lock
@@ -86,6 +99,18 @@ ENV REQUIRE_NATIVE_AUDIO=1
 USER probe
 CMD ["python", "-m", "pytest", "-q", "-p", "no:cacheprovider", "--tb=short", "tests/test_audio_native.py"]
 
+# Default for new accounts: a single native session owner, no browser or Node.
+FROM python-dependencies AS whatsapp-native
+USER root
+RUN apt-get update && apt-get install -y --no-install-recommends ca-certificates \
+    && rm -rf /var/lib/apt/lists/*
+COPY --from=whatsmeow-build /out/anymsg-whatsmeow /usr/local/bin/anymsg-whatsmeow
+COPY --from=whatsmeow-build /out/licenses /app/whatsmeow-licenses
+COPY services/messaging/messaging_service ./messaging_service
+USER probe
+CMD ["python", "-m", "messaging_service.whatsapp_collector", "--config", "/run/secrets/whatsapp_config"]
+
+# Explicit rollback image for existing browser sessions; never auto-converted.
 FROM python-dependencies AS whatsapp
 USER root
 ARG CHROMIUM_VERSION=154.0.8037.92-1~deb12u1

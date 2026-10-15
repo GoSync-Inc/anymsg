@@ -21,10 +21,20 @@ ROOT = Path(__file__).resolve().parents[1]
 
 
 class ComposeLoader(yaml.SafeLoader):
-    """The pairing overlay's Compose !override is still a safe mapping."""
+    """Read Compose override tags without constructing arbitrary Python objects."""
 
 
-ComposeLoader.add_constructor('!override', lambda loader, node: loader.construct_mapping(node))
+ComposeLoader.add_constructor('!override', lambda loader, node:
+    loader.construct_sequence(node) if isinstance(node, yaml.SequenceNode)
+    else loader.construct_mapping(node))
+
+
+def test_native_overlay_removes_browser_seccomp_without_relaxing_privilege_boundary():
+    native = document('deploy/compose.whatsapp-native.yaml')['services']
+    for unit in native.values():
+        assert unit['security_opt'] == ['no-new-privileges:true']
+        assert 'whatsapp-native:' in unit['image']
+        assert unit['pids_limit'] == 64 and unit['mem_limit'].endswith(':-768m}')
 
 
 def document(relative):

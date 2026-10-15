@@ -1,0 +1,17 @@
+{
+  "provider": "webjs",
+  "enabled": false,
+  "account": "whatsapp-owner-1",
+  "expected_wid": "REPLACE_WITH_PHONE_DIGITS@c.us",
+  "permit_file": "/run/secrets/whatsapp_permit",
+  "session_directory": "/sessions/whatsapp",
+  "events_directory": "/spool/events",
+  "pages_directory": "/spool/pages",
+  "chromium_executable": "/usr/bin/chromium",
+  "node_executable": "/usr/local/bin/node",
+  "batch_size": 50,
+  "scan_interval_seconds": 60,
+  "max_media_bytes": 536870912,
+  "disk_reserve_bytes": 1073741824,
+  "max_dialogs": 2000
+}

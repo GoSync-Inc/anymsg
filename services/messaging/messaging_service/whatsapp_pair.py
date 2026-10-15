@@ -20,7 +20,7 @@ async def pair_config(path):
     session=Path(cfg['session_directory']);session.mkdir(parents=True,exist_ok=True,mode=0o700)
     if session.is_symlink() or session.stat().st_mode&0o077:raise RuntimeError('private_session_required')
     with session_lock(session) as lock_fd:
-        clear_browser_runtime_locks(session)
+        if cfg.get('provider')!='whatsmeow':clear_browser_runtime_locks(session)
         store=Store(Path(os.environ['DATABASE_URL_FILE']).read_text().strip(),Path(os.environ['PROBE_FILES']),'http://collector.invalid')
         archive=Archive(store);owner='wa-pair-'+secrets.token_hex(12);epoch=None;process=None;tasks=[]
         try:
@@ -28,8 +28,10 @@ async def pair_config(path):
                 row=c.execute('SELECT platform,synthetic FROM accounts WHERE id=%s',(cfg['account'],)).fetchone()
                 if not row or row['platform']!='whatsapp' or row['synthetic']:raise RuntimeError('live_account_required')
             epoch=await asyncio.to_thread(archive.acquire,cfg['account'],owner)
-            script=whatsapp_asset('pair.mjs')
-            process=await asyncio.create_subprocess_exec(cfg['node_executable'],str(script),str(path),
+            command=([cfg['native_executable'],'--config',str(path),'--pair']
+                if cfg.get('provider')=='whatsmeow' else
+                [cfg['node_executable'],str(whatsapp_asset('pair.mjs')),str(path)])
+            process=await asyncio.create_subprocess_exec(*command,
                 stdin=asyncio.subprocess.DEVNULL,stdout=asyncio.subprocess.DEVNULL,
                 pass_fds=(lock_fd,),start_new_session=True) # stderr alone remains the owner's TTY.
             async def heartbeat():

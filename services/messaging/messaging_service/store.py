@@ -198,6 +198,7 @@ class Store:
     def capabilities(self, token):
         with self.authorized(token,'capabilities') as (c, p):
             from .messenger_operations import CATALOG_VERSION,OPERATIONS,operation_manifest
+            from .whatsapp_capabilities import account_provider
             dataset=self.dataset(c,p)
             accounts = c.execute('SELECT id,platform,label,synthetic FROM accounts WHERE id=ANY(%s) ORDER BY id',
                                  ([r['id'] for r in dataset['sources']],)).fetchall()
@@ -281,6 +282,10 @@ class Store:
                     'operation_count':len(OPERATIONS),'tools':operation_tools,
                     'supported_count_by_platform':{platform:sum(item['supported'] for item in operation_manifest(platform))
                                                    for platform in ('telegram','whatsapp')},
+                    'platform_counts_basis':'legacy_defaults_use_account_manifest_for_actual_support',
+                    'supported_by_account':{a['id']:{'provider':account_provider(c,a['id'],a['platform']),
+                        'count':sum(item['supported'] for item in operation_manifest(a['platform'],
+                            provider=account_provider(c,a['id'],a['platform'])))} for a in accounts},
                     'availability_tool':'list_messenger_operations','account_opt_in_required':True,
                     'independent_key_permissions':True,'new_permissions_inherited_by_existing_keys':False,
                     'administration':['groups','contacts','account_profile'],
@@ -340,11 +345,12 @@ class Store:
     def set_messenger_operations(self,account,operations):
         """Owner-only account opt-in; this method is not exposed through MCP."""
         from .messenger_operations import operation_manifest
+        from .whatsapp_capabilities import account_provider
         values=normalize_list(operations,maximum=100)
         with self.pool.connection() as c:
             row=c.execute('SELECT platform FROM accounts WHERE id=%s',(account,)).fetchone()
             if not row:raise ValueError('unknown_account')
-            supported={entry['operation'] for entry in operation_manifest(row['platform']) if entry['supported']}
+            supported={entry['operation'] for entry in operation_manifest(row['platform'],provider=account_provider(c,account,row['platform'])) if entry['supported']}
             if set(values)-supported:raise ValueError('unsupported_operation')
             changed=c.execute('UPDATE account_policies SET operations_enabled=%s WHERE account=%s',
                               (values,account)).rowcount

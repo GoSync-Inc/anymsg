@@ -456,7 +456,7 @@ def test_catalog_covers_explicit_families_and_provider_differences():
     telegram = {row['operation']: row for row in operation_manifest('telegram')}
     whatsapp = {row['operation']: row for row in operation_manifest('whatsapp')}
     families = {
-        'read-live': ['chat_info', 'get_reactions', 'get_message_info', 'get_pinned_messages'],
+        'read-live': ['chat_info', 'get_reactions', 'get_message_info', 'get_pinned_messages', 'request_chat_history'],
         'groups-read': ['list_participants', 'list_topics'],
         'profile-read': ['get_profile'], 'contacts-read': ['list_contacts', 'get_contact', 'list_blocked', 'get_labels'],
         'send': ['send_file', 'forward_message', 'send_poll', 'send_contact', 'send_location'],
