@@ -43,6 +43,48 @@ test('success requires two sequential ready identities, completed initialize and
   await f.coordinator.stop();assert.equal(f.events.filter(e=>e.startsWith('destroy')).length,2);
 });
 
+test('closes the owned browser when upstream destroy skips the removed connection method',async()=>{
+  // Puppeteer 25 has connected, but no isConnected(). whatsapp-web.js 1.34.7
+  // silently skips browser.close() in this case; destroy alone cannot flush it.
+  const f=fixture([1,2].map(phase=>({initialize:async client=>{
+      client.pupBrowser.connected=true;
+      client.pupBrowser.close=async()=>{
+        f.events.push(`browserClose${phase}`);
+        client.pupBrowser.connected=false;
+        client.pupBrowser.process().finish();
+      };
+      client.destroy=async()=>{f.events.push(`destroy${phase}`);};
+      client.emit('ready');
+  }})));
+  assert.deepEqual(await f.coordinator.run(),{restored:true});
+  assert.equal(f.created,2);assert.equal(f.peak,1);
+  assert.deepEqual(f.events,['initialize1','browserClose1','exit1','destroy1',
+    'initialize2','browserClose2','exit2','destroy2']);
+});
+
+test('explicit browser close failure or missing exit cannot start a second browser',async()=>{
+  for(const close of [async()=>{throw new Error('close_failed');},async()=>{}]){
+    const f=fixture([{initialize:async client=>{
+      client.pupBrowser.close=close;
+      client.destroy=async()=>{};
+      client.emit('ready');
+    }},{}]);
+    await assert.rejects(f.coordinator.run(),/pairing_close_(failed|timeout)/);
+    assert.equal(f.created,1);
+  }
+});
+
+test('an already exited Chromium does not require another browser close',async()=>{
+  const f=fixture([1,2].map(()=>({initialize:async client=>{
+    client.pupBrowser.close=async()=>assert.fail('browser already exited');
+    client.destroy=async()=>{};
+    client.pupBrowser.process().finish();
+    client.emit('ready');
+  }})));
+  assert.deepEqual(await f.coordinator.run(),{restored:true});
+  assert.equal(f.created,2);assert.equal(f.peak,1);
+});
+
 test('destroy failure and abnormal Chromium exit never claim success or open another browser',async()=>{
   for(const destroy of [async()=>{throw new Error('close broke');},async child=>child.finish(null,'SIGKILL'),async child=>child.finish(1)]){
     const f=fixture([{destroy},{}]);

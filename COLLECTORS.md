@@ -214,6 +214,11 @@ QR. Success requires both clean closes and the restored identity. The existing
 Python 300-second supervisor bounds the entire attempt. No session-saved event or
 arbitrary delay is assumed.
 
+Pairing explicitly closes its owned Puppeteer browser before auth-strategy cleanup.
+whatsapp-web.js 1.34.7 otherwise skips that close because Puppeteer 25 removed
+`isConnected()`. The process-exit check remains mandatory: a timeout, failed close
+or abnormal exit cannot start another client or report successful pairing.
+
 The Compose WhatsApp memory cap is 2560 MiB per account. A live test proved that
 a 1536 MiB cap could kill the Chromium renderer while Docker OOMKilled remained
 false for the container. Inspect kernel/cgroup OOM counters as well as container
