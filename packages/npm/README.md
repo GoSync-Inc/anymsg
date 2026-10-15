@@ -27,12 +27,63 @@ npx anymsg search --url https://messages.example.com --token-file /private/agent
 ```
 
 Keep token files private (`chmod 600`); do not put tokens in command arguments.
-Use `call('operation', arguments)` for the allowlisted HTTP operations exported as `tools`.
+Use `call('operation', arguments)` for the 41 allowlisted HTTP operations exported as `tools`.
 Confirmed text sending uses `sendMessage` and `getSendStatus`, separate send rights
 and account opt-in. The acting agent must obtain exact owner confirmation; the
 server has no approval gate yet. Reuse the same action ID after a lost response;
 never automatically resend an unknown result. MCP clients connect directly to the
 server's `/mcp` endpoint; this package is not a stdio MCP bridge.
+
+## Consume subscription events and record private feedback
+
+`getSubscriptionEvents` remains passive inspection. `fetchSubscriptionEvents`
+and `waitForSubscriptionEvents` read after a separate server ACK position;
+waiting accepts `timeout` from 0 to 25 seconds, `limit` from 1 to 100 and an
+optional `{signal}` as its second argument. The default client deadline is 30
+seconds; an explicit shorter client deadline can stop the wait earlier. A key
+with explicit `subscription-ack` receives a short-lived page receipt. Process
+and durably retain the page before acknowledging its exact receipt and
+`ack_version`:
+
+```js
+// subscription is the definition returned by createSubscription/getSubscription.
+const subscriptionId = subscription.subscription_id;
+const page = await archive.waitForSubscriptionEvents({
+  subscription_id: subscriptionId, timeout: 25, limit: 50,
+}, {signal: AbortSignal.timeout(30000)});
+// Process and persist page.items before this explicit ACK:
+if (page.receipt) {
+  await archive.ackSubscriptionEvents({
+    subscription_id: subscriptionId, receipt: page.receipt, version: page.ack_version,
+  });
+}
+```
+
+ACK changes neither provider read state nor archive consumer positions. Keep the
+same receipt after an uncertain ACK; the client never retries automatically.
+Creation optionally accepts `wake_rules` (`incoming_message`, `owner_mention`,
+`reply_to_owner`, `reply_to_confirmed_send`). The confirmed-send rule also needs
+`reply_to_send`, a successful send owned by this credential. Names, message text
+and timestamps cannot establish a reply anchor.
+
+`configureSubscriptionDelivery({subscription_id, version, receiver_id})` binds
+only an operator-registered receiver UUID; passing `null` or omitting the ID
+disables delivery. `testSubscription({subscription_id, request_id})` queues a
+bounded synthetic hint. Receiver success does not verify a host turn or ACK any
+event. Clients cannot register arbitrary URLs or schedule another task.
+
+`submitFeedback({request_id, category, description, operation?, refs?})` records
+local private feedback with explicit `feedback-write`. Categories are `bug`,
+`feature`, `quality` or `other`; descriptions are 1–4000 characters. References
+may include at most 32 authorized IDs per `message_ids`, `chat_ids` and
+`subscription_ids` list. Do not include credentials or originals in descriptions.
+`listFeedback({limit:50})` returns only this exact credential's records. Feedback
+never sends a message or publishes an external issue.
+
+`sendMessage` optionally accepts `wait_s` from 0 to 25 seconds to inspect the
+submitted send's outcome before returning. Zero is omitted for compatibility
+with older servers. Waiting never resends a message or turns an unknown result
+into success; preserve the same request ID and inspect `getSendStatus`.
 
 Server, source and Python package: https://github.com/GoSync-Inc/deedkit.
 MIT license, copyright GoSync.

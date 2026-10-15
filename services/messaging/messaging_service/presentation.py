@@ -83,15 +83,20 @@ def render(method, result, detail):
             # The compact budget carries only the live verdict; full detail has the evidence.
             if 'liveness' in source:row['liveness_state']=source['liveness']['state']
             row['freshness']={k:v for k,v in source.get('freshness',{}).items()
-                if k in ('state','last_successful_scan_at','scan_age_seconds','basis')}
+                if k in ('state','scan_state','last_successful_scan_at','scan_age_seconds','basis',
+                    'pending_capture_events','last_capture_commit_at','qualifications')
+                and v is not None and (k!='qualifications' or v)}
             row['history']={k:v for k,v in source.get('history',{}).items()
                 if k in ('observed_chats','unknown_chats','full_history_verified','gap_chats',
                     'catchup_pending_chats','configured_window','last_scan_at')}
             row['operations']={name:{k:v for k,v in operation.items()
-                if k in ('state','reason_code','pending_events','collector_running','retry_at','next_action')}
+                if k in ('state','reason_code','pending_events','collector_running','retry_at','next_action',
+                    'storage_paused','storage_paused_jobs','terminal_failed_jobs','retry_queued_jobs','needs_attention')
+                and (k not in ('storage_paused','storage_paused_jobs','terminal_failed_jobs','retry_queued_jobs','needs_attention') or v)}
                 for name,operation in source.get('operations',{}).items()}
             row['files']={k:v for k,v in source.get('files',{}).items()
-                if k in ('download','download_errors','extraction','enrichment')}
+                if k in ('download','download_errors','download_error_states','extraction','enrichment')
+                and (k!='download_error_states' or v)}
             compact['sources'].append(row)
         compact['detail']='compact'
         compact['next_action']='get_sync_status_detail_full_or_chat_id_for_diagnostics'

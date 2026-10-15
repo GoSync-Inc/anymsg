@@ -2,7 +2,7 @@
 from datetime import datetime,timezone
 
 DETAILS={
-    'version_conflict':('Conflicting provider observations; current archive revision is retained.','inspect_message_conflicts'),
+    'version_conflict':('Conflicting provider observations; current archive revision is retained. Read the message context and scoped sync evidence.','get_context'),
     'coverage_not_reconciled':('Archived observations do not establish complete provider history.','get_sync_status_for_chat'),
     'whatsapp_catchup_gap':('Provider traversal did not reach a previous checkpoint. Live collection may still work.','inspect_chat_gaps'),
     'whatsapp_history_partial':('WhatsApp history remains a partial provider traversal.','get_sync_status_for_chat'),
@@ -32,6 +32,11 @@ DETAILS={
     'media_size_limit':('The original exceeds the configured download size bound.','inspect_download_limits'),
     'media_hash_mismatch':('Media integrity verification failed; no original was published.','wait_for_media_retry'),
     'media_size_mismatch':('The downloaded original size did not match its descriptor.','wait_for_media_retry'),
+    'network_error':('The media request failed; bounded retry is scheduled.','wait_for_media_retry'),
+    'integrity_error':('Media integrity verification failed; no original was published.','wait_for_media_retry'),
+    'unavailable':('The provider did not expose this original.','inspect_source_attachment'),
+    'size_limit':('The original exceeds the configured download size bound.','inspect_download_limits'),
+    'retry_exhausted':('The bounded download attempts are exhausted. Automatic retry is stopped.','inspect_download_failure'),
     'spool_full':('The durable capture queue reached its bound.','check_capture_backlog'),
     'disk_reserve':('The configured disk reserve prevents additional writes.','check_free_disk'),
     'storage_unavailable':('The local originals or media temporary directory could not be written (missing, permissions or read-only). Provider attempts are not consumed; downloads resume after the storage path is fixed.','check_media_storage_path'),
@@ -41,16 +46,36 @@ DETAILS={
 }
 
 
-def describe(code):
+def describe(code, *, job_state=None):
     explanation,action=DETAILS.get(code,('No specific diagnosis recorded.' if not code else
         'Provider or archive observation; inspect the scoped sync evidence.','get_sync_status_for_chat'))
+    if job_state is not None:
+        retry=job_state=='queued' and code!='retry_exhausted'
+        if job_state=='failed':
+            explanation='The original download failed. Automatic retry is stopped; inspect the recorded reason before any operator intervention.'
+            action='inspect_download_failure'
+        elif job_state=='leased':
+            explanation='An original transfer is in progress; this reason belongs to its earlier attempt.'
+            action='get_attachment'
+        return {'explanation':explanation,'next_action':action,'retry_scheduled':retry}
     return {'explanation':explanation,'next_action':action}
 
 
-def freshness(scanned,now=None):
+def freshness(scanned,now=None,*,operational=None):
     now=now or datetime.now(timezone.utc)
     age=max(0,(now-scanned).total_seconds()) if scanned is not None else None
-    return {'state':'scan_unknown' if age is None else 'scan_stale' if age>300 else 'recent_scan',
+    scan_state='scan_unknown' if age is None else 'scan_stale' if age>300 else 'recent_scan'
+    phases=operational or {}
+    capture=phases.get('live_capture',{})
+    state=scan_state
+    if capture.get('collector_running') is False:state='collector_not_running'
+    elif capture.get('pending_events',0)>0 or capture.get('state')=='backlogged':state='capture_backlogged'
+    elif capture.get('state') in ('paused','stopped','not_running'):state='capture_paused'
+    qualifications=['media_storage_paused'] if phases.get('media',{}).get('storage_paused_jobs') else []
+    return {'state':state,'scan_state':scan_state,
         'last_successful_scan_at':scanned,'scan_age_seconds':round(age,1) if age is not None else None,
+        'pending_capture_events':capture.get('pending_events'),
+        'last_capture_commit_at':(capture.get('last_commit') or {}).get('committed_by'),
+        'qualifications':qualifications,
         'warning_after_seconds':300,'basis':'successful_scan_not_last_message_time',
-        'notice':'An account scan does not prove every chat is current; inspect the specific chat.'}
+        'notice':'Scan age is separate from live capture backlog and collector availability. Media storage pauses affect originals independently. An account scan does not prove every chat is current; inspect the specific chat.'}

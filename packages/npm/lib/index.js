@@ -15,6 +15,8 @@ const METHODS = Object.freeze([
   'preview_message','send_message','get_send_status',
   'list_messenger_operations','preview_messenger_operation','execute_messenger_operation','get_messenger_operation',
   'create_subscription','list_subscriptions','get_subscription','update_subscription','get_subscription_events',
+  'fetch_subscription_events','ack_subscription_events','wait_for_subscription_events',
+  'configure_subscription_delivery','test_subscription','submit_feedback','list_feedback',
   'prepare_file_upload','upload_file_chunk','get_file_upload',
 ]);
 export const tools = METHODS;
@@ -39,6 +41,9 @@ const SAFE_ERRORS = new Set([
   'invalid_upload','invalid_upload_chunk','upload_limit','upload_capacity',
   'upload_expired','upload_offset_conflict','upload_hash_mismatch',
   'media_request_limit',
+  'subscription_wait_timeout','subscription_receipt_limit','invalid_feedback','feedback_limit',
+  'invalid_receiver','delivery_not_configured','consumer_already_initialized',
+  'send_wait_busy','send_status_timeout','send_access_changed','send_expired','send_result_unknown',
 ]);
 
 const UPLOAD_FIELDS = Object.freeze({
@@ -122,16 +127,27 @@ const MESSENGER_FIELDS = Object.freeze({
   get_messenger_operation: [['operation_id'],['operation_id']],
 });
 const SUBSCRIPTION_FIELDS = Object.freeze({
-  create_subscription: [['chat_ids'],['chat_ids','sender_ids','kinds','direction','origins','label','expires_at']],
+  create_subscription: [['chat_ids'],['chat_ids','sender_ids','kinds','direction','origins','label','expires_at',
+    'wake_rules','reply_to_send']],
   list_subscriptions: [[],['limit']],
   get_subscription: [['subscription_id'],['subscription_id']],
   update_subscription: [['subscription_id','version','action'],['subscription_id','version','action','resume_policy']],
   get_subscription_events: [['subscription_id'],['subscription_id','after','limit']],
+  fetch_subscription_events: [['subscription_id'],['subscription_id','limit']],
+  ack_subscription_events: [['subscription_id','receipt','version'],['subscription_id','receipt','version']],
+  wait_for_subscription_events: [['subscription_id'],['subscription_id','timeout','limit']],
+  configure_subscription_delivery: [['subscription_id','version'],['subscription_id','version','receiver_id']],
+  test_subscription: [['subscription_id','request_id'],['subscription_id','request_id']],
+});
+const FEEDBACK_FIELDS = Object.freeze({
+  submit_feedback: [['request_id','category','description'],['request_id','category','description','operation','refs']],
+  list_feedback: [[],['limit']],
 });
 const SUBSCRIPTION_KINDS = new Set(['message.created','message.edited','message.deleted',
   'message.status','attachment.ready','file.text.ready','file.transcript.ready',
   'file.description.ready','file.processing.failed']);
 const SUBSCRIPTION_ORIGINS = new Set(['live','backfill','reconcile','fixture']);
+const WAKE_RULES = new Set(['incoming_message','owner_mention','reply_to_owner','reply_to_confirmed_send']);
 function plainObject(value) {
   return value !== null && typeof value === 'object' &&
     [Object.prototype,null].includes(Object.getPrototypeOf(value));
@@ -191,6 +207,26 @@ function subscriptionExpiry(value) {
     hour<=23 && minute<=59 && second<=59 && Number(parts[8]||0)<=23 &&
     Number(parts[9]||0)<=59 && Number.isFinite(Date.parse(value));
 }
+function waitSeconds(value) {
+  if (typeof value!=='number' || !Number.isFinite(value) || value<0 || value>25)
+    throw new TypeError('Wait must be a number from 0 to 25 seconds');
+  return value;
+}
+function requestId(value) {
+  return typeof value==='string' && /^[a-zA-Z0-9_.:-]{8,128}$/.test(value);
+}
+function sendWaitArguments(args) {
+  if (args && typeof args==='object' && Object.hasOwn(args,'wait_s')) {
+    const descriptor=Object.getOwnPropertyDescriptor(args,'wait_s');
+    if (!descriptor || !('value' in descriptor)) throw new TypeError('Invalid send wait');
+    waitSeconds(descriptor.value);
+    if (descriptor.value===0) {
+      const {wait_s,...compatible}=args;
+      return compatible;
+    }
+  }
+  return args;
+}
 function subscriptionArguments(method,args) {
   const [required,allowed]=SUBSCRIPTION_FIELDS[method];
   if (!plainObject(args) || !operationJson(args) || required.some(key=>!Object.hasOwn(args,key)) ||
@@ -198,16 +234,23 @@ function subscriptionArguments(method,args) {
     throw new TypeError('Invalid subscription arguments');
   for (const [key,value] of Object.entries(args)) {
     let valid=true;
-    if (['chat_ids','sender_ids','kinds','origins'].includes(key)) {
+    if (['chat_ids','sender_ids','kinds','origins','wake_rules'].includes(key)) {
       if (value===null && key!=='chat_ids') continue;
-      const maximum=key==='kinds'?9:key==='origins'?4:64;
+      const maximum=key==='kinds'?9:['origins','wake_rules'].includes(key)?4:64;
       valid=Array.isArray(value) && value.length>=1 && value.length<=maximum &&
         value.every(item=>['chat_ids','sender_ids'].includes(key)?subscriptionReference(item):
-          typeof item==='string' && (key==='kinds'?SUBSCRIPTION_KINDS:SUBSCRIPTION_ORIGINS).has(item));
+          typeof item==='string' && (key==='kinds'?SUBSCRIPTION_KINDS:
+            key==='origins'?SUBSCRIPTION_ORIGINS:WAKE_RULES).has(item));
     } else if (['limit','version','after'].includes(key)) {
       const [minimum,maximum]={limit:[1,100],version:[1,Number.MAX_SAFE_INTEGER],after:[0,Number.MAX_SAFE_INTEGER]}[key];
       valid=Number.isSafeInteger(value) && value>=minimum && value<=maximum;
     } else if (key==='subscription_id') valid=subscriptionReference(value);
+    else if (key==='receipt') valid=typeof value==='string' && [...value].length>=32 && [...value].length<=128;
+    else if (key==='timeout') waitSeconds(value);
+    else if (key==='request_id') valid=requestId(value);
+    else if (key==='receiver_id') valid=value===null || typeof value==='string' &&
+      /^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$/.test(value);
+    else if (key==='reply_to_send') valid=value===null || typeof value==='string' && [...value].length>=1 && [...value].length<=128;
     else if (key==='label') valid=typeof value==='string' && [...value].length<=128 && !/[\x00-\x1f\x7f]/.test(value);
     else if (['action','direction','resume_policy'].includes(key))
       valid=typeof value==='string' && {action:['pause','resume','close'],
@@ -217,6 +260,29 @@ function subscriptionArguments(method,args) {
       valid=subscriptionExpiry(value);
     }
     if (!valid) throw new TypeError('Invalid subscription arguments');
+  }
+  if (args.wake_rules?.includes('reply_to_confirmed_send') && args.reply_to_send==null)
+    throw new TypeError('Confirmed-send wake rule requires a send reference');
+  return args;
+}
+function feedbackArguments(method,args) {
+  const [required,allowed]=FEEDBACK_FIELDS[method];
+  if (!plainObject(args) || !operationJson(args) || required.some(key=>!Object.hasOwn(args,key)) ||
+      Reflect.ownKeys(args).some(key=>!allowed.includes(key))) throw new TypeError('Invalid feedback arguments');
+  for (const [key,value] of Object.entries(args)) {
+    let valid;
+    if (key==='request_id') valid=requestId(value);
+    else if (key==='limit') valid=Number.isSafeInteger(value) && value>=1 && value<=100;
+    else if (key==='category') valid=typeof value==='string' && ['bug','feature','quality','other'].includes(value);
+    else if (key==='description') valid=typeof value==='string' && [...value].length>=1 &&
+      [...value].length<=4000 && value.trim().length>0 && !/[\x00-\x08\x0b-\x1f\x7f]/.test(value);
+    else if (key==='operation') valid=value===null || typeof value==='string' && /^[a-z][a-z0-9_]{0,63}$/.test(value);
+    else valid=value===null || plainObject(value) && Object.keys(value).every(name=>
+      ['message_ids','chat_ids','subscription_ids'].includes(name) && Array.isArray(value[name]) &&
+      value[name].length<=32 && value[name].every(item=>typeof item==='string' &&
+        [...item].length>=1 && [...item].length<=256 && !/[\x00-\x1f\x7f]/.test(item))) &&
+        Buffer.byteLength(JSON.stringify(value))<=8192;
+    if (!valid) throw new TypeError('Invalid feedback arguments');
   }
   return args;
 }
@@ -309,6 +375,8 @@ export class AnyMsgClient {
       throw new TypeError('Arguments must be an object without a token field');
     if (Object.hasOwn(MESSENGER_FIELDS,method)) messengerArguments(method,arguments_);
     if (Object.hasOwn(SUBSCRIPTION_FIELDS,method)) subscriptionArguments(method,arguments_);
+    if (Object.hasOwn(FEEDBACK_FIELDS,method)) feedbackArguments(method,arguments_);
+    if (method==='send_message') arguments_=sendWaitArguments(arguments_);
     if (Object.hasOwn(UPLOAD_FIELDS,method)) uploadArguments(method,arguments_);
     if (method==='request_file_download' && (!plainObject(arguments_) || !operationJson(arguments_) ||
         Reflect.ownKeys(arguments_).length!==1 || !Object.hasOwn(arguments_,'attachment_id') ||
@@ -420,7 +488,7 @@ export class AnyMsgClient {
   getReviews(args) { return this.call('get_reviews', args); }
   recordReview(args) { return this.call('record_review', args); }
   previewMessage(args) { return this.call('preview_message',args); }
-  sendMessage(args) { return this.call('send_message',args); }
+  sendMessage(args) { return this.call('send_message',sendWaitArguments(args)); }
   getSendStatus(args) { return this.call('get_send_status',args); }
   listMessengerOperations(args) {
     return this.call('list_messenger_operations',messengerArguments('list_messenger_operations',args));
@@ -448,5 +516,26 @@ export class AnyMsgClient {
   }
   getSubscriptionEvents(args) {
     return this.call('get_subscription_events',subscriptionArguments('get_subscription_events',args));
+  }
+  fetchSubscriptionEvents(args,options) {
+    return this.call('fetch_subscription_events',subscriptionArguments('fetch_subscription_events',args),options);
+  }
+  ackSubscriptionEvents(args,options) {
+    return this.call('ack_subscription_events',subscriptionArguments('ack_subscription_events',args),options);
+  }
+  waitForSubscriptionEvents(args,options) {
+    return this.call('wait_for_subscription_events',subscriptionArguments('wait_for_subscription_events',args),options);
+  }
+  configureSubscriptionDelivery(args,options) {
+    return this.call('configure_subscription_delivery',subscriptionArguments('configure_subscription_delivery',args),options);
+  }
+  testSubscription(args,options) {
+    return this.call('test_subscription',subscriptionArguments('test_subscription',args),options);
+  }
+  submitFeedback(args,options) {
+    return this.call('submit_feedback',feedbackArguments('submit_feedback',args),options);
+  }
+  listFeedback(args={},options) {
+    return this.call('list_feedback',feedbackArguments('list_feedback',args),options);
   }
 }

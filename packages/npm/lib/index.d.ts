@@ -13,6 +13,8 @@ export interface MessageDraft {
 export interface MessageAction extends MessageDraft {
   request_id: string;
   preview_digest?: string;
+  /** Bounded receipt wait, 0–25 seconds. Zero is omitted for older servers. */
+  wait_s?: number;
 }
 export interface MessengerOperationPreview {
   account: string;
@@ -78,6 +80,7 @@ export type SubscriptionEventKind = 'message.created' | 'message.edited' | 'mess
   'message.status' | 'attachment.ready' | 'file.text.ready' | 'file.transcript.ready' |
   'file.description.ready' | 'file.processing.failed';
 export type SubscriptionOrigin = 'live' | 'backfill' | 'reconcile' | 'fixture';
+export type SubscriptionWakeRule = 'incoming_message' | 'owner_mention' | 'reply_to_owner' | 'reply_to_confirmed_send';
 export interface SubscriptionSelection {
   /** Frozen 1–64 authorized archive chat IDs, never names or arbitrary provider references. */
   chat_ids: string[];
@@ -92,12 +95,52 @@ export interface SubscriptionSelection {
   label?: string;
   /** Future zoned ISO timestamp, at most 366 days away. */
   expires_at?: string | null;
+  /** Native immutable evidence only; alternatives are ORed. */
+  wake_rules?: SubscriptionWakeRule[] | null;
+  /** This credential's confirmed sent reference; required by reply_to_confirmed_send. */
+  reply_to_send?: string | null;
 }
 export interface SubscriptionLifecycleAction {
   subscription_id: string;
   version: number;
   action: 'pause' | 'resume' | 'close';
   resume_policy?: 'catch_up' | 'skip';
+}
+export interface SubscriptionPage {
+  subscription_id: string;
+  /** 1–100 references; default 50. Fetching never acknowledges them. */
+  limit?: number;
+}
+export interface SubscriptionPageAck {
+  subscription_id: string;
+  /** Exact short-lived receipt issued by fetchSubscriptionEvents. */
+  receipt: string;
+  /** ack_version from the fetched page, not the subscription lifecycle version. */
+  version: number;
+}
+export interface SubscriptionWait extends SubscriptionPage {
+  /** 0–25 seconds; default 25. Explicit client deadlines still apply. */
+  timeout?: number;
+}
+export interface SubscriptionDelivery {
+  subscription_id: string;
+  version: number;
+  /** Opaque operator-registered UUID. Null or omission disables; never a URL. */
+  receiver_id?: string | null;
+}
+export interface FeedbackReferences {
+  /** At most 32 authorized archive IDs per reference type. */
+  message_ids?: string[];
+  chat_ids?: string[];
+  subscription_ids?: string[];
+}
+export interface PrivateFeedback {
+  request_id: string;
+  category: 'bug' | 'feature' | 'quality' | 'other';
+  /** 1–4000 characters; do not include credentials or private originals. */
+  description: string;
+  operation?: string | null;
+  refs?: FeedbackReferences | null;
 }
 export declare const tools: readonly string[];
 export declare class AnyMsgError extends Error {
@@ -156,6 +199,20 @@ export declare class AnyMsgClient {
   getSubscription(args: {subscription_id:string}): Promise<Record<string,unknown>>;
   /** Version-checked local lifecycle operation; no messenger action or agent wake-up. */
   updateSubscription(args: SubscriptionLifecycleAction): Promise<Record<string,unknown>>;
-  /** Passive matched-reference inspection. No durable consumer ACK or push in this release. */
+  /** Passive matched-reference inspection, independent of the durable ACK position. */
   getSubscriptionEvents(args: {subscription_id:string; after?:number; limit?:number}): Promise<Record<string,unknown>>;
+  /** Fetch an unacknowledged page; receipt issuance requires explicit subscription-ack. */
+  fetchSubscriptionEvents(args: SubscriptionPage, options?: {signal?:AbortSignal}): Promise<Record<string,unknown>>;
+  /** ACK one issued page; no provider read-state change or automatic retry. */
+  ackSubscriptionEvents(args: SubscriptionPageAck, options?: {signal?:AbortSignal}): Promise<Record<string,unknown>>;
+  /** Bounded wait with reauthorization, no implicit ACK or provider polling. */
+  waitForSubscriptionEvents(args: SubscriptionWait, options?: {signal?:AbortSignal}): Promise<Record<string,unknown>>;
+  /** Select a registered receiver only. Receiver success never proves a host turn. */
+  configureSubscriptionDelivery(args: SubscriptionDelivery, options?: {signal?:AbortSignal}): Promise<Record<string,unknown>>;
+  /** Queue a synthetic hint without creating an archive event or acknowledging it. */
+  testSubscription(args: {subscription_id:string; request_id:string}, options?: {signal?:AbortSignal}): Promise<Record<string,unknown>>;
+  /** Store local private feedback; never forwards or publishes the description. */
+  submitFeedback(args: PrivateFeedback, options?: {signal?:AbortSignal}): Promise<Record<string,unknown>>;
+  /** Only the current credential's records, without former source references. */
+  listFeedback(args?: {limit?:number}, options?: {signal?:AbortSignal}): Promise<Record<string,unknown>>;
 }

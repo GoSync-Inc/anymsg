@@ -5,8 +5,10 @@ import base64
 import binascii
 from importlib.resources import files
 import json
+import math
 
 from jsonschema import Draft202012Validator
+from jsonschema.validators import extend
 
 
 def load_catalog(rows):
@@ -32,11 +34,37 @@ CATALOG["platform_capabilities"] = {
 }
 
 
+# JSON Schema treats 1.0 as an integer. The backend's strict integer fields
+# reject it, so validate the same wire types before any upstream admission.
+StrictValidator = extend(
+    Draft202012Validator,
+    type_checker=Draft202012Validator.TYPE_CHECKER.redefine_many({
+        "integer": lambda checker, value: type(value) is int,
+        "number": lambda checker, value: type(value) is int or type(value) is float and math.isfinite(value),
+    }),
+)
+
+
+def finite_numbers(value):
+    # Check untyped operation parameters too: schema bounds do not reject NaN,
+    # and HTTPX would otherwise fail serialization after capability admission.
+    pending = [value]
+    while pending:
+        item = pending.pop()
+        if type(item) is float and not math.isfinite(item):
+            raise ValueError("invalid_arguments")
+        if isinstance(item, dict):
+            pending.extend(item.values())
+        elif isinstance(item, list):
+            pending.extend(item)
+
+
 def arguments(tool, value):
     if not isinstance(value, dict):
         raise ValueError("invalid_arguments")
+    finite_numbers(value)
     schema = tool["inputSchema"]
-    if next(Draft202012Validator(schema).iter_errors(value), None) is not None:
+    if next(StrictValidator(schema).iter_errors(value), None) is not None:
         raise ValueError("invalid_arguments")
     if tool["operation"] == "upload_file_chunk":
         try:

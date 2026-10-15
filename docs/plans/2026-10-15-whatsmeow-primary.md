@@ -1,6 +1,9 @@
 # Primary WhatsApp provider: whatsmeow
 
-Status: implementation and offline regression complete in an isolated branch. Prepared for the current DeedKit main after the repository migration; production account cutover remains separate.
+Status: implementation merged in [PR #19](https://github.com/GoSync-Inc/deedkit/pull/19),
+with corrective increments in PRs #20–23. This is historical design/acceptance
+reference. Current rollout and capability-extension status is maintained only in
+[BACKLOG.md](../../BACKLOG.md) (DK-07 and DK-28); production cutover remains separate.
 
 ## Target
 
@@ -70,7 +73,7 @@ review, documented rollout/rollback and unresolved live checks.
   archive, including the observed LID namespace. This is a single smoke sample,
   not a live parity or end-to-end MCP latency benchmark.
 
-## Remaining rollout and backlog
+## Rollout and capability reference
 
 - Pilot ordinary incoming/group messages, media, provider interruption/recovery
   and sustained ingestion before replacing existing production writers. Preserve

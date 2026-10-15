@@ -38,6 +38,9 @@ SAFE_ERROR_CODES = frozenset({
     'invalid_upload','invalid_upload_chunk','upload_limit','upload_capacity',
     'upload_expired','upload_offset_conflict','upload_hash_mismatch',
     'media_request_limit',
+    'subscription_wait_timeout','subscription_receipt_limit','invalid_feedback','feedback_limit',
+    'invalid_receiver','delivery_not_configured','consumer_already_initialized',
+    'send_wait_busy','send_status_timeout','send_access_changed','send_expired','send_result_unknown',
 })
 
 _UPLOAD_CHUNK_BYTES = 262144
@@ -123,20 +126,41 @@ _MESSENGER_FIELDS = {
 }
 _OMITTED = object()
 _SUBSCRIPTION_FIELDS = {
-    'create_subscription': ({'chat_ids'}, {'chat_ids','sender_ids','kinds','direction','origins','label','expires_at'}),
+    'create_subscription': ({'chat_ids'}, {'chat_ids','sender_ids','kinds','direction','origins','label','expires_at',
+        'wake_rules','reply_to_send'}),
     'list_subscriptions': (set(), {'limit'}),
     'get_subscription': ({'subscription_id'}, {'subscription_id'}),
     'update_subscription': ({'subscription_id','version','action'},
         {'subscription_id','version','action','resume_policy'}),
     'get_subscription_events': ({'subscription_id'}, {'subscription_id','after','limit'}),
+    'fetch_subscription_events': ({'subscription_id'}, {'subscription_id','limit'}),
+    'ack_subscription_events': ({'subscription_id','receipt','version'}, {'subscription_id','receipt','version'}),
+    'wait_for_subscription_events': ({'subscription_id'}, {'subscription_id','timeout','limit'}),
+    'configure_subscription_delivery': ({'subscription_id','version'}, {'subscription_id','version','receiver_id'}),
+    'test_subscription': ({'subscription_id','request_id'}, {'subscription_id','request_id'}),
+}
+_FEEDBACK_FIELDS = {
+    'submit_feedback': ({'request_id','category','description'}, {'request_id','category','description','operation','refs'}),
+    'list_feedback': (set(), {'limit'}),
 }
 _SUBSCRIPTION_KINDS = frozenset({'message.created','message.edited','message.deleted','message.status',
     'attachment.ready','file.text.ready','file.transcript.ready','file.description.ready','file.processing.failed'})
 _SUBSCRIPTION_ORIGINS = frozenset({'live','backfill','reconcile','fixture'})
+_WAKE_RULES = frozenset({'incoming_message','owner_mention','reply_to_owner','reply_to_confirmed_send'})
 
 
 def _subscription_reference(value):
     return isinstance(value,str) and bool(re.fullmatch(r'[^\x00-\x20\x7f]{1,256}',value))
+
+
+def _wait_seconds(value):
+    if type(value) not in (int,float) or not math.isfinite(value) or not 0<=value<=25:
+        raise ValueError('invalid_parameters')
+    return value
+
+
+def _request_id(value):
+    return isinstance(value,str) and bool(re.fullmatch(r'[a-zA-Z0-9_.:-]{8,128}',value))
 
 
 def _subscription_parameters(operation, parameters):
@@ -146,18 +170,25 @@ def _subscription_parameters(operation, parameters):
         raise ValueError('invalid_parameters')
     for name,value in parameters.items():
         valid=True
-        if name in ('chat_ids','sender_ids','kinds','origins'):
+        if name in ('chat_ids','sender_ids','kinds','origins','wake_rules'):
             if value is None and name!='chat_ids':continue
-            maximum=9 if name=='kinds' else 4 if name=='origins' else 64
+            maximum=9 if name=='kinds' else 4 if name in ('origins','wake_rules') else 64
             valid=isinstance(value,list) and 1<=len(value)<=maximum
             if valid:
                 valid=all(_subscription_reference(item) if name in ('chat_ids','sender_ids')
                     else isinstance(item,str) and item in (_SUBSCRIPTION_KINDS if name=='kinds'
-                        else _SUBSCRIPTION_ORIGINS) for item in value)
+                        else _SUBSCRIPTION_ORIGINS if name=='origins' else _WAKE_RULES) for item in value)
         elif name in ('limit','version','after'):
             minimum,maximum={'limit':(1,100),'version':(1,9007199254740991),'after':(0,9007199254740991)}[name]
             valid=type(value) is int and minimum<=value<=maximum
         elif name=='subscription_id':valid=_subscription_reference(value)
+        elif name=='receipt':valid=isinstance(value,str) and 32<=len(value)<=128
+        elif name=='timeout':_wait_seconds(value)
+        elif name=='request_id':valid=_request_id(value)
+        elif name=='receiver_id':
+            valid=value is None or isinstance(value,str) and bool(re.fullmatch(
+                r'[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}',value))
+        elif name=='reply_to_send':valid=value is None or isinstance(value,str) and 1<=len(value)<=128
         elif name=='label':valid=isinstance(value,str) and len(value)<=128 and not re.search(r'[\x00-\x1f\x7f]',value)
         elif name in ('action','direction','resume_policy'):
             valid=isinstance(value,str) and value in {
@@ -172,6 +203,34 @@ def _subscription_parameters(operation, parameters):
                     parsed=datetime.fromisoformat(value.replace('Z','+00:00'))
                     valid=parsed.tzinfo is not None and parsed.utcoffset() is not None
                 except ValueError:valid=False
+        if not valid:raise ValueError('invalid_parameters')
+    if ('reply_to_confirmed_send' in (parameters.get('wake_rules') or [])
+            and parameters.get('reply_to_send') is None):
+        raise ValueError('invalid_parameters')
+
+
+def _feedback_parameters(operation, parameters):
+    required,allowed=_FEEDBACK_FIELDS[operation]
+    if not required<=parameters.keys() or parameters.keys()-allowed:
+        raise ValueError('invalid_parameters')
+    for name,value in parameters.items():
+        if name=='request_id':valid=_request_id(value)
+        elif name=='limit':valid=type(value) is int and 1<=value<=100
+        elif name=='category':valid=isinstance(value,str) and value in ('bug','feature','quality','other')
+        elif name=='description':
+            valid=isinstance(value,str) and 1<=len(value)<=4000 and bool(value.strip()) and not any(
+                ord(ch)<32 and ch not in '\n\t' or ord(ch)==127 for ch in value)
+        elif name=='operation':
+            # The server's current catalog is authoritative; future operations
+            # can be referenced without an SDK upgrade.
+            valid=value is None or isinstance(value,str) and bool(re.fullmatch(r'[a-z][a-z0-9_]{0,63}',value))
+        else:
+            valid=value is None or isinstance(value,dict) and not value.keys()-{'message_ids','chat_ids','subscription_ids'}
+            if valid and value is not None:
+                valid=all(isinstance(items,list) and len(items)<=32 and all(
+                    isinstance(item,str) and 1<=len(item)<=256 and not any(
+                        ord(ch)<32 or ord(ch)==127 for ch in item) for item in items) for items in value.values())
+                if valid:valid=len(json.dumps(value).encode())<=8192
         if not valid:raise ValueError('invalid_parameters')
 
 
@@ -232,7 +291,7 @@ class Client:
     read. send_message requires exact owner confirmation by the acting agent.
     Ambiguous writes are never automatically retried by this SDK.
     """
-    def __init__(self, base_url, token, *, timeout=20, max_response_bytes=8*1024**2,
+    def __init__(self, base_url, token, *, timeout=30, max_response_bytes=8*1024**2,
                  transport=None):
         self.base_url = _base_url(base_url)
         if (not isinstance(token,str) or not token or len(token)>8192
@@ -264,6 +323,12 @@ class Client:
             _messenger_parameters(operation, parameters)
         if operation in _SUBSCRIPTION_FIELDS:
             _subscription_parameters(operation,parameters)
+        if operation in _FEEDBACK_FIELDS:
+            _feedback_parameters(operation,parameters)
+        if operation=='send_message' and 'wait_s' in parameters:
+            _wait_seconds(parameters['wait_s'])
+            if parameters['wait_s']==0:
+                parameters={name:value for name,value in parameters.items() if name!='wait_s'}
         if operation in _UPLOAD_FIELDS:
             _upload_parameters(operation,parameters)
         if operation == 'request_file_download' and (parameters.keys() != {'attachment_id'}
@@ -396,7 +461,7 @@ class Client:
             reply_to=reply_to,format=format,link_preview=link_preview,allow_lossy=allow_lossy))
 
     def send_message(self,*,account,chat_id,text,request_id,reply_to='',format='plain',
-                     preview_digest='',link_preview=False,allow_lossy=False):
+                     preview_digest='',link_preview=False,allow_lossy=False,wait_s=0):
         """Submit exactly confirmed content; rich sends must match a reviewed preview.
 
         Keep request_id until the result is known. The digest never proves human
@@ -404,6 +469,8 @@ class Client:
         """
         parameters=dict(account=account,chat_id=chat_id,text=text,
             request_id=request_id,reply_to=reply_to)
+        _wait_seconds(wait_s)
+        if wait_s!=0:parameters['wait_s']=wait_s
         # Default plain calls remain compatible with older strict servers.
         # Nondefault values pass unchanged so the server can reject bad types.
         if (format!='plain' or preview_digest!='' or link_preview is not False
@@ -444,14 +511,18 @@ class Client:
         return self.call('get_messenger_operation', {'operation_id': operation_id})
 
     def create_subscription(self, *, chat_ids, sender_ids=None, kinds=None,
-                            direction='incoming', origins=None, label='', expires_at=None):
+                            direction='incoming', origins=None, label='', expires_at=None,
+                            wake_rules=None, reply_to_send=None):
         """Persist explicit archived sources from the committed boundary; no push or provider action.
 
         Requires read and explicit subscription-write. A timeout can leave creation
         uncertain: inspect list_subscriptions before retrying. Names are not sender IDs.
         """
-        return self.call('create_subscription',dict(chat_ids=chat_ids,sender_ids=sender_ids,
-            kinds=kinds,direction=direction,origins=origins,label=label,expires_at=expires_at))
+        parameters=dict(chat_ids=chat_ids,sender_ids=sender_ids,kinds=kinds,direction=direction,
+            origins=origins,label=label,expires_at=expires_at)
+        if wake_rules is not None:parameters['wake_rules']=wake_rules
+        if reply_to_send is not None:parameters['reply_to_send']=reply_to_send
+        return self.call('create_subscription',parameters)
 
     def list_subscriptions(self, *, limit=50):
         """Read only this originating credential's definitions, up to 100."""
@@ -469,3 +540,32 @@ class Client:
     def get_subscription_events(self, *, subscription_id, after=0, limit=50):
         """Inspect durable matched references; never ACK, wake an agent or mark provider read."""
         return self.call('get_subscription_events',dict(subscription_id=subscription_id,after=after,limit=limit))
+
+    def fetch_subscription_events(self, *, subscription_id, limit=50):
+        """Read an unacknowledged page; an explicit ACK grant may issue a short-lived receipt."""
+        return self.call('fetch_subscription_events',dict(subscription_id=subscription_id,limit=limit))
+
+    def ack_subscription_events(self, *, subscription_id, receipt, version):
+        """ACK exactly the issued page and ack_version; never changes provider read state."""
+        return self.call('ack_subscription_events',dict(subscription_id=subscription_id,receipt=receipt,version=version))
+
+    def wait_for_subscription_events(self, *, subscription_id, timeout=25, limit=50):
+        """Wait up to 25 seconds without ACK or provider polling. Explicit client timeouts apply."""
+        return self.call('wait_for_subscription_events',dict(subscription_id=subscription_id,timeout=timeout,limit=limit))
+
+    def configure_subscription_delivery(self, *, subscription_id, version, receiver_id=None):
+        """Bind an operator-registered receiver, or disable with None. URLs are not accepted."""
+        return self.call('configure_subscription_delivery',dict(subscription_id=subscription_id,version=version,receiver_id=receiver_id))
+
+    def test_subscription(self, *, subscription_id, request_id):
+        """Queue an idempotent synthetic hint; receiver success never proves a host turn."""
+        return self.call('test_subscription',dict(subscription_id=subscription_id,request_id=request_id))
+
+    def submit_feedback(self, *, request_id, category, description, operation=None, refs=None):
+        """Record bounded private feedback locally. Never forwards or publishes it."""
+        return self.call('submit_feedback',dict(request_id=request_id,category=category,
+            description=description,operation=operation,refs=refs))
+
+    def list_feedback(self, *, limit=50):
+        """Read only this credential's private feedback, without former source references."""
+        return self.call('list_feedback',{'limit':limit})

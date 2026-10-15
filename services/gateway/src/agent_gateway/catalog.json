@@ -592,6 +592,11 @@
           "default": false,
           "title": "Include System",
           "type": "boolean"
+        },
+        "exclude_channels": {
+          "default": false,
+          "title": "Exclude Channels",
+          "type": "boolean"
         }
       },
       "type": "object",
@@ -1611,6 +1616,15 @@
           ],
           "default": null,
           "title": "Expected Ack Version"
+        },
+        "start_from": {
+          "default": "beginning",
+          "enum": [
+            "beginning",
+            "now"
+          ],
+          "title": "Start From",
+          "type": "string"
         }
       },
       "type": "object",
@@ -2038,6 +2052,13 @@
           "default": false,
           "title": "Allow Lossy",
           "type": "boolean"
+        },
+        "wait_s": {
+          "default": 0,
+          "maximum": 25,
+          "minimum": 0,
+          "title": "Wait S",
+          "type": "number"
         }
       },
       "required": [
@@ -2369,7 +2390,7 @@
       "openWorldHint": false,
       "readOnlyHint": false
     },
-    "description": "Persist selection of explicit authorized archive chats; no send or provider request.\n\nRequires read + explicit subscription-write. The subscription belongs to the\noriginating credential; another key for the same principal cannot adopt it.\nchat_ids are 1–64 archive IDs resolved through list_chats/resolve_reference.\nOptional sender_ids are exact account-scoped IDs from search_people, not names.\nStarts at the committed event boundary; default message.created/incoming/live.\nHistorical events require explicit backfill/reconcile origins. File readiness\nis independent of message arrival. Optional expiry is a future zoned ISO time\nwithin 366 days. Label is only a correlation hint, not authority to wake a task.\nNo push, delivery ACK, native reply predicate or provider read-state mutation.\nA timeout can leave creation uncertain: inspect list_subscriptions before retrying.\n",
+    "description": "Persist selection of explicit authorized archive chats; no send or provider request.\n\nRequires read + explicit subscription-write. The subscription belongs to the\noriginating credential; another key for the same principal cannot adopt it.\nchat_ids are 1–64 archive IDs resolved through list_chats/resolve_reference.\nOptional sender_ids are exact account-scoped IDs from search_people, not names.\nStarts at the committed event boundary; default message.created/incoming/live.\nHistorical events require explicit backfill/reconcile origins. File readiness\nis independent of message arrival. Optional expiry is a future zoned ISO time\nwithin 366 days. Label is only a correlation hint, not authority to wake a task.\nDelivery uses separate fetch/ACK and configured signed hints; no provider read-state mutation.\nA timeout can leave creation uncertain: inspect list_subscriptions before retrying.\n",
     "inputSchema": {
       "properties": {
         "chat_ids": {
@@ -2486,6 +2507,43 @@
           ],
           "default": null,
           "title": "Expires At"
+        },
+        "wake_rules": {
+          "anyOf": [
+            {
+              "items": {
+                "enum": [
+                  "incoming_message",
+                  "owner_mention",
+                  "reply_to_owner",
+                  "reply_to_confirmed_send"
+                ],
+                "type": "string"
+              },
+              "maxItems": 4,
+              "minItems": 1,
+              "type": "array"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Wake Rules"
+        },
+        "reply_to_send": {
+          "anyOf": [
+            {
+              "maxLength": 128,
+              "minLength": 1,
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Reply To Send"
         }
       },
       "required": [
@@ -3694,5 +3752,395 @@
     ],
     "required_manifest": true,
     "required_action": "send_file"
+  },
+  {
+    "name": "messages_fetch_subscription_events",
+    "module": "messaging",
+    "operation": "fetch_subscription_events",
+    "scopes": [
+      "read"
+    ],
+    "required_manifest": true,
+    "description": "Fetch an issued event page. Does not advance ACK or mark provider read. Requires explicit subscription-ack to issue a receipt.",
+    "inputSchema": {
+      "properties": {
+        "subscription_id": {
+          "maxLength": 256,
+          "minLength": 1,
+          "pattern": "^[^\\x00-\\x20\\x7f]+$",
+          "title": "Subscription Id",
+          "type": "string"
+        },
+        "limit": {
+          "default": 50,
+          "maximum": 100,
+          "minimum": 1,
+          "title": "Limit",
+          "type": "integer"
+        }
+      },
+      "required": [
+        "subscription_id"
+      ],
+      "type": "object",
+      "title": "fetch_subscription_eventsArguments",
+      "additionalProperties": false
+    },
+    "outputSchema": {
+      "type": "object",
+      "additionalProperties": true,
+      "title": "fetch_subscription_eventsDictOutput"
+    },
+    "annotations": {
+      "destructiveHint": false,
+      "openWorldHint": false,
+      "readOnlyHint": true
+    }
+  },
+  {
+    "name": "messages_ack_subscription_events",
+    "module": "messaging",
+    "operation": "ack_subscription_events",
+    "scopes": [
+      "read",
+      "subscription-ack"
+    ],
+    "required_manifest": true,
+    "description": "ACK an issued page using its receipt and ack_version. Exact retries are idempotent; never ACKs provider messages.",
+    "inputSchema": {
+      "properties": {
+        "subscription_id": {
+          "maxLength": 256,
+          "minLength": 1,
+          "pattern": "^[^\\x00-\\x20\\x7f]+$",
+          "title": "Subscription Id",
+          "type": "string"
+        },
+        "receipt": {
+          "maxLength": 128,
+          "minLength": 32,
+          "title": "Receipt",
+          "type": "string"
+        },
+        "version": {
+          "maximum": 9007199254740991,
+          "minimum": 1,
+          "title": "Version",
+          "type": "integer"
+        }
+      },
+      "required": [
+        "subscription_id",
+        "receipt",
+        "version"
+      ],
+      "type": "object",
+      "title": "ack_subscription_eventsArguments",
+      "additionalProperties": false
+    },
+    "outputSchema": {
+      "type": "object",
+      "additionalProperties": true,
+      "title": "ack_subscription_eventsDictOutput"
+    },
+    "annotations": {
+      "destructiveHint": false,
+      "idempotentHint": true,
+      "openWorldHint": false,
+      "readOnlyHint": false
+    }
+  },
+  {
+    "name": "messages_wait_for_subscription_events",
+    "module": "messaging",
+    "operation": "wait_for_subscription_events",
+    "scopes": [
+      "read"
+    ],
+    "required_manifest": true,
+    "description": "Wait at most25 seconds for an authorized event page. No ACK, provider polling or guarantee that a host runs a turn.",
+    "inputSchema": {
+      "properties": {
+        "subscription_id": {
+          "maxLength": 256,
+          "minLength": 1,
+          "pattern": "^[^\\x00-\\x20\\x7f]+$",
+          "title": "Subscription Id",
+          "type": "string"
+        },
+        "timeout": {
+          "default": 25,
+          "maximum": 25,
+          "minimum": 0,
+          "title": "Timeout",
+          "type": "number"
+        },
+        "limit": {
+          "default": 50,
+          "maximum": 100,
+          "minimum": 1,
+          "title": "Limit",
+          "type": "integer"
+        }
+      },
+      "required": [
+        "subscription_id"
+      ],
+      "type": "object",
+      "title": "wait_for_subscription_eventsArguments",
+      "additionalProperties": false
+    },
+    "outputSchema": {
+      "type": "object",
+      "additionalProperties": true,
+      "title": "wait_for_subscription_eventsDictOutput"
+    },
+    "annotations": {
+      "destructiveHint": false,
+      "openWorldHint": false,
+      "readOnlyHint": true
+    }
+  },
+  {
+    "name": "messages_configure_subscription_delivery",
+    "module": "messaging",
+    "operation": "configure_subscription_delivery",
+    "scopes": [
+      "read",
+      "subscription-write"
+    ],
+    "required_manifest": true,
+    "description": "Select an operator-registered receiver ID for signed hints; null disables. Never accepts URLs or grants access.",
+    "inputSchema": {
+      "properties": {
+        "subscription_id": {
+          "maxLength": 256,
+          "minLength": 1,
+          "pattern": "^[^\\x00-\\x20\\x7f]+$",
+          "title": "Subscription Id",
+          "type": "string"
+        },
+        "version": {
+          "maximum": 9007199254740991,
+          "minimum": 1,
+          "title": "Version",
+          "type": "integer"
+        },
+        "receiver_id": {
+          "anyOf": [
+            {
+              "pattern": "^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$",
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Receiver Id"
+        }
+      },
+      "required": [
+        "subscription_id",
+        "version"
+      ],
+      "type": "object",
+      "title": "configure_subscription_deliveryArguments",
+      "additionalProperties": false
+    },
+    "outputSchema": {
+      "type": "object",
+      "additionalProperties": true,
+      "title": "configure_subscription_deliveryDictOutput"
+    },
+    "annotations": {
+      "destructiveHint": false,
+      "idempotentHint": true,
+      "openWorldHint": false,
+      "readOnlyHint": false
+    }
+  },
+  {
+    "name": "messages_test_subscription",
+    "module": "messaging",
+    "operation": "test_subscription",
+    "scopes": [
+      "read",
+      "subscription-write"
+    ],
+    "required_manifest": true,
+    "description": "Queue a rate-bounded synthetic hint to an existing receiver. No fake archive event, message send or event ACK.",
+    "inputSchema": {
+      "properties": {
+        "subscription_id": {
+          "maxLength": 256,
+          "minLength": 1,
+          "pattern": "^[^\\x00-\\x20\\x7f]+$",
+          "title": "Subscription Id",
+          "type": "string"
+        },
+        "request_id": {
+          "maxLength": 128,
+          "minLength": 8,
+          "pattern": "^[A-Za-z0-9_.:-]+$",
+          "title": "Request Id",
+          "type": "string"
+        }
+      },
+      "required": [
+        "subscription_id",
+        "request_id"
+      ],
+      "type": "object",
+      "title": "test_subscriptionArguments",
+      "additionalProperties": false
+    },
+    "outputSchema": {
+      "type": "object",
+      "additionalProperties": true,
+      "title": "test_subscriptionDictOutput"
+    },
+    "annotations": {
+      "destructiveHint": false,
+      "idempotentHint": true,
+      "openWorldHint": false,
+      "readOnlyHint": false
+    }
+  },
+  {
+    "name": "messages_submit_feedback",
+    "module": "messaging",
+    "operation": "submit_feedback",
+    "scopes": [
+      "read",
+      "feedback-write"
+    ],
+    "required_manifest": true,
+    "description": "Record bounded private feedback for this credential. Reference only visible sources; no raw secrets, external messages or automatic issue publishing.",
+    "inputSchema": {
+      "properties": {
+        "request_id": {
+          "maxLength": 128,
+          "minLength": 8,
+          "pattern": "^[A-Za-z0-9_.:-]+$",
+          "title": "Request Id",
+          "type": "string"
+        },
+        "category": {
+          "enum": [
+            "bug",
+            "feature",
+            "quality",
+            "other"
+          ],
+          "title": "Category",
+          "type": "string"
+        },
+        "description": {
+          "maxLength": 4000,
+          "minLength": 1,
+          "pattern": "^[^\\x00-\\x08\\x0b-\\x1f\\x7f]+$",
+          "title": "Description",
+          "type": "string"
+        },
+        "operation": {
+          "anyOf": [
+            {
+              "maxLength": 128,
+              "minLength": 1,
+              "pattern": "^[a-z][a-z0-9_]*$",
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Operation"
+        },
+        "refs": {
+          "anyOf": [
+            {
+              "additionalProperties": {
+                "items": {
+                  "maxLength": 256,
+                  "minLength": 1,
+                  "pattern": "^[^\\x00-\\x1f\\x7f]+$",
+                  "type": "string"
+                },
+                "maxItems": 32,
+                "type": "array"
+              },
+              "propertyNames": {
+                "enum": [
+                  "message_ids",
+                  "chat_ids",
+                  "subscription_ids"
+                ]
+              },
+              "type": "object"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Refs"
+        }
+      },
+      "required": [
+        "request_id",
+        "category",
+        "description"
+      ],
+      "type": "object",
+      "title": "submit_feedbackArguments",
+      "additionalProperties": false
+    },
+    "outputSchema": {
+      "type": "object",
+      "additionalProperties": true,
+      "title": "submit_feedbackDictOutput"
+    },
+    "annotations": {
+      "destructiveHint": false,
+      "idempotentHint": true,
+      "openWorldHint": false,
+      "readOnlyHint": false
+    }
+  },
+  {
+    "name": "messages_list_feedback",
+    "module": "messaging",
+    "operation": "list_feedback",
+    "scopes": [
+      "read"
+    ],
+    "required_manifest": true,
+    "description": "List this exact credential's private feedback without exposing former source references.",
+    "inputSchema": {
+      "properties": {
+        "limit": {
+          "default": 50,
+          "maximum": 100,
+          "minimum": 1,
+          "title": "Limit",
+          "type": "integer"
+        }
+      },
+      "type": "object",
+      "title": "list_feedbackArguments",
+      "additionalProperties": false
+    },
+    "outputSchema": {
+      "type": "object",
+      "additionalProperties": true,
+      "title": "list_feedbackDictOutput"
+    },
+    "annotations": {
+      "destructiveHint": false,
+      "openWorldHint": false,
+      "readOnlyHint": true
+    }
   }
 ]

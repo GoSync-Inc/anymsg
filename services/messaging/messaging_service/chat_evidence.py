@@ -125,7 +125,7 @@ def chat_statuses(c,p,chat_ids,lower=None,upper=None):
             'conflicts':{k:v for k,v in conflict.items() if k!='chat'},
             'next_action':'check_provider_access' if h['last_error_code']=='provider_unavailable' else
                 'wait_for_provider_cooldown' if h['last_error_code']=='rate_limited' else
-                'inspect_message_conflicts' if conflict['active'] else
+                'get_context' if conflict['active'] else
                 'wait_for_history' if not h['history_traversal_complete'] else 'read_archived_history'}
     return result
 
@@ -169,7 +169,7 @@ def query_evidence(c,p,normalized,items,*,paged=False,include=True):
         else 'check_provider_access' if reason=='provider_unavailable'
         else 'wait_for_provider_cooldown' if reason=='provider_rate_limited'
         else 'resolve_chat_or_check_scope' if reason=='not_found_or_not_permitted'
-        else 'inspect_message_conflicts' if conflicts else 'read_context' if items else 'inspect_chat_coverage'}
+        else 'get_context' if conflicts else 'read_context' if items else 'inspect_chat_coverage'}
     if include:
         result.update(chats_considered=len(records),chats_not_scanned=sum(h['state']=='not_scanned' for h in histories),
             chats_loading=sum(h['state']=='loading' for h in histories),chats_with_gaps=sum(bool(h['gaps']) for h in histories))

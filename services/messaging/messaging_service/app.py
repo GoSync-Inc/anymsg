@@ -30,6 +30,17 @@ from .presentation import options, render
 from .telemetry import capture as capture_error
 from .uploads import UPLOAD_BODY_BYTES
 
+WaitSeconds = Annotated[float, Field(strict=True,ge=0,le=25,allow_inf_nan=False)]
+WakeRule = Literal['incoming_message','owner_mention','reply_to_owner','reply_to_confirmed_send']
+WakeRules = Annotated[list[WakeRule], Field(min_length=1,max_length=4)]
+SendReference = Annotated[StrictStr, Field(min_length=1,max_length=128)]
+SubscriptionReceipt = Annotated[StrictStr, Field(min_length=32,max_length=128)]
+ReceiverReference = Annotated[StrictStr, Field(pattern=r'^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$')]
+RequestReference = Annotated[StrictStr, Field(min_length=8,max_length=128,pattern=r'^[A-Za-z0-9_.:-]+$')]
+FeedbackReference = Annotated[StrictStr, Field(min_length=1,max_length=256,pattern=r'^[^\x00-\x1f\x7f]+$')]
+FeedbackReferences = dict[Literal['message_ids','chat_ids','subscription_ids'],Annotated[list[FeedbackReference],Field(max_length=32)]]
+FeedbackDescription = Annotated[StrictStr,Field(min_length=1,max_length=4000,pattern=r'^[^\x00-\x08\x0b-\x1f\x7f]+$')]
+FeedbackOperation = Annotated[StrictStr,Field(min_length=1,max_length=128,pattern=r'^[a-z][a-z0-9_]*$')]
 Detail = Literal['compact','full']
 ConversationView = Literal['archive','conversation']
 QueryMode = Literal['all','phrase','web','exact']
@@ -68,7 +79,17 @@ SubscriptionExpiry = Annotated[StrictStr, Field(min_length=20,max_length=64,
 def validate_arguments(models, method, arguments):
     if method not in models:return arguments
     try:
-        return models[method].model_validate(arguments,strict=True,extra='forbid').model_dump()
+        values=models[method].model_validate(arguments,strict=True,extra='forbid').model_dump()
+        invalid=[]
+        if method=='create_subscription' and 'reply_to_confirmed_send' in (values.get('wake_rules') or []) and not values.get('reply_to_send'):
+            invalid=['reply_to_send']
+        if method=='submit_feedback':
+            if not values['description'].strip():invalid.append('description')
+            if len(json.dumps(values.get('refs') or {}).encode())>8192:invalid.append('refs')
+        if invalid:
+            failure=APIError('invalid_parameters');failure.fields=invalid
+            raise failure
+        return values
     except ValidationError as error:
         failure=APIError('invalid_parameters')
         # Return only bounded field names, never input values or Pydantic reprs.
@@ -250,6 +271,9 @@ def create_app(store: Store, allowed_hosts: list[str]):
     def call(ctx, method, **kwargs):
         try:
             arguments,detail=options(method,kwargs)
+            if method=='create_subscription':
+                for name in ('wake_rules','reply_to_send'):
+                    if arguments.get(name) is None:arguments.pop(name,None)
             return render(method,getattr(store,method)(bearer(ctx.request_context.request.headers),**arguments),detail)
         except APIError as error:
             detail=payload(error,method)
@@ -260,6 +284,34 @@ def create_app(store: Store, allowed_hosts: list[str]):
             log.error('tool_failed tool=%s type=%s',method,type(error).__name__)
             detail=payload(error,method)
             log.error('tool_failed tool=%s request_id=%s code=%s',method,detail['request_id'],detail['error'])
+            raise ToolError(json.dumps(detail)) from None
+
+    async def invoke(method, token, arguments):
+        if method=='create_subscription':
+            for name in ('wake_rules','reply_to_send'):
+                if arguments.get(name) is None:arguments.pop(name,None)
+        if method == 'wait_for_subscription_events':
+            from .subscription_consumption import wait_for_subscription_events
+            return await wait_for_subscription_events(store, token, **arguments)
+        if method == 'send_message':
+            from .send_wait import validate_wait_s, wait_for_send
+            wait_s=validate_wait_s(arguments.pop('wait_s', 0))
+            result=await run_in_threadpool(store.send_message,token,**arguments)
+            if wait_s:
+                return await wait_for_send(store,token,result['send_id'],wait_s)
+            return result
+        return await run_in_threadpool(getattr(store,method),token,**arguments)
+
+    async def async_call(ctx, method, **kwargs):
+        try:
+            arguments,detail=options(method,kwargs)
+            result=await invoke(method,bearer(ctx.request_context.request.headers),arguments)
+            return render(method,result,detail)
+        except Exception as error:
+            if not isinstance(error,APIError):
+                capture_error(error,'tool_failed')
+            detail=payload(error,method)
+            log.warning('tool_error tool=%s request_id=%s code=%s',method,detail['request_id'],detail['error'])
             raise ToolError(json.dumps(detail)) from None
 
     read = ToolAnnotations(readOnlyHint=True, destructiveHint=False, openWorldHint=False)
@@ -288,10 +340,10 @@ def create_app(store: Store, allowed_hosts: list[str]):
 
     @mcp.tool(structured_output=True, annotations=ToolAnnotations(readOnlyHint=False,
         destructiveHint=True,idempotentHint=True,openWorldHint=True))
-    def send_message(ctx: Context,account: StrictStr,chat_id: StrictStr,text: StrictStr,
+    async def send_message(ctx: Context,account: StrictStr,chat_id: StrictStr,text: StrictStr,
                      request_id: StrictStr,reply_to: StrictStr='',format: MessageFormat='plain',
                      preview_digest: StrictStr='',link_preview: StrictBool=False,
-                     allow_lossy: StrictBool=False) -> dict[str,Any]:
+                     allow_lossy: StrictBool=False, wait_s: WaitSeconds=0) -> dict[str,Any]:
         """Send exact confirmed content using this account's existing collector.
 
         For rich formatting or nondefault policies, call preview_message first and
@@ -308,9 +360,9 @@ def create_app(store: Store, allowed_hosts: list[str]):
         payload at most 4000 UTF-16 units; source at most 16000 units subject to the
         16384-byte HTTP JSON envelope. No splitting or server human-approval gate.
         """
-        return call(ctx,'send_message',account=account,chat_id=chat_id,text=text,
+        return await async_call(ctx,'send_message',account=account,chat_id=chat_id,text=text,
             request_id=request_id,reply_to=reply_to,format=format,preview_digest=preview_digest,
-            link_preview=link_preview,allow_lossy=allow_lossy)
+            link_preview=link_preview,allow_lossy=allow_lossy,wait_s=wait_s)
 
     @mcp.tool(structured_output=True,annotations=read)
     def get_send_status(ctx: Context,send_id: StrictStr) -> dict[str,Any]:
@@ -484,7 +536,7 @@ def create_app(store: Store, allowed_hosts: list[str]):
                senders: list[StrictStr] | None=None, query_mode: QueryMode='all', order: Literal['asc','desc','relevance']='asc',
                before: str='', direction: Literal['','incoming','outgoing']='', search_language: SearchLanguage='auto', fuzzy: bool=False,
                compact: bool | None=None, body_chars: StrictInt | None=None, include_coverage: bool | None=None, detail: Detail='compact',
-                    view: ConversationView='conversation',include_system: StrictBool=False) -> dict[str, Any]:
+                    view: ConversationView='conversation',include_system: StrictBool=False,exclude_channels: StrictBool=False) -> dict[str, Any]:
         """Search archived text across chosen accounts/chats/sender IDs. Lists use OR within each
         dimension, AND between dimensions; [] matches nothing. Exact account-scoped sender IDs,
         not a merged person directory. query_mode: all words (all), phrase, or web (quotes/OR/-word).
@@ -498,7 +550,7 @@ def create_app(store: Store, allowed_hosts: list[str]):
                     from_time=from_time,to_time=to_time,after=after,limit=limit,
                     accounts=accounts,chats=chats,senders=senders,query_mode=query_mode,
                     order=order,before=before,direction=direction,search_language=search_language,fuzzy=fuzzy,
-                    compact=compact,body_chars=body_chars,include_coverage=include_coverage,view=view,include_system=include_system)
+                    compact=compact,body_chars=body_chars,include_coverage=include_coverage,view=view,include_system=include_system,exclude_channels=exclude_channels)
 
     @mcp.tool(structured_output=True, annotations=read)
     def search_files(ctx: Context, query: str='', account: str='', chat: str='', sender: str='',
@@ -635,7 +687,7 @@ def create_app(store: Store, allowed_hosts: list[str]):
                     kinds: list[EventKind] | None=None, direction: Literal['','incoming','outgoing']='', from_time: str='', to_time: str='',
                     compact: bool | None=None, body_chars: StrictInt | None=None, include_coverage: bool | None=None, detail: Detail='compact',
                     exclude_channels: bool=False, order: Literal['event','sent_at']='event',
-                    reset_filters: bool=False, expected_ack_version: StrictInt | None=None) -> dict[str, Any]:
+                    reset_filters: bool=False, expected_ack_version: StrictInt | None=None, start_from: Literal['beginning','now']='beginning') -> dict[str, Any]:
         """Read changes without advancing ACK. Consumer belongs to this principal.
         origins=['live'] excludes backfill. kinds=['message.status'] selects passive receipt
         updates, without marking provider chats read. order=sent_at sorts the delivered batch only;
@@ -647,7 +699,7 @@ def create_app(store: Store, allowed_hosts: list[str]):
                     origins=origins,kinds=kinds,direction=direction,from_time=from_time,to_time=to_time,
                     compact=compact,body_chars=body_chars,include_coverage=include_coverage,
                     exclude_channels=exclude_channels,order=order,reset_filters=reset_filters,
-                    expected_ack_version=expected_ack_version)
+                    expected_ack_version=expected_ack_version,start_from=start_from)
 
     @mcp.tool(structured_output=True, annotations=ToolAnnotations(readOnlyHint=False,
         destructiveHint=False, idempotentHint=True, openWorldHint=False))
@@ -664,7 +716,8 @@ def create_app(store: Store, allowed_hosts: list[str]):
                             origins: SubscriptionOrigins | None=None,
                             label: Annotated[StrictStr,Field(max_length=128,
                                 pattern=r'^[^\x00-\x1f\x7f]*$')]='',
-                            expires_at: SubscriptionExpiry | None=None) -> dict[str,Any]:
+                            expires_at: SubscriptionExpiry | None=None,
+        wake_rules: WakeRules | None=None, reply_to_send: SendReference | None=None) -> dict[str,Any]:
         """Persist selection of explicit authorized archive chats; no send or provider request.
 
         Requires read + explicit subscription-write. The subscription belongs to the
@@ -675,11 +728,11 @@ def create_app(store: Store, allowed_hosts: list[str]):
         Historical events require explicit backfill/reconcile origins. File readiness
         is independent of message arrival. Optional expiry is a future zoned ISO time
         within 366 days. Label is only a correlation hint, not authority to wake a task.
-        No push, delivery ACK, native reply predicate or provider read-state mutation.
+        Delivery uses separate fetch/ACK and configured signed hints; no provider read-state mutation.
         A timeout can leave creation uncertain: inspect list_subscriptions before retrying.
         """
         return call(ctx,'create_subscription',chat_ids=chat_ids,sender_ids=sender_ids,
-            kinds=kinds,direction=direction,origins=origins,label=label,expires_at=expires_at)
+            kinds=kinds,direction=direction,origins=origins,label=label,expires_at=expires_at,wake_rules=wake_rules,reply_to_send=reply_to_send)
 
     @mcp.tool(structured_output=True,annotations=read)
     def list_subscriptions(ctx: Context,limit: SubscriptionLimit=50) -> dict[str,Any]:
@@ -731,13 +784,49 @@ def create_app(store: Store, allowed_hosts: list[str]):
         """
         return call(ctx,'get_subscription_events',subscription_id=subscription_id,after=after,limit=limit)
 
+    @mcp.tool(structured_output=True,annotations=read)
+    def fetch_subscription_events(ctx: Context,subscription_id: SubscriptionReference,limit: SubscriptionLimit=50) -> dict[str,Any]:
+        """Fetch an issued event page. Does not advance ACK or mark provider read. Requires explicit subscription-ack to issue a receipt."""
+        return call(ctx,'fetch_subscription_events',subscription_id=subscription_id,limit=limit)
+
+    @mcp.tool(structured_output=True,annotations=upload_write)
+    def ack_subscription_events(ctx: Context,subscription_id: SubscriptionReference,receipt: SubscriptionReceipt,version: SubscriptionVersion) -> dict[str,Any]:
+        """ACK an issued page using its receipt and ack_version. Exact retries are idempotent; never ACKs provider messages."""
+        return call(ctx,'ack_subscription_events',subscription_id=subscription_id,receipt=receipt,version=version)
+
+    @mcp.tool(structured_output=True,annotations=read)
+    async def wait_for_subscription_events(ctx: Context,subscription_id: SubscriptionReference,timeout: WaitSeconds=25,limit: SubscriptionLimit=50) -> dict[str,Any]:
+        """Wait at most 25 seconds for an authorized event page. No ACK, provider polling or guarantee that a host runs a turn."""
+        return await async_call(ctx,'wait_for_subscription_events',subscription_id=subscription_id,timeout=timeout,limit=limit)
+
+    @mcp.tool(structured_output=True,annotations=upload_write)
+    def configure_subscription_delivery(ctx: Context,subscription_id: SubscriptionReference,version: SubscriptionVersion,receiver_id: ReceiverReference | None=None) -> dict[str,Any]:
+        """Select an operator-registered receiver ID for signed hints; null disables. Never accepts URLs or grants access."""
+        return call(ctx,'configure_subscription_delivery',subscription_id=subscription_id,version=version,receiver_id=receiver_id)
+
+    @mcp.tool(structured_output=True,annotations=upload_write)
+    def test_subscription(ctx: Context,subscription_id: SubscriptionReference,request_id: RequestReference) -> dict[str,Any]:
+        """Queue a rate-bounded synthetic hint to an existing receiver. No fake archive event, message send or event ACK."""
+        return call(ctx,'test_subscription',subscription_id=subscription_id,request_id=request_id)
+
+    @mcp.tool(structured_output=True,annotations=upload_write)
+    def submit_feedback(ctx: Context,request_id: RequestReference,category: Literal['bug','feature','quality','other'],description: FeedbackDescription,operation: FeedbackOperation | None=None,refs: FeedbackReferences | None=None) -> dict[str,Any]:
+        """Record bounded private feedback for this credential. Reference only visible sources; no raw secrets, external messages or automatic issue publishing."""
+        return call(ctx,'submit_feedback',request_id=request_id,category=category,description=description,operation=operation,refs=refs)
+
+    @mcp.tool(structured_output=True,annotations=read)
+    def list_feedback(ctx: Context,limit: SubscriptionLimit=50) -> dict[str,Any]:
+        """List this exact credential's private feedback without exposing former source references."""
+        return call(ctx,'list_feedback',limit=limit)
+
     async def rest(request):
         operations={'capabilities','list_chats','search','get_messages','get_context',
                     'get_attachment','request_file_download','get_updates','ack_updates','dismiss_reply','record_review','get_reviews',
                     'search_people','search_files','get_file_text','get_sync_status','get_file_occurrences','get_file_segments','resolve_reference','preview_message','send_message','get_send_status',
                     'list_messenger_operations','preview_messenger_operation','execute_messenger_operation','get_messenger_operation',
                     'prepare_file_upload','upload_file_chunk','get_file_upload',
-                    'create_subscription','list_subscriptions','get_subscription','update_subscription','get_subscription_events'}
+                    'create_subscription','list_subscriptions','get_subscription','update_subscription','get_subscription_events',
+                    'fetch_subscription_events','ack_subscription_events','wait_for_subscription_events','configure_subscription_delivery','test_subscription','submit_feedback','list_feedback'}
         method=request.path_params['operation']
         if method not in operations: raise APIError('not_found',404)
         try:
@@ -748,7 +837,7 @@ def create_app(store: Store, allowed_hosts: list[str]):
                 params.setdefault('view','archive')
             params=validate_arguments(models,method,params)
             arguments,detail=options(method,params)
-            result=render(method,await run_in_threadpool(getattr(store,method),bearer(request.headers),**arguments),detail)
+            result=render(method,await invoke(method,bearer(request.headers),arguments),detail)
         except (json.JSONDecodeError, TypeError): raise APIError('invalid_parameters') from None
         except Exception as error:
             error.operation=method
@@ -756,8 +845,9 @@ def create_app(store: Store, allowed_hosts: list[str]):
         return JSONResponse(result)
 
     async def download(request):
+        from .file_index import file_response_fields
         row,path=await run_in_threadpool(store.download,request.path_params['grant'])
-        return FileResponse(path,media_type='application/octet-stream',filename=row['filename'],
+        return FileResponse(path,media_type='application/octet-stream',filename=file_response_fields(row)['download_filename'],
                             content_disposition_type='attachment',headers={'X-Content-SHA256':row['digest']})
 
     models={name:tool.fn_metadata.arg_model for name,tool in mcp._tool_manager._tools.items()}
