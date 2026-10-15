@@ -194,6 +194,7 @@ func (p *Provider) prepareCapture() error {
 	if err != nil {
 		return err
 	}
+	sweepNativeTemp(p.Config)
 	return p.replayPending()
 }
 

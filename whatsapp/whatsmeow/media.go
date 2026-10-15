@@ -199,7 +199,11 @@ func downloadMedia(ctx context.Context, req mediaRequest, cfg Config, policy fun
 	if uint64(meta.Bytes)+65536 > available || uint64(reserve) > available-uint64(meta.Bytes)-65536 {
 		return errors.New("media_size_limit")
 	}
-	tmp, err := os.CreateTemp(root, ".native-media-")
+	tmpRoot, err := nativeTempRoot(root)
+	if err != nil {
+		return err
+	}
+	tmp, err := os.CreateTemp(tmpRoot, ".native-media-")
 	if err != nil {
 		return errors.New("media_network_error")
 	}
@@ -275,6 +279,58 @@ func ensureSafeMediaRoot(root string) error {
 		return errors.New("invalid_media_path")
 	}
 	return nil
+}
+
+// Native temporaries never sit beside spool queue files: the Python spool
+// counts every regular file in its top directory against its byte quota, and a
+// crash left them there. It only globs *.json and sums top-level regular files,
+// so this private subdirectory is outside both its quota and its drain.
+const nativeTempDirectory = ".native-tmp"
+
+var nativeTempPrefixes = []string{".native-media-", ".history-download-"}
+
+func nativeTempRoot(parent string) (string, error) {
+	dir := filepath.Join(parent, nativeTempDirectory)
+	if err := os.Mkdir(dir, 0700); err != nil && !errors.Is(err, os.ErrExist) {
+		return "", errors.New("invalid_media_path")
+	}
+	info, err := os.Lstat(dir)
+	if err != nil || !info.IsDir() || info.Mode()&os.ModeSymlink != 0 || info.Mode().Perm()&0077 != 0 {
+		return "", errors.New("invalid_media_path")
+	}
+	return dir, nil
+}
+
+// sweepNativeTemp removes temporaries left by a crashed or killed provider,
+// including ones from releases that wrote them into the parent directory. The
+// caller holds the session lock, so no other provider of this account writes
+// there. Only our own regular files are removed and no symlink is followed.
+func sweepNativeTemp(cfg Config) {
+	media := cfg.PagesDirectory
+	if media == "" {
+		media = cfg.EventsDirectory
+	}
+	for _, parent := range []string{media, cfg.SessionDirectory} {
+		if parent == "" {
+			continue
+		}
+		for _, dir := range []string{filepath.Join(parent, nativeTempDirectory), parent} {
+			if info, err := os.Lstat(dir); err != nil || !info.IsDir() {
+				continue
+			}
+			entries, err := os.ReadDir(dir)
+			if err != nil {
+				continue
+			}
+			for _, entry := range entries {
+				for _, prefix := range nativeTempPrefixes {
+					if entry.Type().IsRegular() && strings.HasPrefix(entry.Name(), prefix) {
+						_ = os.Remove(filepath.Join(dir, entry.Name()))
+					}
+				}
+			}
+		}
+	}
 }
 
 func safeMediaError(err error) error {

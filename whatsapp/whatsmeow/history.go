@@ -185,7 +185,11 @@ func (p *Provider) downloadHistory(ctx context.Context, notif *waE2E.HistorySync
 		if err := p.Capture.checkDisk(int64(notif.GetFileLength()) + 32); err != nil {
 			return nil, err
 		}
-		file, err := os.CreateTemp(p.Config.SessionDirectory, ".history-download-*")
+		dir, err := nativeTempRoot(p.Config.SessionDirectory)
+		if err != nil {
+			return nil, err
+		}
+		file, err := os.CreateTemp(dir, ".history-download-*")
 		if err != nil {
 			return nil, err
 		}

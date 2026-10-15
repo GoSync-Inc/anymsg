@@ -7,6 +7,7 @@ import (
 	"io"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 
 	"go.mau.fi/whatsmeow"
@@ -41,6 +42,22 @@ func mediaFixture(t *testing.T, data []byte) (mediaRequest, Config, *events.Mess
 }
 
 func mediaPolicy() (Policy, error) { return allowedOperationPolicy(), nil }
+
+// The spool parent holds no regular temp file and the private area is empty.
+func requireNoNativeTemp(t *testing.T, root string) {
+	t.Helper()
+	for _, dir := range []string{root, filepath.Join(root, nativeTempDirectory)} {
+		files, err := os.ReadDir(dir)
+		if err != nil && !os.IsNotExist(err) {
+			t.Fatal(err)
+		}
+		for _, f := range files {
+			if f.Type().IsRegular() {
+				t.Fatal("temporary media leaked", dir, f.Name())
+			}
+		}
+	}
+}
 func mediaGet(m *events.Message) func(string, string) (*events.Message, error) {
 	return func(string, string) (*events.Message, error) { return m, nil }
 }
@@ -66,10 +83,9 @@ func TestNativeMediaVerifiedStreamingAndCleanup(t *testing.T) {
 	if !bytes.Equal(output.Bytes(), data) || largest > 65536 {
 		t.Fatalf("wrong data/chunks %d", largest)
 	}
-	files, _ := os.ReadDir(cfg.PagesDirectory)
-	if len(files) != 0 {
-		t.Fatal("temporary media leaked")
-	}
+	// Changed assertion: temporaries now live in the private .native-tmp area,
+	// which persists empty; the spool directory itself must hold no temp file.
+	requireNoNativeTemp(t, cfg.PagesDirectory)
 	if req.Descriptor.Mime != "application/pdf" {
 		t.Fatal("MIME was not canonicalized")
 	}
@@ -97,10 +113,9 @@ func TestNativeMediaNeverEmitsBeforeHashAndSizeVerification(t *testing.T) {
 			if emitted != 0 {
 				t.Fatal("unverified media emitted")
 			}
-			files, _ := os.ReadDir(cfg.PagesDirectory)
-			if len(files) != 0 {
-				t.Fatal("failed download retained temp file")
-			}
+			// Changed assertion: temporaries now live in the private .native-tmp area,
+			// which persists empty; the spool directory itself must hold no temp file.
+			requireNoNativeTemp(t, cfg.PagesDirectory)
 		})
 	}
 }
@@ -200,4 +215,98 @@ func TestNativeMediaRootSymlinkAndPublicDirectoryRejected(t *testing.T) {
 		t.Fatal(e)
 	}
 	requireError(t, ensureSafeMediaRoot(link), "invalid_media_path")
+}
+
+func TestNativeMediaTemporaryStaysOutsideSpoolQuota(t *testing.T) {
+	data := []byte("synthetic media bytes")
+	req, cfg, m := mediaFixture(t, data)
+	err := downloadMedia(context.Background(), req, cfg, mediaPolicy, mediaGet(m), func(_ context.Context, _ whatsmeow.DownloadableMessage, file whatsmeow.File) error {
+		// While the original is in flight the spool directory itself holds no
+		// regular file, so the Python spool's byte quota is unaffected.
+		entries, _ := os.ReadDir(cfg.PagesDirectory)
+		for _, entry := range entries {
+			if entry.Type().IsRegular() {
+				t.Fatal("temporary original counted by the spool quota", entry.Name())
+			}
+		}
+		inside, _ := os.ReadDir(filepath.Join(cfg.PagesDirectory, nativeTempDirectory))
+		if len(inside) != 1 || !strings.HasPrefix(inside[0].Name(), ".native-media-") {
+			t.Fatal("temporary original not in the private area", inside)
+		}
+		_, e := file.Write(data)
+		return e
+	}, func([]byte) error { return nil })
+	if err != nil {
+		t.Fatal(err)
+	}
+	info, err := os.Lstat(filepath.Join(cfg.PagesDirectory, nativeTempDirectory))
+	if err != nil || info.Mode().Perm() != 0700 {
+		t.Fatal("private temporary area not 0700", err)
+	}
+	requireNoNativeTemp(t, cfg.PagesDirectory)
+}
+
+func TestNativeMediaRejectsUnsafeTemporaryArea(t *testing.T) {
+	for _, mode := range []string{"symlink", "public"} {
+		t.Run(mode, func(t *testing.T) {
+			req, cfg, m := mediaFixture(t, []byte("safe"))
+			area := filepath.Join(cfg.PagesDirectory, nativeTempDirectory)
+			target := t.TempDir()
+			if mode == "symlink" {
+				if err := os.Symlink(target, area); err != nil {
+					t.Fatal(err)
+				}
+			} else if err := os.Mkdir(area, 0700); err != nil || os.Chmod(area, 0755) != nil {
+				t.Fatal(err)
+			}
+			called := false
+			err := downloadMedia(context.Background(), req, cfg, mediaPolicy, mediaGet(m), func(context.Context, whatsmeow.DownloadableMessage, whatsmeow.File) error { called = true; return nil }, func([]byte) error { return nil })
+			requireError(t, err, "invalid_media_path")
+			if entries, _ := os.ReadDir(target); called || len(entries) != 0 {
+				t.Fatal("download used an unsafe temporary area")
+			}
+		})
+	}
+}
+
+func TestStartupSweepsOnlyStaleNativeTemporaries(t *testing.T) {
+	c := testConfig(t)
+	write := func(path string) {
+		t.Helper()
+		if err := os.WriteFile(path, []byte("stale"), 0600); err != nil {
+			t.Fatal(err)
+		}
+	}
+	pagesArea, err := nativeTempRoot(c.PagesDirectory)
+	if err != nil {
+		t.Fatal(err)
+	}
+	stale := []string{filepath.Join(pagesArea, ".native-media-123"),
+		// Left in the parent directories by releases before the private area.
+		filepath.Join(c.PagesDirectory, ".native-media-legacy"), filepath.Join(c.SessionDirectory, ".history-download-legacy")}
+	kept := []string{filepath.Join(c.PagesDirectory, "00000000000000000001-abc.json"), filepath.Join(c.PagesDirectory, ".pending-python"), filepath.Join(c.SessionDirectory, "auth.sqlite"), filepath.Join(pagesArea, "unrelated")}
+	// A symlinked area is never followed, even with a matching name inside.
+	outside := t.TempDir()
+	foreign := filepath.Join(outside, ".history-download-outside")
+	if err = os.Symlink(outside, filepath.Join(c.SessionDirectory, nativeTempDirectory)); err != nil {
+		t.Fatal(err)
+	}
+	for _, path := range append(append(append([]string{}, stale...), kept...), foreign) {
+		write(path)
+	}
+	p := &Provider{Config: c}
+	if err = p.prepareCapture(); err != nil {
+		t.Fatal(err)
+	}
+	defer p.Capture.Close()
+	for _, path := range stale {
+		if _, err = os.Lstat(path); !os.IsNotExist(err) {
+			t.Fatal("stale temporary survived startup", path, err)
+		}
+	}
+	for _, path := range append(kept, foreign) {
+		if _, err = os.Lstat(path); err != nil {
+			t.Fatal("startup sweep removed a file it does not own", path, err)
+		}
+	}
 }
