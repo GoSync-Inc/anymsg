@@ -100,7 +100,7 @@ def history(row,lower=None,upper=None):
 
 
 def chat_statuses(c,p,chat_ids,lower=None,upper=None):
-    from .sync_status import _files
+    from .sync_status import _files,empty_files
     records=rows(c,p,chat_ids);result={}
     ids=[r['chat_id'] for r in records]
     if not ids:return result
@@ -117,8 +117,7 @@ def chat_statuses(c,p,chat_ids,lower=None,upper=None):
         chat=row['chat_id'];h=history(row,lower,upper)
         count=counts.get(chat,{'messages':0,'oldest_message_at':None,'newest_message_at':None})
         conflict=conflicts.get(chat,{'active':0,'historical':0})
-        file_data=files.get(chat,{'stored_files':0,'stored_bytes':0,
-            'extraction':{},'enrichment':{},'extraction_truncated':0,'enrichment_truncated':0})
+        file_data=files.get(chat) or {**empty_files(),'extraction':{},'enrichment':{}}
         file_data['download']=downloads.get(chat,{})
         result[chat]={'chat_id':chat,'account':row['account'],'provider_chat_id':row['provider_chat'],
             'history':h,'messages':{k:v for k,v in count.items() if k!='chat'},'files':file_data,

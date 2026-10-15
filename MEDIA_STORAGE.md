@@ -111,3 +111,13 @@ The seven-day prefetch window is **not** an eviction TTL. Already stored origina
 are retained. A future cold-storage lifecycle must verify a durable copy before
 eviction, retain independently readable text/analysis, and test rehydration.
 Provider history/CDN availability alone is not a durable backup.
+
+Sync status (`get_sync_status`, chat `resolve_reference.sync`, file search evidence)
+counts each current file occurrence of a non-deleted message in exactly one
+`download` state, using the same rule as each attachment's `download_status`:
+a registered original is `ready` even if an edit re-queued its job, a legacy
+original without a job is `ready`, and a `ready` job without a registered original
+is `unavailable`. `download.ready` therefore equals `stored_files`.
+`current_files` sums every state except `superseded` (replaced older revisions);
+`download_basis: current_file_occurrences` names this rule. Queued originals
+outside the prefetch window are known occurrences that are not stored yet.
