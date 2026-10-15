@@ -4,6 +4,7 @@ from __future__ import annotations
 from datetime import datetime, timezone
 import hashlib
 import json
+import math
 import re
 from uuid import UUID, uuid5
 
@@ -63,19 +64,29 @@ def validate(data):
         result['sender_profile']['username']=result['sender_profile']['username'].lstrip('@')
     if 'metadata' in data:
         metadata=data['metadata']
-        if not isinstance(metadata,dict) or set(metadata)-{'reply_to_provider_id','forwarded','media_kind','mentions_owner','reply_to_owner','sender_is_bot','chat_type','sender_identity_basis','is_service','is_self_chat','sender_is_contact'}:
+        if not isinstance(metadata,dict) or set(metadata)-{'reply_to_provider_id','forwarded','media_kind','mentions_owner','reply_to_owner','sender_is_bot','chat_type','sender_identity_basis','is_service','is_self_chat','sender_is_contact',
+                'message_kind','provider_message_type','timestamp_resolution','media_duration_seconds'}:
             raise ValueError('invalid_metadata')
         result['metadata']={}
         for key,value in metadata.items():
             if key in ('forwarded','mentions_owner','reply_to_owner','sender_is_bot','is_service','is_self_chat','sender_is_contact'):
                 if value is not None and type(value) is not bool:raise ValueError('invalid_metadata')
+            elif key=='media_duration_seconds':
+                if value is not None and (type(value) not in (int,float) or not 0<=value<=86400 or not math.isfinite(value)):
+                    raise ValueError('invalid_metadata')
             elif value is not None:
-                text(value,256 if key=='reply_to_provider_id' else 32,key)
+                text(value,256 if key=='reply_to_provider_id' else 64 if key=='provider_message_type' else 32,key)
                 if key=='media_kind' and value not in ('photo','video','audio','voice','document','sticker','animation','other'):
                     raise ValueError('invalid_metadata')
                 if key=='chat_type' and value not in ('private','group','channel','unknown'):
                     raise ValueError('invalid_metadata')
                 if key=='sender_identity_basis' and value!='authenticated_self':
+                    raise ValueError('invalid_metadata')
+                if key=='message_kind' and value not in ('text','photo','video','voice','audio','document','sticker','location','contact','poll','system','unknown'):
+                    raise ValueError('invalid_metadata')
+                if key=='timestamp_resolution' and value not in ('second','unknown'):
+                    raise ValueError('invalid_metadata')
+                if key=='provider_message_type' and not re.fullmatch(r'[a-z][a-z0-9_]{0,63}',value):
                     raise ValueError('invalid_metadata')
             result['metadata'][key]=value
     seen=set()

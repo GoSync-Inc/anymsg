@@ -354,14 +354,14 @@ class Store:
     def list_chats(self, token, after='', limit=100, *, accounts=None,query='',chat_types=None,
                    order='id',exclude_channels=False,awaiting_reply=False,from_time='',to_time='',
                    include_coverage=True,awaiting_reply_days=14,exclude_chats=None,exclude_senders=None,
-                   only_questions=False,only_unread=False):
+                   only_questions=False,only_unread=False,view='archive'):
         from .chat_queries import list_chats
         with self.authorized(token,'list_chats') as (c,p):
             return list_chats(self,c,p,after,limit,accounts=accounts,query=query,chat_types=chat_types,
                 order=order,exclude_channels=exclude_channels,awaiting_reply=awaiting_reply,
                 from_time=from_time,to_time=to_time,include_coverage=include_coverage,
                 awaiting_reply_days=awaiting_reply_days,exclude_chats=exclude_chats,exclude_senders=exclude_senders,
-                only_questions=only_questions,only_unread=only_unread)
+                only_questions=only_questions,only_unread=only_unread,view=view)
 
     def dismiss_reply(self,token,chat_id,message_id,expected_revision):
         from .reply_state import dismiss
@@ -454,29 +454,32 @@ class Store:
     def search(self, token, query='', account='', chat='', sender='', from_time='',
                to_time='', after='', limit=20, *, accounts=None, chats=None, senders=None,
                query_mode='all', order='asc', before='', direction='', search_language='auto',
-               fuzzy=False, compact=False, body_chars=None, include_coverage=True):
+               fuzzy=False, compact=False, body_chars=None, include_coverage=True,view='archive',include_system=False):
         with self.authorized(token,'search') as (c,p):
             return self._search(c,p,query,account,chat,sender,from_time,to_time,after,limit,
                 accounts=accounts,chats=chats,senders=senders,query_mode=query_mode,
                 order=order,before=before,direction=direction,search_language=search_language,
-                fuzzy=fuzzy,compact=compact,body_chars=body_chars,include_coverage=include_coverage)
+                fuzzy=fuzzy,compact=compact,body_chars=body_chars,include_coverage=include_coverage,view=view,include_system=include_system)
 
     def _search(self,c,p,*args,**kwargs):
         from .message_queries import search
         return search(self,c,p,*args,**kwargs)
 
     def get_messages(self, token, chat_id, after='', limit=20, *, before='', order='asc',
-                     from_time='',to_time='',compact=False,body_chars=None,include_coverage=True):
+                     from_time='',to_time='',compact=False,body_chars=None,include_coverage=True,view='archive',include_system=False):
         with self.authorized(token,'get_messages') as (c,p):
             if not isinstance(chat_id,str) or not 1<=len(chat_id)<=256:raise APIError('not_found',404)
             return self._search(c,p,chat=chat_id,after=after,limit=limit,before=before,
                 order=order,from_time=from_time,to_time=to_time,compact=compact,
-                body_chars=body_chars,include_coverage=include_coverage)
+                body_chars=body_chars,include_coverage=include_coverage,view=view,include_system=include_system)
 
     def get_context(self, token, message_id, limit=10, *, before_count=None,after_count=None,
-                    compact=False,body_chars=None,include_coverage=True):
+                    compact=False,body_chars=None,include_coverage=True,view='archive',include_system=False):
         from .message_queries import enrich
         from .search_query import coverage,output_options,shape_messages
+        from .conversation import options,order_terms,visible_sql,sort_key,decorate_messages,presentation
+        options(view,include_system)
+        conversation=view=='conversation'
         with self.authorized(token,'get_context') as (c,p):
             bounded(limit,50)
             cap=output_options(compact,body_chars,include_coverage)
@@ -487,25 +490,55 @@ class Store:
                 if any(type(v) is not int or not 0<=v<=50 for v in (before_count,after_count)):
                     raise APIError('invalid_limit')
             anchor=self.message(c,p,message_id)
+            snapshot=None
+            if conversation:
+                from .message_queries import history_snapshot
+                snapshot=history_snapshot(c,p,anchor['chat'],include_system=include_system)
+                # Authorization remains READ COMMITTED. Re-read source evidence
+                # after pinning the view, then reject changes around all scans.
+                anchor=self.message(c,p,message_id)
+                enrich(c,[anchor])
+            provider=str(anchor['provider_id'])
+            numeric=int(provider) if anchor.get('platform')=='telegram' and provider.isascii() and provider.isdigit() and len(provider)<=18 else 0
             scans=[]
             for op,sort,count in [('<','DESC',before_count if explicit else limit),
                                   ('>','ASC',after_count if explicit else limit)]:
-                selected=c.execute('SELECT id,account,chat,sender,body,sent_at,revision,direction FROM messages '
-                    'WHERE account=%s AND chat=%s AND NOT deleted AND (sent_at,id)'+op+'(%s,%s) '
-                    'ORDER BY sent_at '+sort+',id '+sort+' LIMIT %s',
-                    (anchor['account'],anchor['chat'],anchor['sent_at'],anchor['id'],count+1)).fetchall()
+                if conversation:
+                    terms=order_terms('m')
+                    selected=c.execute('SELECT m.id,m.account,m.chat,m.sender,m.body,m.sent_at,m.revision,m.direction '
+                        'FROM messages m LEFT JOIN message_metadata cmd ON cmd.message=m.id AND cmd.revision=m.revision '
+                        'WHERE m.account=%s AND m.chat=%s AND NOT m.deleted AND '+
+                        (visible_sql('m','cmd')+' AND ' if not include_system else '')+
+                        '('+','.join(terms)+')'+op+'(%s,%s,%s) ORDER BY '+
+                        ','.join(t+' '+sort for t in terms)+' LIMIT %s',
+                        (anchor['account'],anchor['chat'],anchor['sent_at'],numeric,anchor['id'],count+1)).fetchall()
+                else:
+                    selected=c.execute('SELECT id,account,chat,sender,body,sent_at,revision,direction FROM messages '
+                        'WHERE account=%s AND chat=%s AND NOT deleted AND (sent_at,id)'+op+'(%s,%s) '
+                        'ORDER BY sent_at '+sort+',id '+sort+' LIMIT %s',
+                        (anchor['account'],anchor['chat'],anchor['sent_at'],anchor['id'],count+1)).fetchall()
                 scans.append((selected[:count],len(selected)>count))
             older,newer=scans[0][0],scans[1][0]
-            center=[] if anchor['deleted'] else [{key:anchor[key] for key in
+            center=[] if anchor['deleted'] or (conversation and not include_system and (anchor.get('is_service') or anchor.get('message_kind')=='system')) else [{key:anchor[key] for key in
                 ('id','account','chat','sender','body','sent_at','revision','direction')}]
             rows=older+center+newer
             if not explicit:
                 rows=sorted(rows,key=lambda r:(r['id']!=anchor['id'],
                     abs((r['sent_at']-anchor['sent_at']).total_seconds())))[:limit]
-            rows.sort(key=lambda r:(r['sent_at'],r['id']))
-            enrich(c,rows);enrich(c,[anchor])
-            shape_messages(rows,compact=compact,body_chars=cap)
-            shape_messages([anchor],compact=compact,body_chars=cap)
+            if conversation:
+                enrich(c,rows);rows.sort(key=sort_key)
+                shape_messages(rows,compact=False,body_chars=cap)
+                shape_messages([anchor],compact=False,body_chars=cap)
+                decorate_messages(c,p,rows,include_system=include_system);decorate_messages(c,p,[anchor],include_system=include_system)
+                if cap is not None:
+                    for row in [*rows,anchor]:
+                        if len(row['display_text'])>cap:
+                            row['display_text']=row['display_text'][:cap];row['display_text_truncated']=True
+            else:
+                rows.sort(key=lambda r:(r['sent_at'],r['id']))
+                enrich(c,rows);enrich(c,[anchor])
+                shape_messages(rows,compact=compact,body_chars=cap)
+                shape_messages([anchor],compact=compact,body_chars=cap)
             files=[f for f in anchor['attachments'] if f['download_status']=='ready']
             jobs=[f for f in anchor['attachments'] if f['download_status']!='ready']
             from .reviews import list_reviews
@@ -518,10 +551,26 @@ class Store:
                     'requested_before':before_count,'requested_after':after_count,
                     'neighbors_coverage':'archived_messages_only'})
             from .chat_evidence import chat_statuses
-            return serial({'message':anchor,'context':rows,'context_window':window,
+            extra={}
+            if conversation:
+                from .conversation_state import conversation_state
+                extra={'conversation_view':presentation(rows,order='asc',include_system=include_system),
+                    'conversation':conversation_state(c,p,anchor['account'],anchor['chat'])}
+                from .message_queries import history_cursor
+                # A hidden/tombstoned anchor still defines usable boundaries
+                # when the requested visible window is empty.
+                window.update(older_cursor=history_cursor(c,p,rows[0] if rows else anchor,order='desc',include_system=include_system,snapshot=snapshot),
+                    newer_cursor=history_cursor(c,p,rows[-1] if rows else anchor,order='asc',include_system=include_system,snapshot=snapshot),
+                    older_order='desc',newer_order='asc')
+                window.update(view='conversation',include_system=include_system,
+                    anchor_hidden=bool(anchor['deleted'] or (not include_system and anchor['is_service'])))
+            result=serial({'message':anchor,'context':rows,'context_window':window,
                 'attachments':files,'pending_attachments':jobs,'reviews':reviews,
-                'chat_sync':chat_statuses(c,p,[anchor['chat']])[anchor['chat']] if include_coverage else None,
+                **extra,'chat_sync':chat_statuses(c,p,[anchor['chat']])[anchor['chat']] if include_coverage else None,
                 **coverage(self,c,p,include_coverage)})
+            if conversation and history_snapshot(c,p,anchor['chat'],include_system=include_system)!=snapshot:
+                raise APIError('cursor_changed',409)
+            return result
 
     def get_reviews(self, token, message_id, after='', limit=20):
         from .reviews import list_reviews

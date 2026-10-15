@@ -52,9 +52,9 @@ def test_default_compact_wire_and_full_opt_in(seeded):
             c.execute("INSERT INTO chats(id,account,title,chat_type) VALUES(%s,'telegram-demo',repeat('длинное название ',20),'private')",(f'compact-chat-{n}',))
             c.execute("INSERT INTO messages(id,account,chat,provider_id,sender,body,sent_at) VALUES(%s,'telegram-demo',%s,%s,'person',repeat('длинный текст ',2000),now())",(f'compact-message-{n}',f'compact-chat-{n}',str(n)))
     with TestClient(create_app(s,['testserver'])) as client:
-        compact=rpc(client,key,'search',{'limit':5})
-        full=rpc(client,key,'search',{'limit':5,'detail':'full'})
-        chats=rpc(client,key,'list_chats',{'limit':5})
+        compact=rpc(client,key,'search',{'limit':5,'view':'archive'})
+        full=rpc(client,key,'search',{'limit':5,'detail':'full','view':'archive'})
+        chats=rpc(client,key,'list_chats',{'limit':5,'view':'archive'})
     result=compact.json()['result']['structuredContent']
     assert len(compact.content)<8192
     assert len(chats.content)<4096

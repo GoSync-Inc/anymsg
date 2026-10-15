@@ -29,6 +29,7 @@ from .presentation import options, render
 from .telemetry import capture as capture_error
 
 Detail = Literal['compact','full']
+ConversationView = Literal['archive','conversation']
 QueryMode = Literal['all','phrase','web','exact']
 SearchLanguage = Literal['auto','simple','russian','english','indonesian']
 EventKind = Literal['message.created','message.edited','message.deleted','message.status','attachment.ready']
@@ -213,6 +214,9 @@ def create_app(store: Store, allowed_hosts: list[str]):
     redact_library_logs()
     mcp=MCPServer('AnyMsg',version=__version__,instructions=
         'Read capabilities for account scope, source coverage and synthetic-data status. '
+        'Message tools default to conversation view: preserve returned order, use display_text and kind, '
+        'and inspect order_status and conversation state. Position is local to this page, never a permanent sequence. '
+        'An ambiguous timestamp tie does not establish who replied last; suggested_action is a heuristic, not an obligation. '
         'Use preview_message for formatted drafts. Its digest binds content, not human approval. '
         'Before send_message, show the sending account, exact recipient, visible text, formatting, '
         'warnings, link destinations and any reply target '
@@ -381,7 +385,8 @@ def create_app(store: Store, allowed_hosts: list[str]):
                    exclude_channels: bool=False, awaiting_reply: bool=False,
                    from_time: str='', to_time: str='', include_coverage: bool | None=None, detail: Detail='compact',
                    awaiting_reply_days: StrictInt=14,exclude_chats: list[StrictStr] | None=None,
-                   exclude_senders: list[StrictStr] | None=None,only_questions: bool=False,only_unread: bool=False) -> dict[str, Any]:
+                   exclude_senders: list[StrictStr] | None=None,only_questions: bool=False,only_unread: bool=False,
+                   view: ConversationView='conversation') -> dict[str, Any]:
         """List permitted chats. order: activity (default) or last_activity_desc = recent first;
         id = stable catalogue traversal. awaiting_reply: private incoming, excluding known bots,
         or explicit group owner mention/reply; heuristic, not obligation. Attention expires after
@@ -396,7 +401,7 @@ def create_app(store: Store, allowed_hosts: list[str]):
                     order=order,exclude_channels=exclude_channels,awaiting_reply=awaiting_reply,
                     from_time=from_time,to_time=to_time,include_coverage=include_coverage,
                     awaiting_reply_days=awaiting_reply_days,exclude_chats=exclude_chats,exclude_senders=exclude_senders,
-                    only_questions=only_questions,only_unread=only_unread)
+                    only_questions=only_questions,only_unread=only_unread,view=view)
 
     @mcp.tool(structured_output=True, annotations=ToolAnnotations(readOnlyHint=False,
         destructiveHint=False, idempotentHint=True, openWorldHint=False))
@@ -429,19 +434,22 @@ def create_app(store: Store, allowed_hosts: list[str]):
                accounts: list[StrictStr] | None=None, chats: list[StrictStr] | None=None,
                senders: list[StrictStr] | None=None, query_mode: QueryMode='all', order: Literal['asc','desc','relevance']='asc',
                before: str='', direction: Literal['','incoming','outgoing']='', search_language: SearchLanguage='auto', fuzzy: bool=False,
-               compact: bool | None=None, body_chars: StrictInt | None=None, include_coverage: bool | None=None, detail: Detail='compact') -> dict[str, Any]:
+               compact: bool | None=None, body_chars: StrictInt | None=None, include_coverage: bool | None=None, detail: Detail='compact',
+                    view: ConversationView='conversation',include_system: StrictBool=False) -> dict[str, Any]:
         """Search archived text across chosen accounts/chats/sender IDs. Lists use OR within each
         dimension, AND between dimensions; [] matches nothing. Exact account-scoped sender IDs,
         not a merged person directory. query_mode: all words (all), phrase, or web (quotes/OR/-word).
         UTC range [from_time,to_time). order asc/desc; use next_cursor as after with unchanged
         filters/order. before is an exclusive chronological boundary, incompatible with after.
+        Conversation view hides known system events unless include_system=true.
+        order=relevance ranks hits, not dialogue turns. Preserve supplied order, inspect ambiguity.
         direction: incoming/outgoing or empty. No provider calls, ACK or semantic task extraction.
         """
         return call(ctx,'search',detail=detail,query=query,account=account,chat=chat,sender=sender,
                     from_time=from_time,to_time=to_time,after=after,limit=limit,
                     accounts=accounts,chats=chats,senders=senders,query_mode=query_mode,
                     order=order,before=before,direction=direction,search_language=search_language,fuzzy=fuzzy,
-                    compact=compact,body_chars=body_chars,include_coverage=include_coverage)
+                    compact=compact,body_chars=body_chars,include_coverage=include_coverage,view=view,include_system=include_system)
 
     @mcp.tool(structured_output=True, annotations=read)
     def search_files(ctx: Context, query: str='', account: str='', chat: str='', sender: str='',
@@ -476,24 +484,32 @@ def create_app(store: Store, allowed_hosts: list[str]):
     @mcp.tool(structured_output=True, annotations=read)
     def get_messages(ctx: Context, chat_id: str, after: str='', limit: int=20,
                      before: str='', order: Literal['asc','desc']='asc', from_time: str='', to_time: str='',
-                     compact: bool | None=None,body_chars: StrictInt | None=None,include_coverage: bool | None=None, detail: Detail='compact') -> dict[str, Any]:
+                     compact: bool | None=None,body_chars: StrictInt | None=None,include_coverage: bool | None=None, detail: Detail='compact',
+                    view: ConversationView='conversation',include_system: StrictBool=False) -> dict[str, Any]:
         """Archived history. order=desc starts at newest; next_cursor as after continues in that
         order. To expand older than context_window.older_cursor, use before with order=desc.
         To expand newer than context_window.newer_cursor, use after with order=asc.
         after and before are mutually exclusive; UTC dates are [from_time,to_time).
+        Conversation view hides known system events unless include_system=true.
+        Read display_text/kind and order_status; positions belong to this page only.
         No provider call or read receipt. Empty page does not prove full provider history.
         """
         return call(ctx,'get_messages',detail=detail,chat_id=chat_id,after=after,limit=limit,
                     before=before,order=order,from_time=from_time,to_time=to_time,
-                    compact=compact,body_chars=body_chars,include_coverage=include_coverage)
+                    compact=compact,body_chars=body_chars,include_coverage=include_coverage,view=view,include_system=include_system)
 
     @mcp.tool(structured_output=True, annotations=read)
     def get_context(ctx: Context, message_id: str, limit: int=10,
                     before_count: StrictInt | None=None, after_count: StrictInt | None=None,
-                    compact: bool | None=None, body_chars: StrictInt | None=None, include_coverage: bool | None=None, detail: Detail='compact') -> dict[str, Any]:
-        """Message, nearby context, files and first five visible reviews of the anchor; paginate via get_reviews."""
+                    compact: bool | None=None, body_chars: StrictInt | None=None, include_coverage: bool | None=None, detail: Detail='compact',
+                    view: ConversationView='conversation',include_system: StrictBool=False) -> dict[str, Any]:
+        """Message, counted nearby conversation, files and first five visible reviews.
+        Known system events are hidden unless include_system=true; unknown empty records stay visible.
+        conversation describes the actual known chat head, not this window. Inspect freshness,
+        ordering ambiguity and heuristic suggested_action before claiming who needs to reply.
+        Paginate reviews via get_reviews."""
         return call(ctx,'get_context',detail=detail,message_id=message_id,limit=limit,before_count=before_count,
-                    after_count=after_count,compact=compact,body_chars=body_chars,include_coverage=include_coverage)
+                    after_count=after_count,compact=compact,body_chars=body_chars,include_coverage=include_coverage,view=view,include_system=include_system)
 
     @mcp.tool(structured_output=True, annotations=read)
     def get_file_segments(ctx: Context, attachment_id: str, offset: StrictInt=0, limit: StrictInt=100, detail: Detail='compact') -> dict[str, Any]:
@@ -664,6 +680,9 @@ def create_app(store: Store, allowed_hosts: list[str]):
         try:
             params=await request.json()
             if not isinstance(params,dict) or 'token' in params: raise APIError('invalid_parameters')
+            # REST/SDK defaults remain archive-compatible; MCP defaults to the new view.
+            if method in ('list_chats','search','get_messages','get_context'):
+                params.setdefault('view','archive')
             params=validate_arguments(models,method,params)
             arguments,detail=options(method,params)
             result=render(method,await run_in_threadpool(getattr(store,method),bearer(request.headers),**arguments),detail)
