@@ -30,3 +30,13 @@ upstream notices; Dockerfiles record installed package inventories. AnyMsg does
 not ship those binaries in the wheel/npm tarball and does not publish container
 images in this release. This is an inventory of direct components, not a claim
 that every transitive dependency or model has completed a license audit.
+
+The optional native WhatsApp adapter uses [whatsmeow](https://github.com/tulir/whatsmeow)
+(MPL-2.0), pinned with its transitive dependencies in `whatsapp/whatsmeow/go.mod`
+and `go.sum`. Our adapter is separate MIT source and does not modify upstream
+files. Source archives retain the adapter sources and Go locks. Native container
+images retain the module inventory and dependency license texts under
+`/app/whatsmeow-licenses`; the Python wheel does not bundle a Go executable.
+The corresponding pinned upstream source is
+https://github.com/tulir/whatsmeow/tree/f16f9ca30d6a . Preserve the upstream source
+availability and license obligations when redistributing a native binary.

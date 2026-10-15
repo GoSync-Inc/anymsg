@@ -1,4 +1,4 @@
-"""WhatsApp supervisor: fenced DB ownership + durable Node events + bounded private IPC."""
+"""WhatsApp supervisor: fenced ownership, durable capture and bounded private IPC."""
 import asyncio
 import base64
 from contextlib import suppress
@@ -47,12 +47,17 @@ def configuration(path):
     cfg=private_json(path)
     fields={'enabled','account','expected_wid','permit_file','session_directory','events_directory',
         'pages_directory','chromium_executable','node_executable','batch_size','scan_interval_seconds',
-        'max_media_bytes','disk_reserve_bytes','media_disk_reserve_bytes','max_dialogs'}
+        'max_media_bytes','disk_reserve_bytes','media_disk_reserve_bytes','max_dialogs',
+        'provider','native_executable'}
     if not isinstance(cfg,dict) or set(cfg)-fields: raise ValueError('invalid_collector_config')
     if cfg.get('enabled') is not True: raise RuntimeError('collector_disabled')
     if not re.fullmatch(r'[a-zA-Z0-9_.-]{1,64}',cfg.get('account','')): raise ValueError('invalid_account')
     if not re.fullmatch(r'[0-9]{5,20}@c.us',cfg.get('expected_wid','')): raise ValueError('invalid_whatsapp_identity')
-    for name in ['permit_file','session_directory','events_directory','pages_directory','chromium_executable','node_executable']:
+    # Legacy configs retain their existing session; new setup templates select native.
+    provider=cfg.setdefault('provider','webjs')
+    if provider not in ('webjs','whatsmeow'):raise ValueError('invalid_whatsapp_provider')
+    executables=['chromium_executable','node_executable'] if provider=='webjs' else ['native_executable']
+    for name in ['permit_file','session_directory','events_directory','pages_directory',*executables]:
         if not isinstance(cfg.get(name),str) or not Path(cfg[name]).is_absolute(): raise ValueError('invalid_private_path')
     private=[Path(cfg[name]).resolve() for name in ['session_directory','events_directory','pages_directory']]
     if any(a==b or a in b.parents or b in a.parents for i,a in enumerate(private) for b in private[i+1:]):
@@ -78,6 +83,24 @@ def position(event):
 
 
 class WhatsAppState(CollectorState):
+    def provider_observation(self,name):
+        if name not in ('webjs','whatsmeow'):raise ValueError('invalid_whatsapp_provider')
+        with self.archive.store.pool.connection() as c:
+            row=self._operations(c);value=row['operations']
+            value['provider']={'name':name,'contract_version':1,'observed_at':row['observed'].isoformat()}
+            value.pop('provider_history',None)
+            self._save_operations(c,value)
+
+    def native_history_observation(self,status):
+        # Only bounded machine diagnostics leave the private native spool.
+        status=validate_native_history_status(status)
+        with self.archive.store.pool.connection() as c:
+            row=self._operations(c);value=row['operations']
+            if value.get('provider',{}).get('name')!='whatsmeow':return
+            value['provider_history']={**status,'checked_at':row['observed'].isoformat(),
+                'scope':'latest_native_history_batch','full_history_verified':False}
+            self._save_operations(c,value)
+
     def progress(self,chat,kind):
         self.chat(chat,kind)
         with self.archive.store.pool.connection() as c:
@@ -144,10 +167,15 @@ class NodeProvider:
         self.process=None; self.lock=asyncio.Lock(); self.counter=0; self.policy=None
         self.send_lock=asyncio.Lock();self.disconnect_lock=asyncio.Lock()
         self.send_reader=None;self.send_writer=None
-    def subscribe(self,*_): pass # Node writes callbacks to its own disk queue, never RAM polling.
+    def subscribe(self,*_): pass # Provider writes callbacks to its own disk queue, never RAM polling.
+    def bind_state(self,state):self.state=state
+    def command(self):
+        return [self.cfg['node_executable'],str(self.script),self.config_path]
+    def prepare_session(self):
+        if self.cfg.get('session_directory'):clear_browser_runtime_locks(self.cfg['session_directory'])
     async def connect(self):
         if self.process and self.process.returncode is None:raise RuntimeError('provider_already_connected')
-        if self.cfg.get('session_directory'):clear_browser_runtime_locks(self.cfg['session_directory'])
+        self.prepare_session()
         if self.cfg.get('events_directory'):
             directory=Path(self.cfg['events_directory']);directory.mkdir(mode=0o700,parents=True,exist_ok=True)
             (directory/'.transport-failure').unlink(missing_ok=True)
@@ -156,13 +184,15 @@ class NodeProvider:
         parent,child=socket.socketpair()
         try:
             env={**os.environ,'ANYMSG_WHATSAPP_SEND_FD':str(child.fileno())}
-            self.process=await asyncio.create_subprocess_exec(self.cfg['node_executable'],str(self.script),self.config_path,
+            self.process=await asyncio.create_subprocess_exec(*self.command(),
                 stdin=asyncio.subprocess.PIPE,stdout=asyncio.subprocess.PIPE,stderr=asyncio.subprocess.DEVNULL,
                 limit=1024*1024+1,pass_fds=(self.lock_fd,child.fileno()),env=env,start_new_session=True)
             child.close()
             parent.setblocking(False)
             self.send_reader,self.send_writer=await asyncio.open_connection(sock=parent,limit=1024*1024+1)
             await self.call('start',{'policy':self.policy})
+            if hasattr(self,'state'):
+                await asyncio.to_thread(self.state.provider_observation,self.cfg.get('provider','webjs'))
         except BaseException:
             parent.close()
             await self.disconnect()
@@ -215,10 +245,11 @@ class NodeProvider:
             code=result['error']
             if isinstance(code,str) and code in ('operation_invalid_parameters','operation_disabled','operation_expired',
                 'operation_target_invalid','operation_target_unavailable','operation_unsupported',
-                'operation_query_failed','operation_result_too_large','registered_file_invalid'):
+                'operation_query_failed','operation_result_too_large','registered_file_invalid',
+                'history_rate_limited','history_anchor_unavailable'):
                 from .commands import CommandRejected
                 raise CommandRejected(code)
-            if code in ('send_expired','sending_disabled','send_target_invalid'):
+            if code in ('send_expired','sending_disabled','send_target_invalid','link_preview_unsupported'):
                 from .outgoing import SendRejected
                 raise SendRejected(code)
             if isinstance(code,str) and code in CONNECTION_ERRORS:raise RuntimeError(code)
@@ -309,6 +340,58 @@ class NodeProvider:
                 if not complete: await self.disconnect()
 
 
+def validate_native_history_status(value):
+    from .envelope import utc
+    fields={'state','reason','attempt','max_attempts','next_attempt_ms','retry','coverage','observed_at'}
+    if (not isinstance(value,dict) or set(value)!=fields
+        or value['state'] not in ('downloading','retrying','failed','captured')
+        or value['reason'] not in ('','history_attempts_exhausted','history_download_failed',
+            'history_capture_failed','invalid_history_notification')
+        or type(value['attempt']) is not int or not 1<=value['attempt']<=3
+        or type(value['max_attempts']) is not int or value['max_attempts']!=3
+        or type(value['next_attempt_ms']) is not int or not 0<=value['next_attempt_ms']<2**53
+        or value['retry'] not in ('bounded_passive_download','explicit_only','none')
+        or value['coverage']!='partial'):
+        raise ValueError('invalid_native_history_status')
+    return {**value,'observed_at':utc(value['observed_at'])}
+
+
+class WhatsmeowProvider(NodeProvider):
+    """The native child shares the reviewed two-lane IPC, lease and outbox gates.
+
+    Only process launch differs. This class never starts Node or touches Chromium
+    profile locks, and an error never switches it to another provider/session.
+    """
+    def __init__(self,cfg,config_path,lock_fd):
+        super().__init__(cfg,config_path,lock_fd,script=Path(cfg['native_executable']))
+    def command(self):
+        return [self.cfg['native_executable'],'--config',self.config_path]
+    def prepare_session(self):
+        pass
+    def history_status(self):
+        try:return validate_native_history_status(private_json(Path(self.cfg['events_directory'])/'.history-status'))
+        except FileNotFoundError:return None
+
+
+def provider_for_config(cfg,path,lock_fd):
+    cls=WhatsmeowProvider if cfg.get('provider')=='whatsmeow' else NodeProvider
+    return cls(cfg,path,lock_fd)
+
+
+def require_paired_session(cfg):
+    session=Path(cfg['session_directory'])
+    if cfg.get('provider')=='whatsmeow':
+        auth=session/'auth.sqlite'
+        try:info=auth.lstat()
+        except FileNotFoundError:raise RuntimeError('whatsapp_pairing_required') from None
+        if not stat.S_ISREG(info.st_mode) or info.st_mode&0o077:
+            raise RuntimeError('private_session_required')
+        # Device identity and presence of an actual linked account are checked
+        # again by whatsmeow before it connects. A file alone is not a login.
+    elif not (session/'session'/'Default').is_dir():
+        raise RuntimeError('whatsapp_pairing_required')
+
+
 class WhatsAppCollector(TelegramCollector):
     async def send_outgoing(self,job):
         # Node durable message_create + explicit capture owns this observation.
@@ -326,6 +409,9 @@ class WhatsAppCollector(TelegramCollector):
             await asyncio.to_thread(self.archive.renew,self.account,self.owner,self.state.lease[1],self.lease_ttl)
             self.policy=await asyncio.to_thread(self.state.policy)
             await self.provider.set_policy(self.policy)
+            if isinstance(self.provider,WhatsmeowProvider):
+                status=await asyncio.to_thread(self.provider.history_status)
+                if status is not None:await asyncio.to_thread(self.state.native_history_observation,status)
     async def commit_page_wa(self,page,chat,title,origin):
         if not isinstance(page,dict) or set(page)!={'messages','exhausted','pending'} or not isinstance(page['messages'],list) or len(page['messages'])>self.batch_size:
             raise RuntimeError('invalid_whatsapp_page')
@@ -418,15 +504,15 @@ async def run_config(path):
     session=Path(cfg['session_directory'])
     if not session.is_dir() or session.is_symlink() or session.stat().st_mode&0o077:
         raise RuntimeError('private_session_required')
-    if not (session/'session'/'Default').is_dir(): raise RuntimeError('whatsapp_pairing_required')
+    require_paired_session(cfg)
     with session_lock(session) as lock_fd:
-        clear_browser_runtime_locks(session)
+        if cfg.get('provider')!='whatsmeow':clear_browser_runtime_locks(session)
         store=Store(Path(os.environ['DATABASE_URL_FILE']).read_text().strip(),Path(os.environ['PROBE_FILES']),'http://collector.invalid')
         try:
             with store.pool.connection() as c:
                 row=c.execute('SELECT platform,synthetic FROM accounts WHERE id=%s',(cfg['account'],)).fetchone()
                 if not row or row['platform']!='whatsapp' or row['synthetic']:raise RuntimeError('live_account_required')
-            worker=WhatsAppCollector(Archive(store),cfg['account'],NodeProvider(cfg,path,lock_fd),
+            worker=WhatsAppCollector(Archive(store),cfg['account'],provider_for_config(cfg,path,lock_fd),
                 CaptureSpool(cfg['pages_directory'],reserve_bytes=cfg['disk_reserve_bytes']),
                 events_spool=CaptureSpool(cfg['events_directory'],reserve_bytes=cfg['disk_reserve_bytes']),
                 batch_size=cfg['batch_size'],interval=cfg['scan_interval_seconds'],max_dialogs=cfg['max_dialogs'],

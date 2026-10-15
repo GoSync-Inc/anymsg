@@ -104,6 +104,9 @@ OPERATIONS = {
     'block_contact': _spec('contacts-manage', 'account', mutation=True, full_account=True, fields=_user),
     'unblock_contact': _spec('contacts-manage', 'account', mutation=True, full_account=True, fields=_user),
     'update_profile': _spec('profile-manage', 'account', mutation=True, full_account=True),
+    'request_chat_history': _spec('read-live', mutation=True, platforms=('whatsapp',),
+        fields={'count':_field('integer',default=50,minimum=1,maximum=50)},
+        limitation='Native only: explicit phone history request, at most 50 messages and one per account per minute; partial history is not guaranteed.'),
     'get_labels': _spec('contacts-read', 'account', full_account=True,
         platforms=('whatsapp',), limitation='Business feature; availability depends on the account.'),
     'set_chat_labels': _spec('chat-manage', mutation=True, platforms=('whatsapp',),
@@ -118,8 +121,16 @@ def operation_spec(name):
     return deepcopy(OPERATIONS[name])
 
 
-def _supported(platform, name, spec):
-    return platform in spec['platforms'] and not (platform == 'whatsapp' and name == 'delete_message')
+# Address book and label operations need a verified provider-side equivalent.
+# A local name update/empty cache is not a successful remote operation.
+NATIVE_UNSUPPORTED=frozenset(('add_contact','delete_contact','get_labels','set_chat_labels'))
+
+
+def _supported(platform, name, spec, provider=None):
+    if platform not in spec['platforms']:return False
+    if platform!='whatsapp':return True
+    if provider=='whatsmeow':return name not in NATIVE_UNSUPPORTED
+    return name not in ('delete_message','request_chat_history')
 
 
 def _fields(platform, name, spec):
@@ -137,15 +148,25 @@ def _fields(platform, name, spec):
     return spec['fields']
 
 
-def operation_manifest(platform):
+def operation_manifest(platform, *, provider=None):
     if platform not in ('telegram', 'whatsapp'):
         raise ValueError('unsupported_platform')
     rows = []
     for name, spec in sorted(OPERATIONS.items()):
         row = {k: deepcopy(v) for k, v in spec.items() if k not in ('fields', 'platforms')}
-        row.update(operation=name, supported=_supported(platform, name, spec),
+        row.update(operation=name, supported=_supported(platform, name, spec, provider),
                    parameters_schema=_fields(platform, name, spec))
-        if platform == 'whatsapp' and name == 'delete_message':
+        if platform=='whatsapp' and provider=='whatsmeow' and name in NATIVE_UNSUPPORTED:
+            row['limitation']='Not implemented by the native adapter; never substituted with a local cache mutation.'
+        elif platform=='whatsapp' and provider=='whatsmeow' and name in ('get_reactions','get_message_info','get_pinned_messages'):
+            row['limitation']='Observed local evidence only; missing history and baseline are explicitly unknown.'
+        elif platform=='whatsapp' and provider=='whatsmeow' and name=='delete_message':
+            row['limitation']='Own outgoing message only; explicit global revoke, never local-delete fallback.'
+        elif platform=='whatsapp' and provider=='whatsmeow' and name=='send_file':
+            row['limitation']='Registered SHA-256 verified original only; 32 MiB bound. Sticker requires existing WebP. Audio/voice/sticker captions are unsupported; no implicit conversion.'
+        elif platform=='whatsapp' and provider=='whatsmeow' and name=='forward_message':
+            row['limitation']='Authorized retained ordinary content only; control, view-once and poll replay are unsupported.'
+        elif platform == 'whatsapp' and name == 'delete_message':
             row['limitation'] = 'Unsupported: upstream global revoke can silently fallback to local deletion.'
         elif platform not in spec['platforms']:
             row['limitation'] = 'No implemented adapter for this provider-specific operation.'
@@ -195,9 +216,9 @@ def _valid(platform, descriptor, value):
     return False
 
 
-def validate_operation(platform, operation, parameters):
+def validate_operation(platform, operation, parameters, *, provider=None):
     spec = operation_spec(operation)
-    if not _supported(platform, operation, spec): raise ValueError('unsupported_operation')
+    if not _supported(platform, operation, spec, provider): raise ValueError('unsupported_operation')
     if parameters is None: parameters = {}
     if not isinstance(parameters, dict): raise ValueError('invalid_operation_parameters')
     fields = _fields(platform, operation, spec)

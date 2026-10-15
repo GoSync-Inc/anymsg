@@ -60,6 +60,10 @@ def target(c,p,account,chat_id,reply_to):
 
 def reviewed(c,p,account,chat_id,text,reply_to,format,link_preview,allow_lossy,chat,reply_id):
     from .formatting import render_message
+    from .whatsapp_capabilities import account_provider
+    if (link_preview and chat['platform']=='whatsapp' and
+        account_provider(c,account,'whatsapp')=='whatsmeow'):
+        raise APIError('link_preview_unsupported',409)
     artifact=render_message(chat['platform'],text,format=format,
         link_preview=link_preview,allow_lossy=allow_lossy)
     policy={'link_preview':link_preview,'allow_lossy':allow_lossy}

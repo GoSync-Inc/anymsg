@@ -122,6 +122,15 @@ jobs:
           npm ci --ignore-scripts --no-audit --no-fund
           node --test --test-reporter=junit tests/*.test.mjs > "$RUNNER_TEMP/ci-evidence/calls-frontend.xml"
           npm run build
+      - uses: actions/setup-go@924ae3a1cded613372ab5595356fb5720e22ba16 # v6
+        with:
+          go-version: '1.26.2'
+          cache-dependency-path: whatsapp/whatsmeow/go.sum
+      - name: Build native WhatsApp offline normalizer
+        run: |
+          cd whatsapp/whatsmeow
+          go build -trimpath -o "$RUNNER_TEMP/anymsg-whatsmeow" .
+          echo "ANYMSG_WHATSMEOW_TEST_BINARY=$RUNNER_TEMP/anymsg-whatsmeow" >> "$GITHUB_ENV"
       - name: Python/PostgreSQL tests
         id: python
         env:
