@@ -13,7 +13,7 @@ COPY pyproject.toml uv.lock ./
 RUN uv sync --frozen --no-dev --no-cache && groupadd -g 10001 voiceworker && useradd -u 10001 -g voiceworker -M voiceworker
 COPY *.py ./
 COPY --from=frontend /frontend/dist ./frontend/dist
-ENV PATH=/app/.venv/bin:$PATH VOICE_BIND=0.0.0.0 VOICE_PORT=13842 VOICE_DATA_DIR=/data VOICE_EXTERNAL_MCP=1 VOICE_PERSIST_CREDENTIALS=1
+ENV PATH=/app/.venv/bin:$PATH VOICE_BIND=0.0.0.0 VOICE_PORT=13842 VOICE_DATA_DIR=/data VOICE_EXTERNAL_MCP=0 VOICE_PERSIST_CREDENTIALS=1
 USER 10001:10001
 HEALTHCHECK --interval=30s --timeout=10s --start-period=40s --retries=3 CMD ["python", "healthcheck.py"]
 CMD ["python", "app.py"]

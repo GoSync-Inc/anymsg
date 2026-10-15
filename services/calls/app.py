@@ -240,6 +240,11 @@ def create_app(data_dir=None, archive=None, control_token=None, reviewer=None, a
         except Exception:
             return {'connected':False,'coverage':'not_checked','accounts':[], 'error':'archive_unavailable'}
 
+    @app.get('/api/health')
+    async def health():
+        # Readiness of this process only; neighbours are reported by /api/config.
+        return {'ok':True}
+
     @app.get('/api/config')
     async def config():
         learned=service.learning.active_candidate()
