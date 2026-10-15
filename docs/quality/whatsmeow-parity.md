@@ -404,3 +404,19 @@ group/other-contact IDs, media, mutations and soak were not tested by this smoke
   behavior across actual aliases, native network
   backpressure/ACK redelivery, media delivery, actual mutations and soak remain
   rollout gates. Offline unit/contract passes do not satisfy those live gates.
+
+
+### Linux CI timezone regression
+
+The first native CI run exposed a test-only comparison bug: `time.Time !=`
+compared location representations after JSON replay, rather than the timestamp
+instant. It reproduced under `TZ=UTC`. The regression now uses `Time.Equal` and
+explicit UTC / UTC+8 source cases. The runtime implementation is unchanged.
+The implementation owner reran all 54 Go tests with race detection under UTC
+(6.631 seconds), the two source-zone cases under Asia/Makassar, and vet: PASS.
+
+The final static Linux candidate also restored twice on the VPS (0.801 / 0.921
+seconds), read the retained self-message on both runs and exited normally.
+All owned native pilot processes were stopped; both production browser collectors
+were still running with restart count zero. No production provider cutover is
+claimed by this acceptance record.

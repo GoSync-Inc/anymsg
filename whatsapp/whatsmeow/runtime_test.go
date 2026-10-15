@@ -408,29 +408,37 @@ func TestJournalQuotaNeverEvictsUnconsumedSpool(t *testing.T) {
 	}
 }
 func TestEditTargetAndWireTimeStableAcrossReplay(t *testing.T) {
-	s := openTestStore(t)
-	original := fixtureMessage("original", 1700000000)
-	s.Put(original, "live")
-	edit := fixtureMessage("editid", 1700000100)
-	edit.Message = &waE2E.Message{ProtocolMessage: &waE2E.ProtocolMessage{Type: waE2E.ProtocolMessage_MESSAGE_EDIT.Enum(), Key: &waCommon.MessageKey{ID: proto.String("original"), FromMe: proto.Bool(false)}, EditedMessage: &waE2E.Message{Conversation: proto.String("edited")}, TimestampMS: proto.Int64(1700000100123)}}
-	if e := s.Put(edit, "live"); e != nil {
-		t.Fatal(e)
-	}
-	if e := s.Put(edit, "history"); e != nil {
-		t.Fatal(e)
-	}
-	m, e := s.Get("111111@c.us", LegacyMessageID(original))
-	if e != nil || m.Message.GetConversation() != "edited" || m.Info.Timestamp != original.Info.Timestamp {
-		t.Fatal(m, e)
-	}
-	v, e := NormalizeMessage(m, s.Owner)
-	if e != nil || v["editedTimestampMs"] != int64(1700000100123) {
-		t.Fatal(v, e)
-	}
-	var n int
-	s.db.QueryRow("SELECT COUNT(*) FROM capture").Scan(&n)
-	if n != 2 {
-		t.Fatal("edit replay changed", n)
+	for _, zone := range []*time.Location{time.UTC, time.FixedZone("source-offset", 8*60*60)} {
+		t.Run(zone.String(), func(t *testing.T) {
+			s := openTestStore(t)
+			original := fixtureMessage("original", 1700000000)
+			original.Info.Timestamp = original.Info.Timestamp.In(zone)
+			if e := s.Put(original, "live"); e != nil {
+				t.Fatal(e)
+			}
+			edit := fixtureMessage("editid", 1700000100)
+			edit.Message = &waE2E.Message{ProtocolMessage: &waE2E.ProtocolMessage{Type: waE2E.ProtocolMessage_MESSAGE_EDIT.Enum(), Key: &waCommon.MessageKey{ID: proto.String("original"), FromMe: proto.Bool(false)}, EditedMessage: &waE2E.Message{Conversation: proto.String("edited")}, TimestampMS: proto.Int64(1700000100123)}}
+			if e := s.Put(edit, "live"); e != nil {
+				t.Fatal(e)
+			}
+			if e := s.Put(edit, "history"); e != nil {
+				t.Fatal(e)
+			}
+			m, e := s.Get("111111@c.us", LegacyMessageID(original))
+			// JSON preserves the instant and offset, not a Location's identity.
+			// In UTC, time.Unix's Local and decoded Z's UTC can differ structurally.
+			if e != nil || m.Message.GetConversation() != "edited" || !m.Info.Timestamp.Equal(original.Info.Timestamp) {
+				t.Fatal(m, e)
+			}
+			v, e := NormalizeMessage(m, s.Owner)
+			if e != nil || v["editedTimestampMs"] != int64(1700000100123) {
+				t.Fatal(v, e)
+			}
+			var n int
+			if e = s.db.QueryRow("SELECT COUNT(*) FROM capture").Scan(&n); e != nil || n != 2 {
+				t.Fatal("edit replay changed", n, e)
+			}
+		})
 	}
 }
 func TestGlobalRevokeNoBlankHumanMessage(t *testing.T) {
