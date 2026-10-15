@@ -123,17 +123,21 @@ uses JSON POSTs; it does not provide a GET notification stream.
 
 ## Operations and limits
 
-The tested server stack is Linux amd64, Python 3.13, Node 24 for WhatsApp and
-PostgreSQL 18. Windows server execution is unsupported. Native host prerequisites
-include PostgreSQL tools for backups and Node/Chromium for WhatsApp; a Python wheel
-alone cannot provide those system services. Docker ARM support is not claimed.
+The tested server stack is Linux amd64, Python 3.13 and PostgreSQL 18.
+The default WhatsApp collector uses a Go whatsmeow adapter without Chromium or
+Node. The explicit browser fallback requires Node 24 and Chromium. Native host
+installations also need PostgreSQL backup tools; the Python wheel does not install
+these system dependencies or the Go binary. Windows server execution is unsupported;
+Docker ARM support is not claimed.
 
 Use separate deployments/databases for different owners. Multiple accounts in one
 installation do not create a tenant security boundary. Never run two clients against
 one provider session. History available to a linked WhatsApp device can be partial.
-The WhatsApp adapter uses unofficial `whatsapp-web.js`; it is not the WhatsApp
-Business API and can break or lead to account restrictions. Follow provider terms
-and use appropriately authorized account/chat scopes.
+WhatsApp adapters use unofficial `whatsmeow` (default) or `whatsapp-web.js`
+(explicit fallback). They are separate from the WhatsApp Business API. Check
+`list_messenger_operations` for the capabilities of each configured account;
+unsupported provider actions are hidden. Follow provider terms and use appropriately
+authorized account/chat scopes.
 
 See [ACCESS.md](ACCESS.md), [SEARCH.md](SEARCH.md), [FILE_INDEX.md](FILE_INDEX.md),
 [COLLECTORS.md](COLLECTORS.md), [MEDIA_STORAGE.md](MEDIA_STORAGE.md),
