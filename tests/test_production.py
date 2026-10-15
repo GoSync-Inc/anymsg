@@ -12,6 +12,7 @@ from scripts import production as p
 
 SHA = "a" * 40
 IMAGE = "sha256:" + "b" * 64
+OLD_IMAGE = "sha256:" + "d" * 64
 ROOT = Path(__file__).resolve().parents[1]
 
 
@@ -112,7 +113,7 @@ def fixture(tmp_path, monkeypatch):
         if argv[:2] == ["docker", "ps"]:
             return "existing123\n"
         if argv[:2] == ["docker", "inspect"]:
-            return json.dumps([{"Image": IMAGE, "State": {"Running": True}}])
+            return json.dumps([{"Image": OLD_IMAGE if argv[2] == "existing123" else IMAGE, "State": {"Running": True}}])
         if "ps" in argv and "-q" in argv:
             return "replacement123\n"
         return ""
@@ -133,6 +134,10 @@ def test_preparation_builds_only_exact_main_source_and_does_not_restart_services
     assert after["services"]["api"]["environment"]["SYNTHETIC"] == "literal$$password"
     assert after["services"]["db"] == before["services"]["db"]
     assert "build" not in after["services"]["api"]
+    previous = p.read(Path(settings["state_directory"]) / SHA / "synthetic.before.json")
+    assert previous["services"]["api"]["image"] == OLD_IMAGE
+    assert "build" not in previous["services"]["api"]
+    assert receipt["projects"][0]["running"]["api"] == {"container": "existing123", "image": OLD_IMAGE}
     assert any("refs/heads/main" in call for call in calls)
     assert not any("stop" in call or "up" in call for call in calls)
     smoke = next(call for call in calls if call[:2] == ["docker", "run"])

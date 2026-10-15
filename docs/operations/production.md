@@ -97,6 +97,9 @@ image inventory and the private `*.before.json`/`*.json` Compose diff under
 `<state_directory>/<sha>/`. Full snapshots can contain secrets: keep them on the
 host with mode `0600`, outside Git, packages and CI artifacts. Public receipts
 contain only revision, CI URL and image IDs.
+The previous snapshot pins each selected container's actual image ID, including
+when the old configuration used a mutable tag; it does not depend on the tag
+continuing to reference the previous image.
 
 Before applying, follow [backup/migration and rollback](platform-cutover.md).
 This tool does not run migrations, prove data compatibility, authorize external

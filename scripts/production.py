@@ -165,7 +165,10 @@ def snapshot(project):
         if len(ids) != 1 or service not in document["services"]:
             raise Refused("each selected service must already have exactly one running container")
         validate_runtime(document["services"][service])
-        running[service] = ids[0]
+        actual = json.loads(run(["docker", "inspect", ids[0]]))[0]
+        if not re.fullmatch(r"sha256:[0-9a-f]{64}", actual["Image"]):
+            raise Refused("running container has no immutable image identity")
+        running[service] = {"container": ids[0], "image": actual["Image"]}
     return document, running
 
 
@@ -271,7 +274,12 @@ def prepare(settings, sha):
             raise Refused("resolved Compose snapshot did not round-trip exactly")
         projects.append({"name": project["name"], "file": str(path), "digest": digest(read(path)),
                          "before_digest": digest(before), "running": item["running"]})
-        write(release / (project["name"] + ".before.json"), escaped(before))
+        rollback = json.loads(json.dumps(before))
+        for unit in rollback["services"].values():
+            unit.pop("build", None)
+        for service, identity in item["running"].items():
+            rollback["services"][service]["image"] = identity["image"]
+        write(release / (project["name"] + ".before.json"), escaped(rollback))
     receipt = {"version": 1, "sha": sha, "ci": evidence, "images": images,
                "config_digest": digest(settings), "projects": projects}
     write(release / "prepared.json", receipt)
