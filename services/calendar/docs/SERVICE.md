@@ -27,11 +27,11 @@ iCloud: сначала скрытый ввод app-specific password в legacy r
 ```sh
 uv run family-calendar connection add-icloud --id apple-parent
 uv run family-calendar pilot icloud discover --connection apple-parent
-uv run family-calendar service import-icloud --connection apple-parent --owner egor
+uv run family-calendar service import-icloud --connection apple-parent --owner egor --timezone Asia/Makassar
 uv run family-calendar service discover --connection apple-parent
 ```
 
-Импорт не изменяет credentials, journals и allowlists пилота. Сервис имеет свой Vault и отдельный write opt-in; каждый аккаунт использует отдельный транспорт.
+`--timezone` — IANA-зона календарей, в которой читаются события на весь день (по умолчанию `Asia/Makassar`). Discover заменяет её зоной из VTIMEZONE календаря, а если её нет, оставляет выбранную при импорте. Импорт не изменяет credentials, journals и allowlists пилота. Сервис имеет свой Vault и отдельный write opt-in; каждый аккаунт использует отдельный транспорт.
 
 ## Семья и разрешения
 
