@@ -284,7 +284,7 @@ func (s *CaptureStore) append(chat, id string, stamp int64, raw []byte, envelope
 	if count >= s.MaxEntries {
 		// Only already consumed, published archive copies may leave the bounded
 		// local history/media cache. A pending spool record is never discarded.
-		rows, e := s.db.Query("SELECT seq,digest FROM capture WHERE published=1 ORDER BY seq LIMIT 1000")
+		rows, e := s.db.Query("SELECT seq,digest,envelope FROM capture WHERE published=1 ORDER BY seq LIMIT 1000")
 		if e != nil {
 			return e
 		}
@@ -292,11 +292,22 @@ func (s *CaptureStore) append(chat, id string, stamp int64, raw []byte, envelope
 		for rows.Next() {
 			var seq int64
 			var d string
-			if e = rows.Scan(&seq, &d); e != nil {
+			var payload []byte
+			if e = rows.Scan(&seq, &d, &payload); e != nil {
 				rows.Close()
 				return e
 			}
-			if _, e = os.Lstat(filepath.Join(s.Config.EventsDirectory, fmt.Sprintf("%020d-%s.json", seq, d))); errors.Is(e, os.ErrNotExist) {
+			consumed := true
+			// Pre-fix exports used the semantic capture key in their filename.
+			// Preserve those journal rows until the operator verifies and repairs
+			// their exports; either pending filename still protects the capture.
+			for _, name := range []string{captureSpoolFilename(seq, payload), fmt.Sprintf("%020d-%s.json", seq, d)} {
+				if _, e = os.Lstat(filepath.Join(s.Config.EventsDirectory, name)); !errors.Is(e, os.ErrNotExist) {
+					consumed = false
+					break
+				}
+			}
+			if consumed {
 				drop = append(drop, seq)
 			}
 		}
@@ -377,6 +388,13 @@ func (s *CaptureStore) spoolUsage() (spoolUsage, error) {
 	return measureSpool(entries)
 }
 
+// The semantic capture key intentionally ignores observation time/origin and
+// includes the native raw message. The Python consumer's integrity suffix must
+// instead hash the exact serialized envelope bytes that it will read.
+func captureSpoolFilename(seq int64, payload []byte) string {
+	return fmt.Sprintf("%020d-%x.json", seq, sha256.Sum256(payload))
+}
+
 func (s *CaptureStore) publish(digest string, data []byte) error {
 	usage, e := s.spoolUsage()
 	if e != nil {
@@ -392,7 +410,7 @@ func (s *CaptureStore) publishWithUsage(digest string, data []byte, usage *spool
 	if e := s.db.QueryRow("SELECT seq FROM capture WHERE digest=?", digest).Scan(&seq); e != nil {
 		return e
 	}
-	name := fmt.Sprintf("%020d-%s.json", seq, digest)
+	name := captureSpoolFilename(seq, data)
 	target := filepath.Join(s.Config.EventsDirectory, name)
 	if old, e := readPrivate(target, 512<<10); e == nil {
 		if string(old) != string(data) {
