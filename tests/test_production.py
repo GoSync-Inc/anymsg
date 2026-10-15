@@ -1,7 +1,9 @@
 """Promotion guards use synthetic GitHub/Compose responses; no live runtime access."""
 import copy
 import json
+import os
 from pathlib import Path
+import stat
 import subprocess
 from types import SimpleNamespace
 
@@ -143,6 +145,54 @@ def test_preparation_builds_only_exact_main_source_and_does_not_restart_services
     smoke = next(call for call in calls if call[:2] == ["docker", "run"])
     assert smoke[smoke.index("--network") + 1] == "none"
     assert not any("--volume" in call or "-v" in call for call in calls)
+
+
+def test_private_preparation_checks_out_source_readable_by_image_users(tmp_path, monkeypatch):
+    real_run = p.run
+    upstream = tmp_path / "public-upstream"
+    real_run(["git", "init", "--quiet", "--initial-branch=main", str(upstream)])
+    (upstream / "package").mkdir()
+    (upstream / "package" / "module.py").write_text("VALUE = 'synthetic'\n")
+    (upstream / "entrypoint").write_text("#!/bin/sh\nexit 0\n")
+    (upstream / "entrypoint").chmod(0o755)
+    real_run(["git", "-C", str(upstream), "add", "."])
+    real_run(["git", "-C", str(upstream), "-c", "user.name=Synthetic", "-c",
+              "user.email=synthetic@example.invalid", "commit", "--quiet", "-m", "fixture"])
+    sha = real_run(["git", "-C", str(upstream), "rev-parse", "HEAD"]).strip()
+    settings, calls, _ = fixture(tmp_path, monkeypatch)
+    simulated_runtime = p.run
+
+    def command(argv, **kwargs):
+        if argv[0] == "git":
+            if "remote" in argv:
+                argv = [*argv[:-1], str(upstream)]
+            return real_run(argv, **kwargs)
+        return simulated_runtime(argv, **kwargs)
+
+    def inspect_build_source(source, revision, target):
+        assert revision == sha
+        # Docker COPY preserves these modes; root-owned 0600/0700 code is
+        # unreadable to the production image's UID 10001.
+        assert stat.S_IMODE((source / "package" / "module.py").stat().st_mode) == 0o644
+        assert stat.S_IMODE((source / "package").stat().st_mode) == 0o755
+        assert stat.S_IMODE((source / "entrypoint").stat().st_mode) == 0o755
+        return IMAGE
+
+    monkeypatch.setattr(p, "run", command)
+    monkeypatch.setattr(p, "build_image", inspect_build_source)
+    previous = os.umask(0o077)
+    try:
+        receipt = p.prepare(settings, sha)
+        state = Path(settings["state_directory"])
+        assert stat.S_IMODE(state.stat().st_mode) == 0o700
+        assert stat.S_IMODE((state / sha).stat().st_mode) == 0o700
+        assert stat.S_IMODE((state / sha / "prepared.json").stat().st_mode) == 0o600
+        assert stat.S_IMODE(Path(receipt["projects"][0]["file"]).stat().st_mode) == 0o600
+        assert stat.S_IMODE((state / sha / "synthetic.before.json").stat().st_mode) == 0o600
+        assert os.umask(0o077) == 0o077
+    finally:
+        os.umask(previous)
+    assert not any("stop" in call or "up" in call for call in calls)
 
 
 def test_profiled_live_services_remain_in_the_candidate_without_starting_other_profiles(tmp_path, monkeypatch):

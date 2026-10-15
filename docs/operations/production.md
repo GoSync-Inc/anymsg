@@ -106,6 +106,9 @@ image inventory and the private `*.before.json`/`*.json` Compose diff under
 `<state_directory>/<sha>/`. Full snapshots can contain secrets: keep them on the
 host with mode `0600`, outside Git, packages and CI artifacts. Public receipts
 contain only revision, CI URL and image IDs.
+The checkout uses image-readable permissions for public source files so Docker
+COPY preserves access for unprivileged application users. Its enclosing release
+directory remains private (`0700`); resolved snapshots remain `0600`.
 The previous snapshot pins each selected container's actual image ID, including
 when the old configuration used a mutable tag; it does not depend on the tag
 continuing to reference the previous image.
