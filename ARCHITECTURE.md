@@ -14,7 +14,7 @@ not proof that its behavior has been tested.
 | Component | Responsibility and principal sources | Verification boundary |
 | --- | --- | --- |
 | Gateway & Access | `app.py`, `policy.py`, `commands.py`, `outgoing.py`, `messenger_operations.py`, `formatting.py`, `presentation.py`, gateway SQL role | REST/MCP contracts, authorization, redaction, typed arguments, preview and mutation fences |
-| Archive & Search | `archive.py`, `envelope.py`, `spool.py`, `collector_state.py`, query/evidence modules, `people.py`, `reviews.py`, `receipts.py`, `reply_state.py`, `history_plan.py` | Transactions, revisions, conflicts, scope, cursors, coverage and explainable reply hints |
+| Archive & Search | `archive.py`, `envelope.py`, `spool.py`, `collector_state.py`, query/evidence modules, `conversation.py`, `conversation_state.py`, `people.py`, `reviews.py`, `receipts.py`, `reply_state.py`, `history_plan.py` | Transactions, revisions, conflicts, scope, cursors, coverage, normalized conversation views and explainable reply hints |
 | Telegram Connector | `telegram_collector.py`, pairing, governor, identity, receipts and operations modules | Synthetic Telethon adapters, durable cursors, FloodWait, session/lease fences and native-operation outcomes |
 | WhatsApp Connector | `whatsapp_collector.py`, pairing/identity modules, `whatsapp/` | Synthetic provider/IPC tests, command lanes, history bounds, identity evidence, passive receipts and media handling |
 | Media Storage & Index | `blobs.py`, `storage_admission.py`, `file_extract.py`, `file_index.py` | Original integrity, scoped retrieval, extraction safety, passages, provenance, derivative invalidation and reuse |

@@ -4,6 +4,7 @@ Call the durable spool before acknowledging an adapter capture. Live event wirin
 provider catch-up and single-session handover are separate deployment gates.
 """
 from datetime import datetime,timezone
+import math
 import re
 
 from .envelope import validate
@@ -15,6 +16,29 @@ def timestamp(value):
     if isinstance(value,(int,float)) and not isinstance(value,bool):
         return datetime.fromtimestamp(value,timezone.utc).isoformat()
     return value
+
+
+def observed_duration(value):
+    """Retain only bounded numeric duration observed in cached provider metadata."""
+    return value if type(value) in (int,float) and 0<=value<=86400 and math.isfinite(value) else None
+
+
+def telegram_kind(message,media_kind):
+    from telethon import types
+    if isinstance(message,types.MessageService) or getattr(message,'action',None) is not None:
+        return 'system','service'
+    media=getattr(message,'media',None)
+    token=type(media).__name__.removeprefix('MessageMedia').lower() if media is not None else 'message'
+    token=token if re.fullmatch(r'[a-z][a-z0-9_]{0,63}',token) else 'unsupported'
+    if isinstance(media,(types.MessageMediaGeo,types.MessageMediaGeoLive,types.MessageMediaVenue)):
+        return 'location',token
+    if isinstance(media,types.MessageMediaContact):return 'contact',token
+    if isinstance(media,types.MessageMediaPoll):return 'poll',token
+    if media_kind:return 'video' if media_kind=='animation' else media_kind,token
+    # Unknown constructors remain unknown even if a body happens to be present.
+    if media is not None and not isinstance(media,(types.MessageMediaEmpty,types.MessageMediaWebPage)):
+        return 'unknown',token
+    return ('text' if getattr(message,'message',None) else 'unknown'),token
 
 
 def telegram_message(account,message,*,chat_title='',origin='live',verified_self=None):
@@ -69,6 +93,10 @@ def telegram_message(account,message,*,chat_title='',origin='live',verified_self
     if reply_peer is not None:
         from telethon.utils import get_peer_id
         if get_peer_id(reply_peer)!=message.chat_id:reply_id=None
+    media_kind=next((name for attr,name in [('voice','voice'),('video_note','video'),('sticker','sticker'),
+        ('gif','animation'),('video','video'),('audio','audio'),('photo','photo'),('document','document')]
+        if getattr(message,attr,None)),None)
+    kind,provider_type=telegram_kind(message,media_kind)
     return validate({'account':account,'platform':'telegram','chat':str(message.chat_id),
         'chat_title':(chat_title if chat_title and chat_title!=str(message.chat_id) else observed_title) or str(message.chat_id),
         'provider_id':str(message.id),
@@ -78,7 +106,10 @@ def telegram_message(account,message,*,chat_title='',origin='live',verified_self
         'deleted':False,'direction':'outgoing' if message.out else 'incoming','origin':origin,'media':media,
         'sender_profile':profile,'metadata':{
             'chat_type':observed_type,
-            'is_service':getattr(message,'action',None) is not None or message.chat_id==777000,
+            'is_service':kind=='system',
+            'message_kind':kind,'provider_message_type':provider_type,
+            'timestamp_resolution':'second',
+            'media_duration_seconds':observed_duration(getattr(file,'duration',None)) if kind in ('voice','audio','video') else None,
             'is_self_chat':bool(isinstance(chat_entity,types.User) and chat_entity.is_self) or
                 bool(isinstance(verified_self,types.User) and verified_self.is_self and message.chat_id==verified_self.id),
             'sender_is_contact':getattr(entity,'contact',None) if isinstance(entity,types.User) else None,
@@ -87,9 +118,7 @@ def telegram_message(account,message,*,chat_title='',origin='live',verified_self
             'reply_to_provider_id':reply_id,
             'mentions_owner':getattr(message,'mentioned',None),
             'forwarded':getattr(message,'fwd_from',None) is not None,
-            'media_kind':next((name for attr,name in [('voice','voice'),('video_note','video'),('sticker','sticker'),
-                ('gif','animation'),('video','video'),('audio','audio'),('photo','photo'),('document','document')]
-                if getattr(message,attr,None)),None)}})
+            'media_kind':media_kind}})
 
 
 def whatsapp_message(account,event,*,origin='live',change='message',observed_at=None):
@@ -110,6 +139,14 @@ def whatsapp_message(account,event,*,origin='live',change='message',observed_at=
     edited=event.get('editedTimestampMs')
     updated=(edited/1000 if type(edited) is int and edited>0 else None)
     if change=='delete' or (change=='edit' and updated is None): updated=observed_at
+    native_type=event.get('messageType')
+    native_type=native_type if isinstance(native_type,str) and re.fullmatch(r'[a-z][a-z0-9_]{0,63}',native_type) else None
+    service=event.get('isService') is True or native_type in ('notification','e2e_notification','call_log','gp2','protocol','ciphertext','revoked')
+    kind='system' if service else {'chat':'text','image':'photo','video':'video','gif':'video',
+        'ptt':'voice','audio':'audio','document':'document','sticker':'sticker','location':'location',
+        'vcard':'contact','multi_vcard':'contact','poll_creation':'poll'}.get(native_type,'unknown')
+    if native_type is None and event.get('mediaKind'):
+        kind='video' if event['mediaKind']=='animation' else event['mediaKind'] if event['mediaKind']!='other' else 'unknown'
     return validate({'account':account,'platform':'whatsapp','chat':event['chatId'],
         'chat_title':event.get('chatName') or event['chatId'],'provider_id':event['messageId'],
         'sender':event.get('senderId') or '','body':event.get('body') or '',
@@ -119,8 +156,10 @@ def whatsapp_message(account,event,*,origin='live',change='message',observed_at=
         'origin':origin,'media':media,'sender_profile':{'display_name':event.get('senderName') or '',
                                                      'username':event.get('senderUsername') or ''},
         'metadata':{'reply_to_provider_id':event.get('replyToId'),
-                    'is_service':event.get('isService') if type(event.get('isService')) is bool else
-                        event.get('messageType') in ('notification','e2e_notification','call_log','gp2','protocol','ciphertext','revoked'),
+                    'is_service':service,
+                    'message_kind':kind,'provider_message_type':native_type,
+                    'timestamp_resolution':'second',
+                    'media_duration_seconds':observed_duration(event.get('durationSeconds')) if kind in ('voice','audio','video') else None,
                     'is_self_chat':event.get('isSelfChat'),
                     'sender_is_contact':event.get('senderIsContact'),
                     'mentions_owner':event.get('mentionsOwner'),

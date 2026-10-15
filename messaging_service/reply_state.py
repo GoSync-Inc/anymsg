@@ -77,7 +77,7 @@ def dismiss(store,c,p,chat_id,message_id,expected_revision):
     if not chat:raise APIError('not_found',404)
     c.execute('SELECT pg_advisory_xact_lock(hashtextextended(%s,0))',('archive:'+chat['account'],))
     result=list_chats(store,c,p,include_coverage=False,awaiting_reply_days=0,selected_chat=chat_id,
-        include_dismissed=True)
+        include_dismissed=True,view='conversation')
     row=result['items'][0]
     if (not row['awaiting_reply'] or row.get('awaiting_reply_message_id')!=message_id or
         row.get('awaiting_reply_revision')!=expected_revision):

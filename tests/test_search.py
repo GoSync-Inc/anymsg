@@ -108,7 +108,7 @@ def test_invalid_search_parameters_have_safe_errors(seeded,params):
 
 def test_rest_and_mcp_share_extended_filters_and_keep_scope(seeded):
     s,a,b=seeded
-    kwargs={'chats':['telegram-demo-chat','whatsapp-demo-1-chat'],
+    kwargs={'view':'archive','chats':['telegram-demo-chat','whatsapp-demo-1-chat'],
             'senders':['demo-person-1'],'query':'Маяк OR Atlas','query_mode':'web','order':'desc'}
     with TestClient(create_app(s,['testserver'])) as client:
         headers={'Authorization':'Bearer '+b,'Accept':'application/json, text/event-stream'}

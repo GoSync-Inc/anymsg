@@ -49,8 +49,16 @@ export function event(message, body=undefined, ownerIds=[]) {
   const self=peer && own.size ? own.has(peer)?true:
     [...own].some(id=>id.split('@')[1]===peer.split('@')[1])?false:null:null;
   const type=typeof message.type==='string'?message.type:null;
+  // Public Message.duration is seconds (number or numeric string depending on
+  // provider version). It never supplies finer creation-time resolution.
+  const duration=message.duration;
+  const numericDuration=typeof duration==='number'?duration:
+    typeof duration==='string' && /^\d+(?:\.\d+)?$/.test(duration)?Number(duration):null;
+  const durationSeconds=['ptt','audio','video','gif'].includes(type) &&
+    Number.isFinite(numericDuration) && numericDuration>=0 && numericDuration<=86400?numericDuration:null;
   const value={chatId:chat,messageId:asId(message.id),
     messageType:type,
+    timestampResolution:'second',durationSeconds,
     isService:['notification','e2e_notification','call_log','gp2','protocol','ciphertext','revoked'].includes(type),
     isSelfChat:self,
     chatName:chatId(message),senderId:message.author || message.from || '',
