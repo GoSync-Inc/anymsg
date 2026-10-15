@@ -26,6 +26,11 @@ operation enum to explicit backend support plus the selected profile and key
 permissions, and rechecks support for the exact target account on every call.
 There is no implicit fallback to another action. Receipt reads for prior actions
 retain their existing permission checks independently of current provider support.
+`capabilities.messenger_operations.supported_by_account` lists each account's
+supported `operations` and its `available_operations`: the rows that
+`list_messenger_operations` marks `available` for this key (key permitted and
+opted in for the account). Gateway `gateway_actions` and
+`gateway_actions_by_account` advertise only these usable actions.
 
 ## Permission boundaries
 

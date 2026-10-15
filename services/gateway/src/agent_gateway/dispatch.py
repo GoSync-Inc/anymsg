@@ -49,6 +49,32 @@ class Dispatch:
                 supported.update(values)
         return sorted(allowed & supported)
 
+    def usable_actions(self, snapshot, agent, caps):
+        """Advertise only actions usable now; the call ceiling stays `actions`.
+
+        An action is listed for an account when it is granted, supported and
+        reported by the backend as available (key permitted and account opt-in).
+        Excluded ceiling actions are counted per reason, never listed. A backend
+        without an availability report advertises none rather than guessing.
+        """
+        operations = caps.get("messenger_operations")
+        accounts = operations.get("supported_by_account") if isinstance(operations, dict) else None
+        usable, excluded = {}, {}
+        for account, row in (accounts.items() if isinstance(accounts, dict) else ()):
+            ceiling = self.actions(snapshot, agent, caps, account)
+            available = row.get("available_operations") if isinstance(row, dict) else None
+            reported = isinstance(available, list) and all(isinstance(value, str) for value in available)
+            usable[account] = sorted(set(ceiling) & set(available)) if reported else []
+            if len(ceiling) > len(usable[account]):
+                reason = "not_available_for_account" if reported else "availability_not_reported"
+                excluded[account] = {reason: len(ceiling) - len(usable[account])}
+        return {
+            "gateway_actions": sorted(set().union(*usable.values())),
+            "gateway_actions_by_account": usable,
+            "gateway_actions_excluded_by_account": excluded,
+            "gateway_actions_basis": "granted_supported_and_available_for_account",
+        }
+
     def implemented(self, tool, snapshot, agent, caps, account=None):
         if tool.get("required_manifest"):
             manifest = caps.get("tool_manifest")
@@ -290,12 +316,6 @@ class Dispatch:
             if manifest is not None:
                 result["backend_tool_manifest"] = manifest
             if module == "messaging":
-                reports = caps.get("messenger_operations", {})
-                accounts = reports.get("supported_by_account", {}) if isinstance(reports, dict) else {}
-                result["gateway_actions_by_account"] = (
-                    {account: self.actions(snapshot, agent, caps, account) for account in accounts}
-                    if isinstance(accounts, dict)
-                    else {}
-                )
+                result.update(self.usable_actions(snapshot, agent, caps))
             result["gateway_policy_revision"] = snapshot["revision"]
         return result

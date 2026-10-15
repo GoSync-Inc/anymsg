@@ -81,7 +81,15 @@ Messenger-operation enums also intersect the backend's explicit supported names
 for each permitted account. A mixed Telegram/WhatsApp key sees their union; each
 preview/execute rechecks the exact account before dispatch. Unsupported operations
 are omitted from account catalogs. Missing support names hide live actions rather
-than inferring them from a provider name or count. Scoped receipt reads remain
+than inferring them from a provider name or count.
+`messages_capabilities` advertises in `gateway_actions_by_account` (and their union
+`gateway_actions`) only actions that are granted, supported and reported in the
+backend's per-account `available_operations` (key permitted and account opt-in).
+`gateway_actions_excluded_by_account` counts the remaining ceiling actions per
+reason (`not_available_for_account`, or `availability_not_reported` for an older
+backend) without listing them; `list_messenger_operations` shows per-row reasons.
+The operation enum and the per-call ceiling are unchanged by this narrower view;
+the backend still enforces account opt-in on every preview and execute. Scoped receipt reads remain
 available across provider changes under the existing action permission ceiling.
 Upgrade the messaging backend before the gateway when adding this contract.
 
