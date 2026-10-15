@@ -164,3 +164,19 @@ def test_multiple_original_chats_are_ambiguous_and_message_id_is_never_rewritten
     with pytest.raises(APIError,match='not_found'):
         s.resolve_reference(key,'wa-identities','900@lid','false_1234567890@c.us_000001')
     assert s.get_context(key,first['message'])['message']['provider_id']=='false_900@lid_000001'
+
+
+@pytest.mark.parametrize('provenance', ['webjs_contact_cache_v1',
+    'whatsmeow_message_alt_v1', 'whatsmeow_lid_store_v1'])
+def test_verified_provider_evidence_is_persisted_and_replayable(identity_archive, provenance):
+    """Python validation alone does not prove the SQL constraint accepts evidence."""
+    s, _, state, key = identity_archive
+    value = observed()
+    value['event']['identityObservations'][0]['provenance'] = provenance
+    first = state.apply(value)
+    assert state.apply(value)['outcome'] == 'duplicate'
+    with s.pool.connection() as c:
+        row = c.execute('SELECT provenance,source_message FROM whatsapp_identity_observations').fetchone()
+    assert row == {'provenance': provenance, 'source_message': first['message']}
+    assert s.search_people(key, '1234567890')['items'][0]['identity']['state'] == 'verified'
+    assert s.get_context(key, first['message'])['message']['revision'] == 1
