@@ -52,6 +52,24 @@ def test_same_version_conflict_is_explicit_no_overwrite(archive):
     assert s.capabilities(key)['sources'][0]['detail_code']=='version_conflict'
 
 
+def test_sync_conflict_alert_follows_unresolved_conflicts_not_the_sticky_code(archive):
+    from messaging_service.sync_status import get_sync_status
+    ar,s,key,_=archive
+    def status():
+        with s.pool.connection() as c:
+            return get_sync_status(c,{'accounts':['archive-test'],'chat_ids':None})['sources'][0]
+    ar.ingest(event());ar.ingest(event(body='contradiction'))
+    row=status()
+    assert row['active_conflicts']==1 and 'archive_version_conflicts' in row['alerts']
+    assert row['archive_detail_code']=='version_conflict'
+    # Later provider evidence resolves it; the stored code stays, the alert does not.
+    assert ar.ingest(event(body='Вторая версия',updated_at='2026-10-01T12:01:00Z'))['outcome']=='edited'
+    row=status()
+    assert row['active_conflicts']==0 and row['historical_conflicts']==1
+    assert 'archive_version_conflicts' not in row['alerts']
+    assert row['archive_detail_code']=='coverage_not_reconciled'
+
+
 def test_message_identity_cannot_change_on_edit(archive):
     ar,s,key,_=archive
     ar.ingest(event())

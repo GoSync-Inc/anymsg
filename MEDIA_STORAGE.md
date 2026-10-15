@@ -79,6 +79,15 @@ another automatic retry. `needs_attention` remains true when other jobs are
 simultaneously paused for storage. Other smaller eligible jobs can proceed on later passes.
 Normal capture and metadata/text search remain independent of this pause.
 
+A local write failure that is not a capacity limit (missing directory,
+permissions, read-only mount, or the native adapter's temporary media directory)
+is `error_code=storage_unavailable`, not `network_error`. Like a capacity pause it
+does not consume a provider attempt and never fails the job terminally; it
+retries every 5 minutes, and account media operations report
+`state=storage_unavailable` and `storage_unavailable_jobs`. Fix the storage path,
+then downloads resume on their own. Jobs recorded as `network_error` before this
+classification keep their recorded code.
+
 Media reservation expiry follows the media lease and is renewed with it.
 Expiry, edit/delete supersession, successful completion and failure release
 capacity. Cleanup is idempotent and matches the exact lease epoch, so an old

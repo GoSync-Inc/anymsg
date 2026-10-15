@@ -77,7 +77,14 @@ def test_live_ingest_and_conflicts_do_not_hide_operational_cooldown(worker):
     with s.pool.connection() as c:
         status=get_sync_status(c,{'accounts':[w.account],'chat_ids':None})['sources'][0]
     assert status['status']=='degraded' and status['detail_code']=='rate_limited'
-    assert status['archive_detail_code']=='version_conflict' and status['last_ingest_at']
+    assert status['last_ingest_at']
+    # Ingest keeps the stored conflict code; with no unresolved conflict it is
+    # reported as unreconciled coverage rather than a live conflict alert.
+    assert status['archive_detail_code']=='coverage_not_reconciled' and status['active_conflicts']==0
+    assert 'archive_version_conflicts' not in status['alerts']
+    with s.pool.connection() as c:
+        stored=c.execute('SELECT detail_code FROM source_status WHERE account=%s',(w.account,)).fetchone()
+    assert stored['detail_code']=='version_conflict'
     w.state.status('stopped','requires_reconciliation')
     assert w.state.cooldown_remaining()>0  # Graceful stop must not erase provider wait.
 

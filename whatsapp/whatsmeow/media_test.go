@@ -400,3 +400,21 @@ func TestNativeMediaKeepaliveWriteFailureStopsTransfer(t *testing.T) {
 	}, func([]byte) error { return errors.New("provider_response_too_large") })
 	requireError(t, err, "provider_response_too_large")
 }
+func TestNativeMediaUnwritableStorageIsNotANetworkError(t *testing.T) {
+	data := []byte("synthetic-only")
+	req, cfg, m := mediaFixture(t, data)
+	createMediaTemp = func(string, string) (*os.File, error) { return nil, os.ErrPermission }
+	t.Cleanup(func() { createMediaTemp = os.CreateTemp })
+	downloads := 0
+	err := downloadMedia(context.Background(), req, cfg, mediaPolicy, mediaGet(m), func(context.Context, whatsmeow.DownloadableMessage, whatsmeow.File) error {
+		downloads++
+		return nil
+	}, func([]byte) error { return nil })
+	requireError(t, err, "media_storage_unavailable")
+	if downloads != 0 {
+		t.Fatal("provider download started without local storage")
+	}
+	if safeError(err) != "media_storage_unavailable" {
+		t.Fatal("storage error not in the safe vocabulary")
+	}
+}

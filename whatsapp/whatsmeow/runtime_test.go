@@ -893,3 +893,38 @@ func TestHistoryDecompressionRejectsBombAndCorruptPayload(t *testing.T) {
 		t.Fatal("truncated zlib accepted")
 	}
 }
+
+func TestDialogsMarkOwnerLIDChatAsSelfChat(t *testing.T) {
+	s := openTestStore(t)
+	s.OwnerLID = types.NewJID("999900002222", types.HiddenUserServer)
+	at := time.Now().UTC().Format(time.RFC3339Nano)
+	for _, chat := range []string{"999900002222@lid", "999900003333@lid", "123456@c.us", "777777@c.us"} {
+		if _, e := s.db.Exec("INSERT INTO chats(chat,title,observed_at)VALUES(?,?,?)", chat, chat, at); e != nil {
+			t.Fatal(e)
+		}
+	}
+	rows, e := s.Dialogs(10, Policy{Enabled: true, DiscoverChats: true, IncludeChats: []string{}, ExcludeChats: []string{}})
+	if e != nil {
+		t.Fatal(e)
+	}
+	got := map[string]any{}
+	for _, row := range rows {
+		v := row.([]any)
+		got[v[0].(string)] = v[4].(map[string]any)["is_self_chat"]
+	}
+	want := map[string]any{"999900002222@lid": true, "999900003333@lid": false, "123456@c.us": true, "777777@c.us": false}
+	for chat, self := range want {
+		if got[chat] != self {
+			t.Fatalf("%s is_self_chat=%v, want %v", chat, got[chat], self)
+		}
+	}
+	// Without a known owner LID, a LID chat stays unknown rather than guessed.
+	s.OwnerLID = types.EmptyJID
+	rows, _ = s.Dialogs(10, Policy{Enabled: true, DiscoverChats: true, IncludeChats: []string{}, ExcludeChats: []string{}})
+	for _, row := range rows {
+		v := row.([]any)
+		if v[0] == "999900002222@lid" && v[4].(map[string]any)["is_self_chat"] != nil {
+			t.Fatal("owner LID guessed without identity evidence")
+		}
+	}
+}

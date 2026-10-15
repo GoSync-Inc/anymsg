@@ -299,3 +299,24 @@ def test_filesystem_capacity_errors_are_local_pauses(worker,error_number):
     with s.pool.connection() as c:
         assert c.execute('SELECT state,attempts,error_code FROM media_jobs WHERE account=%s',(w.account,)).fetchone()=={
             'state':'queued','attempts':0,'error_code':'paused_storage'}
+
+
+@pytest.mark.parametrize('failure,expected', [
+    (PermissionError(errno.EACCES, 'synthetic permission denied', '/synthetic/originals/.pending-x'),
+     ('queued', 0, 'storage_unavailable')),
+    (OSError(errno.EROFS, 'synthetic read-only filesystem'), ('queued', 0, 'storage_unavailable')),
+    (RuntimeError('media_storage_unavailable'), ('queued', 0, 'storage_unavailable')),
+    (ConnectionResetError(errno.ECONNRESET, 'synthetic reset'), ('queued', 1, 'network_error')),
+])
+def test_local_storage_failures_are_not_network_errors_and_keep_attempts(worker, failure, expected):
+    w,s,_=worker
+    w.retry_connect=True  # Native provider codes pass through as reported.
+    asyncio.run(w.capture(SimpleNamespace(message=message(9,media=True))));w.spool.drain(w.state.apply)
+    async def chunks(*_):
+        raise failure
+        yield b'data'
+    w.provider.chunks=chunks
+    assert asyncio.run(w.media_once())
+    with s.pool.connection() as c:
+        row=c.execute('SELECT state,attempts,error_code FROM media_jobs WHERE account=%s',(w.account,)).fetchone()
+    assert (row['state'],row['attempts'],row['error_code'])==expected

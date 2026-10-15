@@ -234,9 +234,10 @@ def test_page_failure_leaves_checkpoint_and_durable_captures_for_replay(worker):
     w.state.apply=fail_second
     with pytest.raises(RuntimeError,match='database_down'): asyncio.run(w.sync_once())
     assert not w.state.chat('100','user')['initialized']
-    # The committed first message left the spool; the failed one waits for replay.
-    assert len(list(w.spool.path.glob('*.json')))==1
-    w.state.apply=original; w.spool.drain(w.state.apply)
+    # Committed history leaves its spool; failed history stays outside live capture.
+    assert not list(w.spool.path.glob('*.json'))
+    assert len(list(w.history_spool.path.glob('*.json')))==1
+    w.state.apply=original; w.history_spool.drain(w.state.apply)
     asyncio.run(w.sync_once())
     assert len(s.search(key)['items'])==2 and w.state.chat('100','user')['high_water']==5
 

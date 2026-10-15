@@ -211,7 +211,7 @@ func downloadMedia(ctx context.Context, req mediaRequest, cfg Config, policy fun
 	}
 	var disk syscall.Statfs_t
 	if err = syscall.Statfs(root, &disk); err != nil {
-		return errors.New("media_network_error")
+		return errors.New("media_storage_unavailable")
 	}
 	reserve := cfg.DiskReserveBytes
 	if reserve < 0 {
@@ -225,14 +225,14 @@ func downloadMedia(ctx context.Context, req mediaRequest, cfg Config, policy fun
 	if err != nil {
 		return err
 	}
-	tmp, err := os.CreateTemp(tmpRoot, ".native-media-")
+	tmp, err := createMediaTemp(tmpRoot, ".native-media-")
 	if err != nil {
-		return errors.New("media_network_error")
+		return errors.New("media_storage_unavailable")
 	}
 	defer os.Remove(tmp.Name())
 	defer tmp.Close()
 	if err = tmp.Chmod(0600); err != nil {
-		return errors.New("media_network_error")
+		return errors.New("media_storage_unavailable")
 	}
 	if err = check(); err != nil {
 		return err
@@ -251,18 +251,18 @@ func downloadMedia(ctx context.Context, req mediaRequest, cfg Config, policy fun
 		}
 		info, err := tmp.Stat()
 		if err != nil {
-			return errors.New("media_network_error")
+			return errors.New("media_storage_unavailable")
 		}
 		if info.Size() != meta.Bytes {
 			return errors.New("media_size_mismatch")
 		}
 		if _, err = tmp.Seek(0, io.SeekStart); err != nil {
-			return errors.New("media_network_error")
+			return errors.New("media_storage_unavailable")
 		}
 		h := sha256.New()
 		// Read through the wrapper: local hashing is progress for the watchdog.
 		if _, err = io.Copy(h, file); err != nil {
-			return errors.New("media_network_error")
+			return errors.New("media_storage_unavailable")
 		}
 		if !bytes.Equal(h.Sum(nil), meta.Payload.GetFileSHA256()) {
 			return errors.New("media_hash_mismatch")
@@ -277,7 +277,7 @@ func downloadMedia(ctx context.Context, req mediaRequest, cfg Config, policy fun
 		return err
 	}
 	if _, err = tmp.Seek(0, io.SeekStart); err != nil {
-		return errors.New("media_network_error")
+		return errors.New("media_storage_unavailable")
 	}
 	buffer := make([]byte, 64*1024)
 	for {
@@ -297,7 +297,7 @@ func downloadMedia(ctx context.Context, req mediaRequest, cfg Config, policy fun
 			return nil
 		}
 		if readErr != nil {
-			return errors.New("media_network_error")
+			return errors.New("media_storage_unavailable")
 		}
 	}
 }
@@ -367,6 +367,9 @@ func watchMediaDownload(ctx context.Context, cancel context.CancelFunc, file *bo
 		return emitErr
 	}
 }
+
+// createMediaTemp is replaceable only so tests can simulate unwritable storage.
+var createMediaTemp = os.CreateTemp
 
 func ensureSafeMediaRoot(root string) error {
 	if root == "" || !filepath.IsAbs(root) {

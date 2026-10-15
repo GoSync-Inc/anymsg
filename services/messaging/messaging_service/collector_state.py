@@ -135,11 +135,12 @@ class CollectorState:
             remaining=max(0,(datetime.fromisoformat(deadline)-row['observed']).total_seconds()) if deadline else 0
             return {'blocked':phase.get('state')=='blocked','remaining_seconds':remaining}
 
-    def capture_progress(self,last,count,pending,*,quarantined=None,invalid=0):
+    def capture_progress(self,last,count,pending,*,quarantined=None,invalid=0,history_pending=None):
         if type(count) is not int or count<0 or type(pending) is not int or not 0<=pending<=20000:
             raise ValueError('invalid_capture_progress')
         if (quarantined is not None and (type(quarantined) is not int or not 0<=quarantined<=20000)
-                or type(invalid) is not int or invalid<0):
+                or type(invalid) is not int or invalid<0
+                or history_pending is not None and (type(history_pending) is not int or not 0<=history_pending<=20000)):
             raise ValueError('invalid_capture_progress')
         capture=validate_capture(last) if last is not None else None
         with self.archive.store.pool.connection() as c:
@@ -165,6 +166,8 @@ class CollectorState:
             self._phase(value,'live_capture','backlogged' if pending else 'receiving',
                 'capture_draining' if pending else 'capture_quarantined' if held else 'capture_ready',now,
                 'inspect_capture_quarantine' if held and not pending else None,**extra)
+            if history_pending is not None:
+                value['history']={**value.get('history',{}),'pending_events':history_pending}
             self._save_operations(c,value)
 
     def policy(self):

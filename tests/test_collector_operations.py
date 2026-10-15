@@ -32,6 +32,24 @@ def test_history_gap_does_not_mark_connection_or_live_capture_failed(wa):
     assert row['history']['full_history_verified'] is False
 
 
+def test_history_pages_do_not_make_a_quiet_live_session_look_backlogged(wa):
+    w,s,_=wa
+    w.state.phase('connection','connected','provider_ready')
+    w.state.phase('live_capture','receiving','capture_ready')
+    w.state.capture_progress(None,0,0,history_pending=40)
+    row=source(w,s)
+    assert row['operations']['live_capture']['state']=='receiving'
+    assert row['operations']['history']['pending_events']==40
+    assert row['liveness']['state']=='idle_connected' and row['liveness']['quiet_but_healthy'] is True
+    item=capture(event(30));w.state.apply(item);w.state.capture_progress(item,1,0)
+    assert source(w,s)['liveness']['state']=='receiving'
+    w.state.capture_progress(None,0,3)
+    assert source(w,s)['liveness']['state']=='capture_backlogged'
+    # Chat-restricted readers never receive account-wide session health.
+    from messaging_service.envelope import stable_id
+    assert 'liveness' not in source(w,s,[stable_id('chat',w.account,'123@c.us')])
+
+
 def test_connection_failure_survives_restart_and_normal_status_updates(wa):
     w,s,_=wa
     w.state.connection_failed('whatsapp_logged_out')

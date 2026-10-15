@@ -275,6 +275,8 @@ def render(method, result, detail):
         for source in result['sources']:
             row={k:source[k] for k in ('account','platform','status','detail_code',
                 'archive_detail_code','oldest_message_at','newest_message_at','last_ingest_at','alerts') if k in source}
+            # The compact budget carries only the live verdict; full detail has the evidence.
+            if 'liveness' in source:row['liveness_state']=source['liveness']['state']
             row['freshness']={k:v for k,v in source.get('freshness',{}).items()
                 if k in ('state','scan_state','last_successful_scan_at','scan_age_seconds','basis',
                     'pending_capture_events','last_capture_commit_at','qualifications')

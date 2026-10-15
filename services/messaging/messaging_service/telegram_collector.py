@@ -299,8 +299,19 @@ class TelegramCollector:
         self.lease_ttl,self.heartbeat_interval=lease_ttl,heartbeat_interval
         self.state=None; self.stopping=asyncio.Event(); self.failed=asyncio.Event()
         self.capture_count=0; self.failure_code=None; self.policy=None
-        self._dialog_cache=None; self._next_discovery=0
+        self._dialog_cache=None; self._next_discovery=0; self._history_spool=None
         self.invalid_messages=0; self._lease_valid_until=None
+
+    @property
+    def history_spool(self):
+        # Replayed history pages keep capture durability, but a pending page is
+        # not live capture lag. Created lazily beside the live spool.
+        if getattr(self,'_history_spool',None) is None:
+            from .spool import DurableSpool
+            live=self.spool
+            self._history_spool=DurableSpool(live.path/'history',validator=live.validator,
+                max_bytes=live.max_bytes,max_entries=live.max_entries,reserve_bytes=live.reserve_bytes)
+        return self._history_spool
 
     def fail(self,code):
         self.failure_code=code; self.failed.set()
@@ -380,10 +391,10 @@ class TelegramCollector:
                 # One unstorable message must not stop history for the chat or account.
                 self.invalid_messages+=1; ids.append(message.id); continue
             item={'kind':'message','peer_kind':kind,'envelope':e}
-            name=await asyncio.to_thread(self.spool.put,item)
+            name=await asyncio.to_thread(self.history_spool.put,item)
             await asyncio.to_thread(self.state.apply,item)
             # Committed directly; draining the same bytes again would only repeat the work.
-            await asyncio.to_thread(self.spool.discard,name)
+            await asyncio.to_thread(self.history_spool.discard,name)
             ids.append(message.id)
         return ids
 
@@ -492,7 +503,7 @@ class TelegramCollector:
         from psycopg_pool import PoolTimeout
         while True:
             try:
-                await self.drain_captures([self.spool])
+                await self.drain_captures([self.spool],[self.history_spool])
                 await asyncio.to_thread(self.state.apply_tombstones)
             except (psycopg.OperationalError,PoolTimeout):
                 # Capture remains durable; the independent heartbeat stops the
@@ -500,21 +511,25 @@ class TelegramCollector:
                 await asyncio.sleep(1)
             await asyncio.sleep(.25)
 
-    async def drain_captures(self,spools):
+    async def drain_captures(self,spools,history_spools=()):
         last=None;count=0
         def apply(item):
             nonlocal last,count
             self.state.apply(item);last=item;count+=1
         for spool in spools:await asyncio.to_thread(spool.drain,apply,100)
+        # History pages were applied inline when fetched. Replaying them is
+        # idempotent and is neither live progress nor live backlog.
+        for spool in history_spools:await asyncio.to_thread(spool.drain,self.state.apply,100)
         publish=getattr(self.state,'publish_receipts',None)
         if callable(publish):await asyncio.to_thread(publish,limit=100)
         if count or time.monotonic()>=getattr(self,'_next_capture_status',0):
-            pending=await asyncio.to_thread(lambda:sum(sum(1 for _ in s.path.glob('*.json')) for s in spools))
-            owned=[*spools,*([self.send_receipts] if getattr(self,'send_receipts',None) is not None else [])]
+            def pending(group):return min(20000,sum(sum(1 for _ in s.path.glob('*.json')) for s in group))
+            extra={'history_pending':await asyncio.to_thread(pending,history_spools)} if history_spools else {}
+            owned=[*spools,*history_spools,*([self.send_receipts] if getattr(self,'send_receipts',None) is not None else [])]
             quarantined=await asyncio.to_thread(lambda:sum(s.quarantined() for s in owned))
             invalid,self.invalid_messages=self.invalid_messages,0
-            await asyncio.to_thread(self.state.capture_progress,last,count,min(20000,pending),
-                quarantined=min(20000,quarantined),invalid=invalid)
+            await asyncio.to_thread(self.state.capture_progress,last,count,await asyncio.to_thread(pending,spools),
+                quarantined=min(20000,quarantined),invalid=invalid,**extra)
             self._next_capture_status=time.monotonic()+15
 
     async def renew_lease(self):
@@ -598,6 +613,10 @@ class TelegramCollector:
             elif str(exc)=='disk_reserve': code,permanent='disk_reserve',False
             elif isinstance(exc,OSError) and exc.errno in (errno.ENOSPC,errno.EDQUOT):
                 code,permanent='disk_reserve',False
+            elif isinstance(exc,OSError) and (exc.filename is not None or exc.errno==errno.EROFS):
+                # A missing directory, permission or read-only mount is local
+                # storage, not the provider network.
+                code,permanent='storage_unavailable',False
             elif str(exc) in ('media_size_mismatch','media_hash_mismatch','blob_corrupt'):
                 code,permanent='integrity_error',False
             else: code,permanent='network_error',False
