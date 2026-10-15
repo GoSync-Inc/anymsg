@@ -105,12 +105,14 @@ def _files(c, p, *, group_by_chat=False):
             JOIN messages m ON m.id=j.message AND m.account=j.account
             WHERE NOT m.deleted AND '''+where+' GROUP BY '+key+',j.state', args):
         downloads.setdefault(row['account'], {})[row['state']] = row['count']
-    errors={}
-    for row in c.execute('SELECT '+key+''' AS account,j.error_code,count(*) AS count FROM media_jobs j
+    errors={};error_states={}
+    for row in c.execute('SELECT '+key+''' AS account,j.error_code,j.state,count(*) AS count FROM media_jobs j
         JOIN messages m ON m.id=j.message AND m.account=j.account WHERE NOT m.deleted
         AND j.state IN ('queued','leased','failed') AND j.error_code IS NOT NULL AND '''+where+
-        ' GROUP BY '+key+',j.error_code',args):
-        errors.setdefault(row['account'],{})[row['error_code']]=row['count']
+        ' GROUP BY '+key+',j.error_code,j.state',args):
+        account_errors=errors.setdefault(row['account'],{})
+        account_errors[row['error_code']]=account_errors.get(row['error_code'],0)+row['count']
+        error_states.setdefault(row['account'],{}).setdefault(row['error_code'],{})[row['state']]=row['count']
     # Count current occurrences, not global digests. Stale extraction/enrichment
     # rows must never inflate ready counts or expose another chat's derived state.
     indexed = c.execute('SELECT '+key+''' AS account,
@@ -144,9 +146,11 @@ def _files(c, p, *, group_by_chat=False):
         item['extraction_truncated'] += row['extraction_truncated']
         item['enrichment_truncated'] += row['enrichment_truncated']
     for account in downloads:
-        files.setdefault(account,{'stored_files':0,'stored_bytes':0,
+        item=files.setdefault(account,{'stored_files':0,'stored_bytes':0,
             'extraction':dict.fromkeys(EXTRACTION_STATES,0),'enrichment':dict.fromkeys(ENRICHMENT_STATES,0),
-            'extraction_truncated':0,'enrichment_truncated':0})['download_errors']=errors.get(account,{})
+            'extraction_truncated':0,'enrichment_truncated':0})
+        item['download_errors']=errors.get(account,{})
+        item['download_error_states']=error_states.get(account,{})
     return downloads, files
 
 
@@ -190,9 +194,7 @@ def get_sync_status(c, p):
         if not scoped:
             row['detail']=describe(row.get('detail_code'))
             row['archive_detail']=describe(row.get('archive_detail_code'))
-            row['freshness']=freshness(row['history'].get('last_scan_at'))
             row['alerts']=[]
-            if row['freshness']['state']=='scan_stale':row['alerts'].append('successful_scan_older_than_5_minutes')
             if row['history'].get('gap_chats'):row['alerts'].append('provider_history_gaps')
             if row.get('archive_detail_code')=='version_conflict':row['alerts'].append('archive_version_conflicts')
         row['files'] = files.get(account, {'stored_files': 0, 'stored_bytes': 0,
@@ -202,6 +204,10 @@ def get_sync_status(c, p):
         row['files']['download'] = {**dict.fromkeys(DOWNLOAD_STATES, 0), **downloads.get(account, {})}
         if not scoped:
             row['operations']=operations(row,row['history'],row['files'])
+            row['freshness']=freshness(row['history'].get('last_scan_at'),operational=row['operations'])
+            if row['freshness']['scan_state']=='scan_stale':row['alerts'].append('successful_scan_older_than_5_minutes')
+            if row['freshness']['state']=='capture_backlogged':row['alerts'].append('capture_backlog')
+            if row['freshness']['state']=='collector_not_running':row['alerts'].append('collector_not_running')
             row['processing_profiles']=c.execute('''SELECT kind,provider,model,enabled AS configured,
                 observed_at,expires_at,expires_at>clock_timestamp() AND enabled AS worker_current,
                 pause_reason,paused_until

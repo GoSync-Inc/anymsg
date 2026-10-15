@@ -76,7 +76,7 @@ def test_explicit_sources_add_to_bindings_and_block_busy_intervals(household, ac
     )
     assert result["source_selection"]["calendar_refs"] == ["cal-a", "cal-b"]
     assert result["source_selection"]["scope"] == "configured_and_explicit_sources_only"
-    assert result["verified_slots"] == [
+    assert result["candidate_slots"] == [
         {"start": "2026-10-19T08:00:00+00:00", "end": "2026-10-19T09:00:00+00:00"},
         {"start": "2026-10-19T10:00:00+00:00", "end": "2026-10-19T12:00:00+00:00"},
     ]
@@ -117,6 +117,9 @@ async def test_refresh_coalesces_and_passive_poll_waits_for_worker(household, ac
     passive = await gateway.call(access, "slots", dict(args, refresh=False))
     assert passive["availability"] == "unknown" and passive["verified_slots"] == []
     assert passive["refresh"]["status"] == "pending"
+    assert passive["configured_sources_complete"] is False
+    assert passive["configured_bindings_availability"] == "unknown"
+    assert passive["candidate_slots"] == []
 
     class Provider:
         async def read_window(self, cal, start, end):
@@ -124,7 +127,7 @@ async def test_refresh_coalesces_and_passive_poll_waits_for_worker(household, ac
 
     await Worker(household, Provider()).sync_one()
     final = await gateway.call(access, "slots", dict(args, refresh=False))
-    assert final["required_sources_complete"] and final["availability"] == "verified"
+    assert final["configured_sources_complete"] and final["availability"] == "unknown"
     assert household.one("SELECT count(*) AS n FROM sync_jobs")["n"] == 1
 
 
@@ -164,8 +167,8 @@ async def test_passive_poll_reads_data_after_concurrent_refresh_finishes(househo
         "slots",
         {"member_ids": ["adult-a"], "start": START, "end": END, "duration_minutes": 60, "refresh": False},
     )
-    assert result["required_sources_complete"] and result["availability"] == "verified"
-    assert result["verified_slots"] == []
+    assert result["configured_sources_complete"] and result["availability"] == "unknown"
+    assert result["candidate_slots"] == []
 
 
 @pytest.mark.asyncio
@@ -276,4 +279,5 @@ def test_rest_and_mcp_include_explicit_sources_with_identical_busy_slots(househo
         )
         assert rest.status_code == 200
         assert rest.json() == mcp.json()["result"]["structuredContent"]
-        assert len(rest.json()["verified_slots"]) == 2
+        assert len(rest.json()["candidate_slots"]) == 2
+        assert rest.json()["availability"] == "unknown" and rest.json()["verified_slots"] == []

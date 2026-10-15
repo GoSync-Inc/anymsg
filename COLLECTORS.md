@@ -35,6 +35,13 @@ fsync, очередь БД и время самого запроса агент�
 догоняющие события; `origin=live` не доказывает отсутствие такой задержки.
 Stateless MCP не будит простаивающего агента: клиент должен вызвать чтение/updates.
 
+Account sync freshness keeps successful scan age in `scan_state`, separately
+from live capture state. Pending spool captures report `capture_backlogged`; an
+expired collector lease reports `collector_not_running`, even after a recent
+history scan. An old last commit with zero pending captures is not evidence of
+lag on a quiet source. Media storage pauses qualify original availability
+independently. Chat-restricted readers receive no account-wide collector state.
+
 Owner mentions сохраняются по Telegram `mentioned` или совпадению WhatsApp
 mentioned IDs с cached phone/LID identities текущего авторизованного аккаунта.
 У WhatsApp quoted participant тоже может подтвердить ответ владельцу. Capture

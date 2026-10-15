@@ -35,6 +35,10 @@ JOIN = '''FROM attachment_text f JOIN attachments a ON a.id=f.attachment
     JOIN messages m ON m.id=a.message'''
 COLUMNS = '''a.id AS attachment_id,a.message AS message_id,a.filename,a.mime,a.bytes,
     a.digest AS sha256,m.account,m.chat,m.sender,m.sent_at,m.revision,m.direction,
+    m.provider_id AS provider_message_id,
+    (SELECT platform FROM accounts WHERE id=m.account) AS provider_platform,
+    (SELECT metadata->>'media_kind' FROM message_metadata
+        WHERE message=m.id AND revision=m.revision) AS media_kind,
     f.state AS status,f.extractor,f.truncated,f.error_code,f.indexed_at,
     f.processor_version,(f.extraction_metadata-'page_spans'-'sheet_spans'-'cell_spans') AS extraction_metadata,
     length(f.text_content) AS text_chars'''
@@ -68,7 +72,25 @@ def file_response_fields(row, *, download_status='ready', extraction_status=None
     """Add independent states without changing legacy filename/status fields."""
     source = row.get('filename') or ''
     state = extraction_status or row.get('status', 'not_queued')
-    return {**row, 'source_filename': source, 'display_name': display_name(source),
+    name=display_name(source)
+    basis='source_filename'
+    # Native WhatsApp non-document captures have no provider filename. Require
+    # the current source kind, account platform and exact generated reference;
+    # a matching filename alone is not proof, even on a WhatsApp document.
+    extension={'image/jpeg':'.jpg','image/png':'.png','image/gif':'.gif',
+        'image/webp':'.webp','video/mp4':'.mp4','audio/ogg':'.ogg',
+        'application/ogg':'.ogg','audio/mpeg':'.mp3','application/pdf':'.pdf'}.get(row.get('mime'))
+    provider_id=row.get('provider_message_id')
+    fallback=(row.get('provider_platform')=='whatsapp' and isinstance(provider_id,str)
+        and row.get('media_kind') in ('photo','video','audio','voice','sticker')
+        and source==provider_id[:120]+'.bin'
+        and re.fullmatch(r'(?:true|false)_[0-9-]+@(?:c\.us|g\.us|lid)_[A-Za-z0-9_@.\-]+\.bin',source))
+    if extension and fallback:
+        identifier=re.sub('[^A-Za-z0-9_-]','_',str(row.get('attachment_id') or row.get('id') or 'file'))[:80]
+        name='attachment-'+identifier+extension
+        basis='generated_from_media_type'
+    return {**row, 'source_filename': source, 'display_name': name,
+        'display_name_basis':basis,'download_filename':name,
         'download_status': download_status,
         'extraction_status': 'processing' if state == 'leased' else state,
         'enrichment_status': enrichment_status,

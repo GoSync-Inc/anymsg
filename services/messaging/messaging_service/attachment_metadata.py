@@ -18,6 +18,13 @@ def processing_phases(c, row):
     if not row.get('digest'):
         return {}
     return c.execute('''SELECT coalesce(f.state,'unknown') AS extraction_status,
+        (SELECT platform FROM accounts WHERE id=m.account) AS provider_platform,
+        m.provider_id AS provider_message_id,
+        (SELECT metadata->>'media_kind' FROM message_metadata
+            WHERE message=m.id AND revision=m.revision) AS media_kind,
+        coalesce(length(f.text_content),0) AS text_chars,f.processor_version,
+        coalesce(f.truncated,false) AS truncated,
+        (f.extraction_metadata-'page_spans'-'sheet_spans'-'cell_spans') AS extraction_metadata,
         CASE WHEN coalesce(e.state,'unconfigured')='unconfigured' AND EXISTS(
             SELECT FROM processing_profiles pp WHERE pp.account=m.account AND pp.enabled
             AND pp.kind=CASE WHEN a.mime LIKE 'audio/%%' OR a.mime='application/ogg' THEN 'audio'
@@ -46,10 +53,16 @@ def attachment_fields(row, *, original_present=None):
     digest=row.get('digest') or row.get('sha256')
     registered=bool(row.get('id') and digest)
     state=row.get('job_state') or row.get('state') or row.get('status') or ('ready' if registered else 'unknown')
+    expired_transfer=state=='leased' and row.get('transfer_active') is False
+    if expired_transfer:
+        state='failed' if row.get('attempts',0)>=5 else 'queued'
+    diagnostic_state='failed' if state=='queued' and row.get('attempts',0)>=5 else state
     filename=row.get('filename') if row.get('filename') is not None else descriptor.get('filename')
     mime=row.get('mime') if row.get('mime') is not None else descriptor.get('mime')
     size=row.get('bytes') if row.get('bytes') is not None else descriptor.get('bytes')
     error=row.get('download_error_code') or row.get('error_code')
+    if expired_transfer and state=='failed':
+        error='retry_exhausted'
     until=row.get('requested_until')
     requested=isinstance(until,datetime) and until.tzinfo is not None and until>datetime.now(timezone.utc)
     request_state='requested' if requested else 'expired' if until is not None else 'not_requested'
@@ -64,14 +77,18 @@ def attachment_fields(row, *, original_present=None):
         reason=error or {'leased':'transfer_in_progress','ready':'original_not_registered'}.get(state,state)
         if error:
             phase='blocked' if error in ('paused_storage','disk_reserve','media_size_limit') else download_status
-            action=describe(error)['next_action']
+            action=describe(error,job_state=diagnostic_state)['next_action']
         else:
             action='get_attachment' if requested or state=='leased' else 'request_file_download' if state=='queued' else 'get_sync_status_for_chat'
     extraction=row.get('extraction_state',row.get('extraction_status','unknown')) if registered else 'awaiting_download'
     enrichment=row.get('enrichment_state',row.get('enrichment_status','unconfigured')) if registered else 'awaiting_download'
+    coverage={key:row[key] for key in ('text_chars','processor_version','truncated','extraction_metadata')
+        if registered and key in row}
+    provenance={key:row[key] for key in ('provider_platform','provider_message_id','media_kind') if key in row}
+    detail=describe(error,job_state=diagnostic_state) if error else None
     item=file_response_fields({'id':attachment_id,'attachment_id':attachment_id,
         'filename':filename,'mime':mime,'bytes':size,'sha256':digest if registered else None,
-        'digest':digest if registered else None,'error_code':error},
+        'digest':digest if registered else None,'error_code':error,**coverage,**provenance},
         download_status=download_status,extraction_status=extraction,
         enrichment_status={'leased':'processing','unconfigured':'not_configured'}.get(enrichment,enrichment))
     item.update(state=state,status='unavailable' if original_present is False and registered else state,
@@ -81,7 +98,8 @@ def attachment_fields(row, *, original_present=None):
         original_presence_verified=original_present is not None,
         original_available=original_present if registered else False if original_present is False else None,
         download_phase=phase,download_reason=reason,reason=reason,next_action=action,
-        download_request={'state':request_state,'until':until},error_detail=describe(error) if error else None)
+        download_request={'state':request_state,'until':until},error_detail=detail,
+        download_retry_scheduled=bool(detail and detail.get('retry_scheduled')))
     for key in ('attempts','next_due'):
         if key in row:item[key]=row[key]
     source={}

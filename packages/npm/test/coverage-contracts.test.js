@@ -35,9 +35,16 @@ const actions={
   getSubscription:{subscription_id:'sub_synthetic'},
   updateSubscription:{subscription_id:'sub_synthetic',version:2,action:'resume',resume_policy:'skip'},
   getSubscriptionEvents:{subscription_id:'sub_synthetic',after:17,limit:4},
+  fetchSubscriptionEvents:{subscription_id:'sub_synthetic',limit:4},
+  ackSubscriptionEvents:{subscription_id:'sub_synthetic',receipt:'r'.repeat(43),version:2},
+  waitForSubscriptionEvents:{subscription_id:'sub_synthetic',timeout:0.25,limit:4},
+  configureSubscriptionDelivery:{subscription_id:'sub_synthetic',version:2,receiver_id:null},
+  testSubscription:{subscription_id:'sub_synthetic',request_id:'synthetic-probe'},
+  submitFeedback:{request_id:'synthetic-feedback',category:'quality',description:'Synthetic issue'},
+  listFeedback:{limit:4},
 };
 const defaults=new Set(['capabilities','listChats','search','searchPeople','searchFiles',
-  'getSyncStatus','getUpdates','listSubscriptions']);
+  'getSyncStatus','getUpdates','listSubscriptions','listFeedback']);
 const camel=operation=>operation.replace(/_([a-z])/g,(_,letter)=>letter.toUpperCase());
 
 test('every public convenience helper delegates the exact operation and retains server JSON',async()=>{
