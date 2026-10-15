@@ -58,7 +58,7 @@ Reverse-engineered specs are candidates for review. Check API arguments, state
 semantics, schema versions and deployment exceptions against the implementation;
 a source-file anchor does not guarantee that every sentence is accurate.
 Implemented baseline contracts use `Active`. New work uses an explicit change
-intent or roadmap; do not confuse `Backlog` with missing test coverage or set
+intent or [BACKLOG.md](BACKLOG.md); do not confuse `Backlog` with missing test coverage or set
 `Done` merely because a related test passes.
 
 Review spec and test-link changes in the matching Tiden branch before merging
