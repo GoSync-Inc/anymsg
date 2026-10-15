@@ -177,8 +177,17 @@ def publish(directory: Path, manifest: dict, branch: str, product: str, cli: str
 
     branches = call(["branch", "list"], "branches")["branches"]
     expected = next((b["id"] for b in branches if b["name"] == branch), None)
-    if not expected and not routed:
-        raise ValueError("Mapped Tiden branch does not exist; refusing unassociated results")
+    if not expected and routed:
+        # Tiden skips live-doc sync for a branch name it does not know, so create it first.
+        try:
+            call(["branch", "create", "--name", branch,
+                  "--description", "CI evidence for Git branch " + branch], "branch-create")
+        except (RuntimeError, ValueError):
+            pass  # A concurrent run may have created it; the listing below decides.
+        branches = call(["branch", "list"], "branches-created")["branches"]
+        expected = next((b["id"] for b in branches if b["name"] == branch), None)
+    if not expected:
+        raise ValueError("Tiden branch does not exist; refusing unassociated results")
     run = call(["run", "create", "--branch", branch, "--intent-session", "none",
                 "--build-sha", manifest["sha"], "--environment", "github-actions-synthetic",
                 "--title", f"GitHub CI {manifest['sha'][:12]}", "--description", manifest["ci_url"],
@@ -207,13 +216,14 @@ def publish(directory: Path, manifest: dict, branch: str, product: str, cli: str
             if result.get("liveDocStatus") in {"succeeded", "failed", "skipped"}:
                 break
             time.sleep(3)
-        if routed and result.get("liveDocStatus") == "succeeded":
-            # Routing may create the branch, so read back the name behind the final ID.
+        if routed and result.get("liveDocStatus") == "succeeded" and result.get("branchId") != expected:
+            # Tiden may attribute the run to an intent branch linked to this Git branch.
             final = call(["branch", "list"], "branches-final")["branches"]
             expected = next((b["id"] for b in final if b["id"] == result.get("branchId")
                              and routed_target(b["name"], branch)), None)
         if result.get("liveDocStatus") != "succeeded" or not expected or result.get("branchId") != expected:
-            raise RuntimeError("Run recorded, but Tiden did not associate test evidence with the expected branch")
+            raise RuntimeError("Run recorded, but Tiden did not associate test evidence with the expected branch "
+                               f"(live doc {result.get('liveDocStatus')}, branch {result.get('branchId')})")
         if result.get("status") not in {"passed", "failed"}:
             raise RuntimeError("Tiden run has no terminal test verdict")
         check_count = len(CHECKS) + (len(MODULE_REPORTS) if "module_checks" in manifest else 0)

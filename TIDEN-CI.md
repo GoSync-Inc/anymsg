@@ -22,13 +22,14 @@ In GitHub Actions repository settings, add:
   `main` maps to Tiden `main` automatically.
 
 A mapping must name an existing Tiden branch and always wins. A feature branch
-without a mapping is reported under its own Git branch name. Tiden attributes
-that run to the intent branch whose session (`tiden intent start` on that Git
-branch) recorded it, otherwise to a Tiden branch of the same name. The publisher
-reads the result back and accepts only that same-named branch or an `intent/`
-branch, never `main`. Git branch names Tiden cannot use (uppercase, dots) still
-need a mapping. Do not label a feature run as `main` just to make the main gate
-green. Failed evidence association fails the reporting job. Without a token the
+without a mapping is reported under its own Git branch name. Tiden skips
+live-doc sync for a branch name it does not know, so the publisher first creates
+a Tiden branch of that name when none exists. Tiden may instead attribute the run
+to the intent branch whose session (`tiden intent start` on that Git branch)
+recorded it. The publisher reads the result back and accepts only that
+same-named branch or an `intent/` branch, never `main`. Git branch names Tiden
+cannot use (uppercase, dots) still need a mapping. Do not label a feature run as
+`main` just to make the main gate green. Failed evidence association fails the reporting job. Without a token the
 job clearly states that reporting is not configured. No workspace credentials
 belong in Git.
 

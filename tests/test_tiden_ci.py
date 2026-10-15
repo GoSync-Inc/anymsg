@@ -152,17 +152,25 @@ def test_unmapped_feature_branch_is_routed_under_its_own_git_branch_name():
 
 
 def routed_cli(monkeypatch, tmp_path, *, created="codex/feature", final_id="new-id",
-               final_branches=({"id": "new-id", "name": "codex/feature"},), live_doc="succeeded"):
+               final_branches=({"id": "new-id", "name": "codex/feature"},), live_doc="succeeded",
+               existing=(), creation="created"):
     import subprocess
     calls = []
-    listed = []
+    branches = [{"id": "main-id", "name": "main"}, *existing]
     def run(args, **kwargs):
         calls.append(args)
         command = args[1:3]
         if command == ["branch", "list"]:
-            # Tiden creates or picks the branch while it processes the run.
-            value = {"branches": [{"id": "main-id", "name": "main"}, *(final_branches if listed else ())]}
-            listed.append(True)
+            # Branches created while Tiden processes the run appear once the run exists.
+            ran = any(call[1:3] == ["run", "create"] for call in calls)
+            value = {"branches": [*branches, *(final_branches if ran else ())]}
+        elif command == ["branch", "create"]:
+            if creation != "refused":
+                # "raced": a concurrent CI run for the same Git branch created it first.
+                branches.append({"id": "new-id", "name": args[args.index("--name") + 1]})
+            if creation != "created":
+                return subprocess.CompletedProcess(args, 1, stdout="", stderr="")
+            value = branches[-1]
         elif command == ["run", "create"]:
             value = {"seqNum": 4, "branchName": created, "buildSha": "a" * 40}
         elif command == ["run", "get"]:
@@ -182,9 +190,31 @@ def routed_cli(monkeypatch, tmp_path, *, created="codex/feature", final_id="new-
 def test_routed_run_lands_on_the_same_named_branch_tiden_creates(tmp_path, monkeypatch):
     calls, manifest = routed_cli(monkeypatch, tmp_path)
     assert publish(tmp_path, manifest, "codex/feature", "product", routed=True)["branchId"] == "new-id"
+    branch = next(call for call in calls if call[1:3] == ["branch", "create"])
+    assert branch[branch.index("--name") + 1] == "codex/feature"
     creation = next(call for call in calls if call[1:3] == ["run", "create"])
+    assert calls.index(branch) < calls.index(creation)
     assert creation[creation.index("--branch") + 1] == "codex/feature"
     assert creation[creation.index("--intent-session") + 1] == "none"
+
+
+def test_routed_run_reuses_an_existing_same_named_branch(tmp_path, monkeypatch):
+    calls, manifest = routed_cli(monkeypatch, tmp_path, final_id="old-id", final_branches=(),
+                                 existing=({"id": "old-id", "name": "codex/feature"},))
+    assert publish(tmp_path, manifest, "codex/feature", "product", routed=True)["branchId"] == "old-id"
+    assert not any(call[1:3] == ["branch", "create"] for call in calls)
+
+
+def test_routed_run_tolerates_a_concurrent_branch_creation(tmp_path, monkeypatch):
+    _, manifest = routed_cli(monkeypatch, tmp_path, creation="raced")
+    assert publish(tmp_path, manifest, "codex/feature", "product", routed=True)["branchId"] == "new-id"
+
+
+def test_routed_run_refuses_when_no_tiden_branch_can_be_created(tmp_path, monkeypatch):
+    calls, manifest = routed_cli(monkeypatch, tmp_path, creation="refused")
+    with pytest.raises(ValueError, match="does not exist"):
+        publish(tmp_path, manifest, "codex/feature", "product", routed=True)
+    assert not any(call[1:3] == ["run", "create"] for call in calls)
 
 
 def test_routed_run_follows_the_intent_branch_tiden_attributes_it_to(tmp_path, monkeypatch):
