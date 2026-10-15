@@ -1,11 +1,11 @@
 import importlib
 
 from fastapi.testclient import TestClient
-from test_tasks import app, prepared, started, HEADERS
+from test_tasks import owner_headers, app, prepared, started, HEADERS
 
 
 def test_audio_health_result_accepts_bounded_counters_and_rejects_unrelated_data(tmp_path):
-    with TestClient(app(tmp_path)) as c:
+    with TestClient(app(tmp_path), headers=owner_headers(tmp_path)) as c:
         job=started(c,prepared(c))
         path=f'/api/calls/{job["id"]}/result'
         metrics={'audio_health':{'availability':'supported','samples':2,'packets_received':100,

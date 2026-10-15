@@ -14,6 +14,8 @@ from pydantic import BaseModel,ConfigDict,Field
 
 PROMPT_VERSION="2026-10-14.task-v7"
 MODEL="gemini-3.8-live"
+GROK_MODEL="grok-voice-3.0"
+GROK_VOICES=["eve","ara","rex","sal","leo"]
 VOICES=["Kore","Puck","Charon","Fenrir","Aoede","Leda","Orus","Zephyr"]
 ACTIVE={"waiting_for_browser","dialing","ringing","connecting","active"}
 
@@ -32,7 +34,8 @@ class BriefInput(BaseModel):
     custom_voice_id:str|None=Field(default=None,pattern=r'^voice_[A-Za-z0-9_]{4,100}$')
     voice_style:Literal['neutral','friendly']='neutral'
     conversation_mode:Literal['task','social']='task'
-    dialog_engine:Literal['gemini_live','gemini_live_flows']='gemini_live'
+    dialog_engine:Literal['gemini_live','gemini_live_flows','grok_realtime']='gemini_live'
+    grok_voice:Literal['eve','ara','rex','sal','leo']='rex'
     self_reference:Literal["feminine","masculine","neutral"]="masculine"
     max_duration_secs:int=Field(default=600,ge=30,le=600)
 
@@ -253,6 +256,12 @@ class VoiceService:
                           "status":"archive_observation","truncated":len(text)>3000})
         b.update(id=str(uuid.uuid4()),created_at=now(),version=1,channel=b.get('channel','browser'),facts=facts,
                  prompt_version=PROMPT_VERSION,model=MODEL)
+        if b.get('dialog_engine')=='grok_realtime':
+            if b['channel'] not in {'browser','phone','sip'}:
+                raise ServiceError('grok_browser_phone_sip_only',422)
+            if b.get('custom_voice_id'):
+                raise ServiceError('grok_native_voice_required',422)
+            b['model']=GROK_MODEL
         if b.get('dialog_engine')=='gemini_live_flows':
             from live_flow_prompt import VERSION
             if b['channel']!='browser':
@@ -266,7 +275,7 @@ class VoiceService:
             b['followup']=followup
         with self.lock:
             learned=self.learning.active_candidate() if use_learning else None
-        if learned and b.get('dialog_engine')!='gemini_live_flows':
+        if learned and b.get('dialog_engine')=='gemini_live':
             b['prompt_version']=learned['prompt_version']
             b['learned_instruction']=learned['instruction']
         b["prompt"]=build_prompt(b,b.get('learned_instruction',''))
@@ -884,6 +893,7 @@ class VoiceService:
                 voice=parent['voice'],self_reference=parent['self_reference'],
                 custom_voice_id=parent.get('custom_voice_id'),voice_style=parent.get('voice_style','neutral'),
                 conversation_mode=parent.get('conversation_mode','task'),
+                dialog_engine=parent.get('dialog_engine','gemini_live'),grok_voice=parent.get('grok_voice','rex'),
                 owner_notes=parent['owner_notes'],supervisor_notes=parent.get('supervisor_notes',''),
                 success_fields=['counterparty_response'],max_duration_secs=parent['max_duration_secs'])
             if parent.get('channel','browser')!='browser':
