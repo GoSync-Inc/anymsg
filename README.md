@@ -149,3 +149,5 @@ MIT for original GoSync code. Dependencies retain their own licenses; see
 [THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md) and `deploy/MOBY-LICENSE`.
 Report vulnerabilities privately through [GitHub security advisories](https://github.com/GoSync-Inc/anymsg/security/advisories/new),
 not by posting session data or tokens in an issue. See [SECURITY.md](SECURITY.md).
+
+Platform operations: [profiles, access, backup, cutover and rollback](docs/operations/platform-cutover.md).
