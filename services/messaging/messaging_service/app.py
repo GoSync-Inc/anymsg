@@ -301,7 +301,12 @@ def create_app(store: Store, allowed_hosts: list[str]):
             wait_s=validate_wait_s(arguments.pop('wait_s', 0))
             result=await run_in_threadpool(store.send_message,token,**arguments)
             if wait_s:
-                return await wait_for_send(store,token,result['send_id'],wait_s)
+                try:
+                    return await wait_for_send(store,token,result['send_id'],wait_s)
+                except APIError as error:
+                    # The send is already committed; a failed observation must not hide its send_id.
+                    if error.code not in ('send_wait_busy','send_status_timeout'):raise
+                    return {**result,'wait_timed_out':True,'wait_error':error.code}
             return result
         return await run_in_threadpool(getattr(store,method),token,**arguments)
 

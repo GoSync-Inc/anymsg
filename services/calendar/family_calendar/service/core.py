@@ -543,13 +543,21 @@ class FamilyService:
         after = step.get("event", {})
         fields = ("title", "start", "end", "timezone", "location", "description")
         diff = {}
+        update = step.get("action") == "update"
         for field in fields:
+            # Providers keep fields an update omits, and stored details carry no original
+            # timezone; neither may be shown as a change the apply would not make.
+            if update and (field not in after or field not in before):
+                continue
             old, new = before.get(field), after.get(field)
             equal = old == new
             if field in ("start", "end") and old and new:
                 equal = instant(old) == instant(new)
             if not equal:
                 diff[field] = {"before": old, "after": new}
+        if update and before.get("all_day"):
+            # Writes are always timed, so applying converts an all-day event.
+            diff["all_day"] = {"before": True, "after": False}
         return {
             **{k: v for k, v in step.items() if k not in ("target_id", "resource_ref", "expected_etag")},
             "diff": diff,
