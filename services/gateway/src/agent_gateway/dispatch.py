@@ -4,7 +4,7 @@ from platform_contracts import Capability, safe_error
 from .adapters.calls import receipt_reference
 
 from .catalog import arguments, CATALOG
-from .diagnostics import discovery, manifest_summary
+from .diagnostics import FAILURE_FIELDS, discovery, manifest_summary, unavailable
 from .policy import Denied, key_from_file
 
 CALENDAR_CONSTRAINTS = {
@@ -59,17 +59,19 @@ class Dispatch:
         action = tool.get("required_action")
         return not action or action in self.actions(snapshot, agent, caps, account)
 
-    async def backend_capabilities(self, snapshot, agent, module):
+    async def backend_capabilities(self, snapshot, agent, module, timeout=2):
         target = snapshot["deployment"]["backends"].get(module)
         if target != self.clients.deployment["backends"].get(module):
             raise Denied("backend_configuration_requires_restart", 503)
         binding = agent["credentials"][module]
         credential = key_from_file(binding["key_file"], binding["key_sha256"])
         try:
-            async with asyncio.timeout(2):
+            async with asyncio.timeout(timeout):
                 result = await self.clients.call(module, "capabilities", credential, {})
         except TimeoutError:
-            raise Denied("backend_unavailable", 503) from None
+            error = Denied("backend_unavailable", 503)
+            error.detail = {"error": "backend_unavailable", "reason": "capabilities_timeout"}
+            raise error from None
         permissions = result.get("permissions")
         if not isinstance(permissions, list) or not all(isinstance(p, str) for p in permissions):
             raise Denied("backend_capability_contract_unavailable", 503)
@@ -157,7 +159,15 @@ class Dispatch:
             raise Denied("backend_configuration_requires_restart", 503)
         binding = agent["credentials"][module]
         credential = key_from_file(binding["key_file"], binding["key_sha256"])
-        caps = await self.backend_capabilities(snapshot, agent, module)
+        read_only = tool.get("annotations", {}).get("readOnlyHint", False)
+        try:
+            # Discovery keeps a short bound; one call may wait for a busy pool.
+            caps = await self.backend_capabilities(snapshot, agent, module, timeout=6)
+        except Denied as error:
+            if error.code == "backend_unavailable":
+                error.detail = unavailable(tool["operation"], getattr(error, "detail", None),
+                                           phase="capabilities", read_only=read_only)
+            raise
         if not set(tool["scopes"]) <= set(caps["permissions"]):
             raise Denied()
         if (module == "messaging" and tool["operation"] == "get_updates"
@@ -190,15 +200,15 @@ class Dispatch:
                 else await self.clients.call(module, tool["operation"], credential, args)
             )
         except Denied as error:
-            if error.code in {"backend_unavailable", "backend_response_too_large"} and not tool.get(
-                "annotations", {}
-            ).get("readOnlyHint", False):
+            if error.code in {"backend_unavailable", "backend_response_too_large"} and not read_only:
                 diagnostics = getattr(error, "detail", {})
                 error.detail = {
                     **safe_error("mutation_outcome_unknown", unknown_outcome=True),
-                    **{key: diagnostics[key] for key in ("backend_error", "backend_status", "request_id")
-                       if key in diagnostics},
+                    **{key: diagnostics[key] for key in FAILURE_FIELDS if key in diagnostics},
                 }
+            elif error.code == "backend_unavailable":
+                error.detail = unavailable(tool["operation"], getattr(error, "detail", None),
+                                           phase="operation", read_only=True)
             raise
         if module == "calls":
             receipt_reference(tool["operation"], result)

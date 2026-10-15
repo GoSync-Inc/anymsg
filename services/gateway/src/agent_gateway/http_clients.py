@@ -158,5 +158,10 @@ class Clients:
                         )
                         raise error
                     return result
-            except (httpx.HTTPError, ValueError, TimeoutError):
-                raise Denied("backend_unavailable", 503) from None
+            except (httpx.HTTPError, ValueError, TimeoutError) as failure:
+                error = Denied("backend_unavailable", 503)
+                error.detail = {"error": "backend_unavailable", "reason":
+                    "gateway_timeout" if isinstance(failure, (TimeoutError, httpx.TimeoutException))
+                    else "invalid_backend_response" if isinstance(failure, ValueError)
+                    else "backend_connection_failed"}
+                raise error from None
