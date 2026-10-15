@@ -23,7 +23,7 @@ MAX_BYTES=20*1024**3
 
 def read_manifest(directory):
     import json
-    fd=os.open(Path(directory)/'manifest.json',os.O_RDONLY|os.O_NOFOLLOW)
+    fd=os.open(Path(directory)/'manifest.json',os.O_RDONLY|os.O_NOFOLLOW|os.O_NONBLOCK)
     with os.fdopen(fd,'rb') as f:
         info=os.fstat(f.fileno())
         if not stat.S_ISREG(info.st_mode) or info.st_size>64*1024**2:
@@ -61,7 +61,7 @@ def private_path(value):
 def cold_session_lock(session):
     # Read-only backup mounts must not create a root-owned lock that would later
     # prevent the unprivileged collector from opening its own session.
-    fd=os.open(str(session)+'.owner.lock',os.O_RDONLY|os.O_NOFOLLOW)
+    fd=os.open(str(session)+'.owner.lock',os.O_RDONLY|os.O_NOFOLLOW|os.O_NONBLOCK)
     try:
         info=os.fstat(fd)
         if not stat.S_ISREG(info.st_mode) or info.st_mode&0o077:raise ValueError('invalid_session_lock')

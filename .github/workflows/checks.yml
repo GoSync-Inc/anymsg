@@ -50,7 +50,7 @@ jobs:
       - uses: astral-sh/setup-uv@94527f2e458b27549849d47d273a16bec83a01e9 # v7
         with: {version: '0.9.26'}
       - name: Native extraction tools
-        run: sudo apt-get update && sudo apt-get install -y poppler-utils tesseract-ocr tesseract-ocr-eng tesseract-ocr-rus ffmpeg
+        run: sudo apt-get update && sudo apt-get install -y poppler-utils tesseract-ocr tesseract-ocr-eng tesseract-ocr-rus ffmpeg age
       - name: Install pinned dependencies
         run: uv sync --frozen --group dev
       - name: Build packages
@@ -81,6 +81,7 @@ jobs:
         id: python
         env:
           PROBE_TEST_DSN_FILE: ${{ runner.temp }}/anymsg-test.dsn
+          ANYMSG_TEST_POSTGRES_CONTAINER: ${{ job.services.postgres.id }}
           ANYMSG_TEST_WHEEL: ${{ github.workspace }}/dist/anymsg-${{ steps.build.outputs.version }}-py3-none-any.whl
           ANYMSG_TEST_SDIST: ${{ github.workspace }}/dist/anymsg-${{ steps.build.outputs.version }}.tar.gz
         run: |

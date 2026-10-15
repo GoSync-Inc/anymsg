@@ -66,7 +66,7 @@ both versions; a sender switch requires the new matching worker and host runner.
 1. Run `tests/test_backup*.py` with an isolated PostgreSQL test database. Run an
    actual pinned-age encrypt/decrypt and pg_dump/pg_restore drill with sessions,
    spool and settings fixtures in quarantine. Never send or activate restored
-   collectors. Current supported backup schema range is 2..21.
+   collectors. Current supported backup schema range is 2..27.
 2. Install the new root-owned `backup_receiver.py` on the existing backup host
    without changing the restricted key's shell/read/delete privileges. The forced
    command stays the same receiver invocation; it accepts v1/v2 from stdin and

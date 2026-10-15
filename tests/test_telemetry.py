@@ -173,8 +173,10 @@ def test_gateway_reports_unexpected_errors_only(channel, unexpected, monkeypatch
         with TestClient(create_app(Store(), ['testserver'])) as client:
             if channel == 'rest':
                 response = client.post('/v1/capabilities',json={},headers={'Authorization':'Bearer synthetic'})
-                # Preserve Starlette's already-started generic 500 response.
-                assert response.status_code == (500 if unexpected else 404)
+                # The server-error handler responds before Starlette's fallback.
+                assert response.status_code == (503 if unexpected else 404)
+                if unexpected:
+                    assert response.json()['error'] == 'temporarily_unavailable'
             else:
                 response = client.post('/mcp',json={'jsonrpc':'2.0','id':1,'method':'tools/call',
                     'params':{'name':'capabilities','arguments':{}}},headers={

@@ -10,6 +10,7 @@ import os
 from pathlib import Path
 import re
 import shutil
+import stat
 import subprocess
 import tempfile
 
@@ -139,7 +140,10 @@ def verify_bundle(directory,*,blob_root=None):
     if manifest.get('format') not in (1,2) or manifest.get('schema_version') not in range(2,28): raise ValueError('unsupported_backup')
     verify_recovery(directory,manifest)
     if (directory/'database.dump').is_symlink(): raise ValueError('invalid_backup_file')
-    with (directory/'database.dump').open('rb') as dump:
+    fd=os.open(directory/'database.dump',os.O_RDONLY|os.O_NOFOLLOW|os.O_NONBLOCK)
+    with os.fdopen(fd,'rb') as dump:
+        if not stat.S_ISREG(os.fstat(dump.fileno()).st_mode):
+            raise ValueError('invalid_backup_file')
         if hashlib.file_digest(dump,'sha256').hexdigest()!=manifest['dump_sha256']: raise RuntimeError('dump_corrupt')
     if (directory/'files').is_symlink(): raise ValueError('invalid_backup_file')
     writer=BlobWriter(blob_root if blob_root is not None else directory/'files',reserve_bytes=0); seen=set()

@@ -35,6 +35,12 @@ CMD ["python", "-m", "messaging_service.file_index"]
 
 FROM indexer AS test
 USER root
+# Contract tests inspect the same public deployment and workflow templates
+# distributed in the source checkout. No private files or Docker socket.
+COPY Dockerfile ./Dockerfile
+COPY deploy ./deploy
+COPY .github/workflows ./.github/workflows
+COPY scripts ./scripts
 COPY anymsg ./anymsg
 COPY pyproject.toml README.md LICENSE ./
 COPY --from=node-runtime /usr/local/bin/node /usr/local/bin/node
