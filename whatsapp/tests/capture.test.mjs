@@ -69,8 +69,44 @@ test('voice-note codec parameters normalize consistently for captures and media 
   const message={id:{fromMe:false,remote:'123@c.us',id:'VOICE'},fromMe:false,from:'123@c.us',
     timestamp:1800000000,body:'',hasMedia:true,_data:{size:10,mimetype:'Audio/Ogg; codecs=opus'}};
   assert.equal(event(message).mimetype,'audio/ogg');
+  // Untrusted control characters never reach the archive or abort capture.
   message._data.mimetype='audio/ogg; codecs=opus\r\nInjected: header';
-  assert.throws(()=>event(message),/invalid_provider_mime/);
+  assert.equal(event(message).mimetype,'application/octet-stream');
+  assert.ok(!JSON.stringify(event(message)).includes('Injected'));
+});
+
+test('sender-controlled fields are bounded to the archive envelope contract',()=>{
+  const base=()=>({id:{fromMe:false,remote:'123@c.us',id:'BOUNDS'},fromMe:false,from:'123@c.us',
+    timestamp:1800000000,body:'ok',hasMedia:true,type:'document',_data:{size:10,mimetype:'application/pdf',filename:'a.pdf'}});
+  const codePoints=value=>[...value].length;
+  let message=base();
+  message.body='\u{1F30D}'.repeat(70000);
+  message._data.notifyName='\u0000'+'\u{1F600}'.repeat(600)+'\ud800';
+  message._data.filename='я'.repeat(300)+'\u0000/\n.pdf';
+  message._data.quotedStanzaID='A'.repeat(257);message._data.quotedParticipant='123@c.us';
+  message._data.size=8*1024**3+1;
+  let e=event(message,undefined,['999@c.us']);
+  assert.equal(codePoints(e.body),65536);assert.ok(e.body.isWellFormed());
+  assert.equal(e.formatting.state,'unknown');assert.equal(e.formatting.wire_sha256,null);
+  assert.equal(codePoints(e.senderName),512);assert.ok(e.senderName.isWellFormed() && !e.senderName.includes('\0'));
+  assert.equal(codePoints(e.filename),255);assert.ok(e.filename.endsWith('.pdf') && !/[\x00-\x1f\x7f/\\]/.test(e.filename));
+  assert.equal(e.replyToId,null);assert.equal(e.replyToOwner,null);assert.equal(e.filesize,null);
+  message=base();message.body='a\u0000b';
+  e=event(message);
+  assert.equal(e.body,'ab');assert.equal(e.formatting.state,'unknown');
+  for(const [mime,want] of [['Image/JPEG; q=1','image/jpeg'],['text/plain\u0000','application/octet-stream'],
+      ['изображение/jpeg','application/octet-stream'],['a/'+'b'.repeat(200),'application/octet-stream']]) {
+    message=base();message._data.mimetype=mime;
+    assert.equal(event(message).mimetype,want);
+  }
+  message=base();message._data.size=8*1024**3;message._data.latestEditSenderTimestampMs=1799999999999;
+  e=event(message);
+  assert.equal(e.filesize,8*1024**3);assert.equal(e.editedTimestampMs,null);
+  assert.equal(e.formatting.state,'wire_observed');
+  message=base();message.timestamp=253402300800;
+  assert.throws(()=>event(message),/invalid_provider_time/);
+  message=base();message.id.id='X'.repeat(300);
+  assert.throws(()=>event(message),/invalid_provider_message/);
 });
 
 test('sender lookup uses only requested cached identities and does not fetch a contact book',async()=>{
