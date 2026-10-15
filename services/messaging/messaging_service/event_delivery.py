@@ -60,6 +60,8 @@ def validate_endpoint(endpoint, *, resolver=_addresses):
                 parsed.fragment or parsed.query or parsed.port not in (None, 443)):
             raise ValueError
         host = parsed.hostname.encode('idna').decode('ascii')
+        # The request line is ASCII-encoded at send time; reject paths that never could be.
+        (parsed.path or '/').encode('ascii')
         if host.endswith('.'):
             host = host[:-1]
         addresses = resolver(host, 443)
@@ -300,10 +302,12 @@ def dispatch_hints(store, *, limit=16, transport=_transport, resolver=_addresses
                         state, error = 'delivered', None
                     elif type(status) is int and 300 <= status < 400:
                         state, error = 'dead_letter', 'redirect_rejected'
+                except (OSError, TimeoutError):
+                    # Includes ssl.SSLCertVerificationError, which is also a ValueError:
+                    # a certificate problem can be transient and keeps the bounded retry budget.
+                    pass
                 except ValueError:
                     state, error = 'dead_letter', 'unsafe_receiver_configuration'
-                except (OSError, TimeoutError):
-                    pass
                 if state == 'pending' and hint['attempts'] + 1 >= 8:
                     state, error = 'dead_letter', 'delivery_budget_exhausted'
             c.execute('''UPDATE subscription_outbox SET state=%s,

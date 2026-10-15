@@ -12,7 +12,14 @@ def setup(household):
 
 
 def publish(
-    store, ref="cal-a", *, busy=True, start=START, end="2026-10-19T09:00:00Z", title="Private canary"
+    store,
+    ref="cal-a",
+    *,
+    busy=True,
+    start=START,
+    end="2026-10-19T09:00:00Z",
+    title="Private canary",
+    details=None,
 ):
     store.publish_window(
         ref,
@@ -29,7 +36,7 @@ def publish(
                         "ref": "event-" + ref,
                         "start": start,
                         "end": end,
-                        "details": {"title": title, "timezone": "UTC"},
+                        "details": details or {"title": title, "timezone": "UTC"},
                         "busy": busy,
                     }
                 ],
@@ -94,6 +101,21 @@ def test_plan_update_excludes_own_occurrence_and_shows_changed_fields(household)
     result = service.plan(key, [action])
     assert result["overlap_check"]["overlaps"] == []
     assert result["steps"][0]["diff"] == {"title": {"before": "Private canary", "after": "Proposed"}}
+
+
+def test_plan_update_diff_omits_kept_fields_and_shows_all_day_conversion(household):
+    service, key = setup(household)
+    # Provider details carry no timezone; omitted fields are kept by the provider.
+    publish(household, details={"title": "Dentist", "location": "Clinic", "all_day": True})
+    action = {
+        "action": "update",
+        "calendar_ref": "cal-a",
+        "event_ref": "event-cal-a",
+        "event": {"start": "2026-10-19T10:00:00Z", "end": "2026-10-19T11:00:00Z", "timezone": "UTC"},
+    }
+    diff = service.plan(key, [action])["steps"][0]["diff"]
+    assert set(diff) == {"start", "end", "all_day"}
+    assert diff["all_day"] == {"before": True, "after": False}
 
 
 def test_plan_multi_action_removes_deleted_and_reports_proposed_overlap(household):

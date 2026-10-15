@@ -84,3 +84,18 @@ def test_new_wire_bounds_reject_before_store(method,args):
         mcp=rpc(c,method,args)
     assert rest.status_code==400 and mcp.json()['error']['code']==-32602
     assert store.calls==[]
+
+def test_send_wait_failure_after_enqueue_keeps_send_id(monkeypatch):
+    from messaging_service import send_wait
+    from messaging_service.store import APIError
+    class Queued(Store):
+        def send_message(self,token,**params):
+            return {'send_id':'synthetic-send','status':'queued'}
+    async def busy(*args,**kwargs):
+        raise APIError('send_wait_busy',503)
+    monkeypatch.setattr(send_wait,'wait_for_send',busy)
+    args=dict(account='synthetic-account',chat_id='synthetic-chat',text='Synthetic text',request_id='synthetic-request',wait_s=1)
+    with TestClient(create_app(Queued(),['testserver'])) as c:
+        rest=c.post('/v1/send_message',headers={'Authorization':'Bearer synthetic-token'},json=args)
+    assert rest.status_code==200
+    assert rest.json()=={'send_id':'synthetic-send','status':'queued','wait_timed_out':True,'wait_error':'send_wait_busy'}
