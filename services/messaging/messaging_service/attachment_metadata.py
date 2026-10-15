@@ -1,0 +1,96 @@
+"""Presentation for already authorized attachment occurrences; never fetches files.
+
+A provider descriptor declares a name, MIME and expected byte length. A download
+receipt establishes stored bytes, not continued filesystem presence. Only a caller
+that checked the original can set ``original_present``. This is a presence check,
+not a replacement for the archive's digest/integrity verification.
+"""
+from __future__ import annotations
+
+from datetime import datetime, timezone
+
+from .file_index import file_response_fields
+from .status_details import describe
+
+
+def processing_phases(c, row):
+    """Current authorized occurrence, independent of original filesystem presence."""
+    if not row.get('digest'):
+        return {}
+    return c.execute('''SELECT coalesce(f.state,'unknown') AS extraction_status,
+        CASE WHEN coalesce(e.state,'unconfigured')='unconfigured' AND EXISTS(
+            SELECT FROM processing_profiles pp WHERE pp.account=m.account AND pp.enabled
+            AND pp.kind=CASE WHEN a.mime LIKE 'audio/%%' OR a.mime='application/ogg' THEN 'audio'
+                WHEN a.mime LIKE 'image/%%' THEN 'image' ELSE 'document' END)
+            THEN 'queued' ELSE coalesce(e.state,'unconfigured') END AS enrichment_status
+        FROM attachments a JOIN messages m ON m.id=a.message
+        LEFT JOIN attachment_text f ON f.attachment=a.id AND f.source_digest=a.digest
+            AND f.source_revision=m.revision AND f.source_filename=a.filename
+            AND f.source_mime=a.mime AND f.source_bytes=a.bytes AND f.state<>'superseded'
+        LEFT JOIN attachment_enrichment e ON e.attachment=a.id AND e.source_digest=a.digest
+            AND e.source_revision=m.revision AND e.state<>'superseded'
+        WHERE a.id=%s AND a.active AND NOT m.deleted''',(row['id'],)).fetchone() or {}
+
+
+def attachment_fields(row, *, original_present=None):
+    """Return additive metadata without copying provider descriptors or URL grants.
+
+    ``row`` accepts an attachment (id/digest) or a media job with attachment_id,
+    descriptor and job_state. Optional extraction_state/enrichment_state describe
+    the current authorized source revision, independently of original presence.
+    """
+    if original_present is not None and type(original_present) is not bool:
+        raise ValueError('invalid_original_presence')
+    descriptor=row.get('descriptor') or {}
+    attachment_id=row.get('attachment_id') or row.get('id')
+    digest=row.get('digest') or row.get('sha256')
+    registered=bool(row.get('id') and digest)
+    state=row.get('job_state') or row.get('state') or row.get('status') or ('ready' if registered else 'unknown')
+    filename=row.get('filename') if row.get('filename') is not None else descriptor.get('filename')
+    mime=row.get('mime') if row.get('mime') is not None else descriptor.get('mime')
+    size=row.get('bytes') if row.get('bytes') is not None else descriptor.get('bytes')
+    error=row.get('download_error_code') or row.get('error_code')
+    until=row.get('requested_until')
+    requested=isinstance(until,datetime) and until.tzinfo is not None and until>datetime.now(timezone.utc)
+    request_state='requested' if requested else 'expired' if until is not None else 'not_requested'
+    if registered:
+        download_status='unavailable' if original_present is False else 'ready'
+        phase='unavailable' if original_present is False else 'ready'
+        reason='original_missing' if original_present is False else 'original_downloaded'
+        action='check_original_storage' if original_present is False else 'get_attachment'
+    else:
+        download_status={'leased':'processing','ready':'unavailable'}.get(state,state)
+        phase=download_status
+        reason=error or {'leased':'transfer_in_progress','ready':'original_not_registered'}.get(state,state)
+        if error:
+            phase='blocked' if error in ('paused_storage','disk_reserve','media_size_limit') else download_status
+            action=describe(error)['next_action']
+        else:
+            action='get_attachment' if requested or state=='leased' else 'request_file_download' if state=='queued' else 'get_sync_status_for_chat'
+    extraction=row.get('extraction_state',row.get('extraction_status','unknown')) if registered else 'awaiting_download'
+    enrichment=row.get('enrichment_state',row.get('enrichment_status','unconfigured')) if registered else 'awaiting_download'
+    item=file_response_fields({'id':attachment_id,'attachment_id':attachment_id,
+        'filename':filename,'mime':mime,'bytes':size,'sha256':digest if registered else None,
+        'digest':digest if registered else None,'error_code':error},
+        download_status=download_status,extraction_status=extraction,
+        enrichment_status={'leased':'processing','unconfigured':'not_configured'}.get(enrichment,enrichment))
+    item.update(state=state,status='unavailable' if original_present is False and registered else state,
+        declared_mime=descriptor.get('mime'),declared_bytes=descriptor.get('bytes'),
+        verified_bytes=row.get('bytes') if registered else None,
+        metadata_basis='download_receipt' if registered else 'provider_descriptor',
+        original_presence_verified=original_present is not None,
+        original_available=original_present if registered else False if original_present is False else None,
+        download_phase=phase,download_reason=reason,reason=reason,next_action=action,
+        download_request={'state':request_state,'until':until},error_detail=describe(error) if error else None)
+    for key in ('attempts','next_due'):
+        if key in row:item[key]=row[key]
+    source={}
+    for name,aliases in {'account':('account',),'chat':('chat',),'message_id':('message_id','message'),
+            'provider_chat_id':('provider_chat_id','provider_chat'),
+            'provider_message_id':('provider_message_id','provider_id'),
+            'message_revision':('message_revision','revision')}.items():
+        for alias in aliases:
+            if alias in row:
+                source[name]=row[alias];break
+    item['source']=source
+    return item

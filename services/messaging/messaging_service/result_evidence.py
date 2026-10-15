@@ -1,5 +1,5 @@
 """Consistent, bounded message/file evidence from already authorized rows."""
-from .file_index import file_response_fields
+from .attachment_metadata import attachment_fields
 
 
 def send_provenance(c,rows):
@@ -58,10 +58,13 @@ def decorate(c,rows):
     if not rows:return rows
     ids=list({r['id'] for r in rows})
     files=c.execute('''SELECT j.message,j.id AS attachment_id,a.id,a.filename,a.mime,a.bytes,a.digest,
+        j.descriptor,j.attempts,j.next_due,j.requested_until,m.account,m.chat,m.revision AS message_revision,
+        m.provider_id AS provider_message_id,ch.provider_chat AS provider_chat_id,
         j.state AS job_state,j.error_code AS download_error_code,
         coalesce(a.filename,j.descriptor->>'filename') AS source_name,
         coalesce(f.state,'unknown') AS extraction_state,CASE WHEN coalesce(e.state,'unconfigured')='unconfigured' AND EXISTS(SELECT FROM processing_profiles pp WHERE pp.account=m.account AND pp.enabled AND pp.kind=CASE WHEN a.mime LIKE 'audio/%%' OR a.mime='application/ogg' THEN 'audio' WHEN a.mime LIKE 'image/%%' THEN 'image' ELSE 'document' END) THEN 'queued' ELSE coalesce(e.state,'unconfigured') END AS enrichment_state
         FROM media_jobs j JOIN messages m ON m.id=j.message
+        JOIN chats ch ON ch.id=m.chat AND ch.account=m.account
         LEFT JOIN attachments a ON a.id=j.id AND a.active
         LEFT JOIN attachment_text f ON f.attachment=a.id AND f.source_digest=a.digest
             AND f.source_revision=m.revision AND f.source_filename=a.filename AND f.source_mime=a.mime
@@ -71,9 +74,13 @@ def decorate(c,rows):
         WHERE j.message=ANY(%s) AND j.state<>'superseded' AND NOT m.deleted ORDER BY j.id''',(ids,)).fetchall()
     # Synthetic fixtures and restored legacy originals may predate media jobs.
     files+=c.execute('''SELECT a.message,a.id AS attachment_id,a.id,a.filename,a.mime,a.bytes,a.digest,
+        NULL::jsonb AS descriptor,NULL::integer AS attempts,NULL::timestamptz AS next_due,
+        NULL::timestamptz AS requested_until,m.account,m.chat,m.revision AS message_revision,
+        m.provider_id AS provider_message_id,ch.provider_chat AS provider_chat_id,
         'ready' AS job_state,NULL AS download_error_code,a.filename AS source_name,
         coalesce(f.state,'unknown') AS extraction_state,CASE WHEN coalesce(e.state,'unconfigured')='unconfigured' AND EXISTS(SELECT FROM processing_profiles pp WHERE pp.account=m.account AND pp.enabled AND pp.kind=CASE WHEN a.mime LIKE 'audio/%%' OR a.mime='application/ogg' THEN 'audio' WHEN a.mime LIKE 'image/%%' THEN 'image' ELSE 'document' END) THEN 'queued' ELSE coalesce(e.state,'unconfigured') END AS enrichment_state
         FROM attachments a JOIN messages m ON m.id=a.message
+        JOIN chats ch ON ch.id=m.chat AND ch.account=m.account
         LEFT JOIN attachment_text f ON f.attachment=a.id AND f.source_digest=a.digest
             AND f.source_revision=m.revision AND f.source_filename=a.filename AND f.source_mime=a.mime
             AND f.source_bytes=a.bytes AND f.state<>'superseded'
@@ -83,16 +90,10 @@ def decorate(c,rows):
         AND NOT EXISTS(SELECT 1 FROM media_jobs j WHERE j.id=a.id) ORDER BY a.id''',(ids,)).fetchall()
     grouped={}
     for file in files:
-        downloaded=file['id'] is not None
-        state='ready' if downloaded else {'leased':'processing','ready':'unavailable'}.get(file['job_state'],file['job_state'])
-        item=file_response_fields({'id':file['attachment_id'],'attachment_id':file['attachment_id'],
-            'filename':file['source_name'],'mime':file['mime'],'bytes':file['bytes'],
-            'sha256':file['digest'],'digest':file['digest'],'error_code':file['download_error_code']},
-            download_status=state,extraction_status=file['extraction_state'] if downloaded else 'awaiting_download',
-            enrichment_status={'leased':'processing','unconfigured':'not_configured'}.get(file['enrichment_state'],file['enrichment_state'])
-                if downloaded else 'awaiting_download')
-        # Legacy pending state preserved for existing clients.
-        item['state']=file['job_state'];grouped.setdefault(file['message'],[]).append(item)
+        # A database download receipt is not a fresh filesystem presence check.
+        # get_attachment verifies the original before issuing any bearer URL.
+        item=attachment_fields(file)
+        grouped.setdefault(file['message'],[]).append(item)
     conflicts={r['message']:r for r in c.execute('''SELECT message,
         count(*) FILTER(WHERE resolved_at IS NULL) AS active_conflicts,
         count(*) FILTER(WHERE resolved_at IS NOT NULL) AS historical_conflicts,

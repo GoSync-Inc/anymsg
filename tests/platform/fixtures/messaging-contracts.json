@@ -1775,6 +1775,37 @@
     {
       "annotations": {
         "destructiveHint": false,
+        "idempotentHint": true,
+        "openWorldHint": false,
+        "readOnlyHint": false
+      },
+      "description": "Prioritize an existing permitted original through its current collector; requires download.\n\nSchedules bounded retrieval only: no waiting, sending or provider read marks.\nRepeated requests coalesce without extending the one-hour demand window.\nInspect request_status/download_status and retry hints; poll get_attachment passively.\nDisk floors, source availability, account/chat policy and provider backoff still apply.\n",
+      "inputSchema": {
+        "properties": {
+          "attachment_id": {
+            "maxLength": 256,
+            "minLength": 1,
+            "title": "Attachment Id",
+            "type": "string"
+          }
+        },
+        "required": [
+          "attachment_id"
+        ],
+        "type": "object",
+        "title": "request_file_downloadArguments",
+        "additionalProperties": false
+      },
+      "name": "request_file_download",
+      "outputSchema": {
+        "type": "object",
+        "additionalProperties": true,
+        "title": "request_file_downloadDictOutput"
+      }
+    },
+    {
+      "annotations": {
+        "destructiveHint": false,
         "openWorldHint": false,
         "readOnlyHint": false
       },

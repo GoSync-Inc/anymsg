@@ -80,7 +80,16 @@ def present_message(row,position):
         attachments=row.get('attachments',[])
         states={f.get('download_status') for f in attachments}
         if states and states!={'ready'}:
-            label+='; файл загружается' if states & {'queued','processing','leased'} else '; файл пока недоступен'
+            reasons={f.get('download_reason') or f.get('error_code') for f in attachments}
+            if reasons & {'paused_storage','disk_reserve'}:
+                label+='; загрузка приостановлена: недостаточно места'
+            elif states & {'processing','leased'}:
+                label+='; файл загружается'
+            elif states & {'queued'}:
+                label+='; файл ожидает загрузки'
+            elif states & {'deferred'}:
+                label+='; файл доступен по запросу'
+            else:label+='; файл пока недоступен'
         row['display_text']=(body+'\n' if body else '')+'['+label+']'
     else:row['display_text']=body
     row['timestamp_precision']=row.get('timestamp_resolution') or 'unknown'

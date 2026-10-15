@@ -615,6 +615,19 @@ def create_app(store: Store, allowed_hosts: list[str]):
         return call(ctx,'get_attachment',attachment_id=attachment_id)
 
     @mcp.tool(structured_output=True, annotations=ToolAnnotations(readOnlyHint=False,
+        destructiveHint=False, idempotentHint=True, openWorldHint=False))
+    def request_file_download(ctx: Context,
+            attachment_id: Annotated[StrictStr, Field(min_length=1,max_length=256)]) -> dict[str, Any]:
+        """Prioritize an existing permitted original through its current collector; requires download.
+
+        Schedules bounded retrieval only: no waiting, sending or provider read marks.
+        Repeated requests coalesce without extending the one-hour demand window.
+        Inspect request_status/download_status and retry hints; poll get_attachment passively.
+        Disk floors, source availability, account/chat policy and provider backoff still apply.
+        """
+        return call(ctx,'request_file_download',attachment_id=attachment_id)
+
+    @mcp.tool(structured_output=True, annotations=ToolAnnotations(readOnlyHint=False,
         destructiveHint=False, openWorldHint=False))
     def get_updates(ctx: Context, consumer: str='main', limit: int=20,
                     accounts: list[StrictStr] | None=None, chats: list[StrictStr] | None=None,
@@ -720,7 +733,7 @@ def create_app(store: Store, allowed_hosts: list[str]):
 
     async def rest(request):
         operations={'capabilities','list_chats','search','get_messages','get_context',
-                    'get_attachment','get_updates','ack_updates','dismiss_reply','record_review','get_reviews',
+                    'get_attachment','request_file_download','get_updates','ack_updates','dismiss_reply','record_review','get_reviews',
                     'search_people','search_files','get_file_text','get_sync_status','get_file_occurrences','get_file_segments','resolve_reference','preview_message','send_message','get_send_status',
                     'list_messenger_operations','preview_messenger_operation','execute_messenger_operation','get_messenger_operation',
                     'prepare_file_upload','upload_file_chunk','get_file_upload',

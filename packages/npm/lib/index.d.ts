@@ -126,6 +126,8 @@ export declare class AnyMsgClient {
   getSyncStatus(args?: Arguments): Promise<Record<string, unknown>>;
   resolveReference(args: Arguments): Promise<Record<string, unknown>>;
   getAttachment(args: Arguments): Promise<Record<string, unknown>>;
+  /** Schedule bounded retrieval of an existing original; requires download. Poll getAttachment passively. */
+  requestFileDownload(args: {attachment_id: string}): Promise<Record<string, unknown>>;
   getFileText(args: Arguments): Promise<Record<string, unknown>>;
   getFileSegments(args: Arguments): Promise<Record<string, unknown>>;
   getFileOccurrences(args: Arguments): Promise<Record<string, unknown>>;
