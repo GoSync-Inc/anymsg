@@ -27,6 +27,10 @@ class Archive:
                 "evidence": {"active_conflicts": 1}}
 
 
+def owner_headers(tmp_path):
+    return {'Authorization': 'Bearer ' + (tmp_path / 'owner.token').read_text().strip()}
+
+
 def app(tmp_path, archive=None):
     assert importlib.util.find_spec("app") is not None, "Voice service is not implemented"
     return importlib.import_module("app").create_app(tmp_path, archive or Archive())
@@ -45,7 +49,7 @@ def started(c, brief):
 
 
 def test_snapshot_exact_sources_no_archive_neighbors_and_no_fake_verification(tmp_path):
-    with TestClient(app(tmp_path)) as c:
+    with TestClient(app(tmp_path), headers=owner_headers(tmp_path)) as c:
         b=prepared(c)
         assert len(b["facts"]) == 2
         source=b["facts"][1]
@@ -59,7 +63,7 @@ def test_snapshot_exact_sources_no_archive_neighbors_and_no_fake_verification(tm
 
 
 def test_start_is_idempotent_and_one_active_task_then_stop_persists(tmp_path):
-    with TestClient(app(tmp_path)) as c:
+    with TestClient(app(tmp_path), headers=owner_headers(tmp_path)) as c:
         b=prepared(c)
         first=started(c,b)
         assert started(c,b)["id"] == first["id"]
@@ -68,13 +72,13 @@ def test_start_is_idempotent_and_one_active_task_then_stop_persists(tmp_path):
         assert c.post(f'/api/calls/{first["id"]}/stop', headers=HEADERS).status_code == 200
         assert c.post(f'/api/calls/{first["id"]}/stop', headers=HEADERS).status_code == 200
         assert c.get(f'/api/calls/{first["id"]}').json()["status"] == "finished"
-    with TestClient(app(tmp_path)) as c:
+    with TestClient(app(tmp_path), headers=owner_headers(tmp_path)) as c:
         assert len(c.get("/api/calls").json()["items"]) == 1
         assert not c.get("/api/config").json()["credentials"]["gemini"]
 
 
 def test_keys_not_persisted_validation_does_not_echo_secrets_and_csrf(tmp_path):
-    with TestClient(app(tmp_path)) as c:
+    with TestClient(app(tmp_path), headers=owner_headers(tmp_path)) as c:
         key="fixture-secret-do-not-save"
         assert c.post("/api/credentials",json={"gemini":key}).status_code == 403
         r=c.post("/api/credentials",json={"gemini":key},headers=HEADERS)
@@ -92,7 +96,7 @@ def test_keys_not_persisted_validation_does_not_echo_secrets_and_csrf(tmp_path):
 
 def test_tools_correct_answers_unknown_fields_owner_decisions_and_completion(tmp_path):
     application=app(tmp_path)
-    with TestClient(application) as c:
+    with TestClient(application, headers=owner_headers(tmp_path)) as c:
         b=prepared(c)
         job=started(c,b)
         svc=application.state.service
@@ -127,7 +131,7 @@ def test_tools_correct_answers_unknown_fields_owner_decisions_and_completion(tmp
 
 
 def test_restart_interrupts_incomplete_calls_and_invalid_sources_fail_closed(tmp_path):
-    with TestClient(app(tmp_path)) as c:
+    with TestClient(app(tmp_path), headers=owner_headers(tmp_path)) as c:
         r=c.post("/api/briefs",json={**BRIEF,"source_message_ids":["missing"]},headers=HEADERS)
         assert r.status_code == 502
         assert c.get("/api/calls").json()["items"] == []
@@ -141,7 +145,7 @@ def test_restart_interrupts_incomplete_calls_and_invalid_sources_fail_closed(tmp
 
 def test_counterparty_cannot_approve_owner_request_by_audio_or_tool_argument(tmp_path):
     application=app(tmp_path)
-    with TestClient(application) as c:
+    with TestClient(application, headers=owner_headers(tmp_path)) as c:
         job=started(c,prepared(c))
         svc=application.state.service;svc.connected(job['id'])
         pending=svc.tool(job['id'],'request_owner_decision',{'question':'Разрешить доплату?','options':['Да','Нет']},'request-1')
