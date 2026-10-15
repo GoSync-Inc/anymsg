@@ -143,8 +143,12 @@ async def upload(path,receipt,transfer,timeout):
             except asyncio.TimeoutError:process.kill();await process.wait()
 
 
-async def upload_stream(path,metadata,transfer,timeout,start,completed):
-    """Host-only SSH bridge; bounded FIFO and network buffers, never a disk spool."""
+async def upload_stream(path,metadata,transfer,timeout,start,completed,stopped=None):
+    """Host-only SSH bridge; bounded FIFO and network buffers, never a disk spool.
+
+    ``stopped`` reports a worker that exited or published its result; it ends
+    the wait for a writer that will never open the FIFO.
+    """
     args=['ssh','-F','/dev/null','-T','-o','BatchMode=yes','-o','IdentitiesOnly=yes',
         '-o','StrictHostKeyChecking=yes','-o','PasswordAuthentication=no','-o','KbdInteractiveAuthentication=no',
         '-o','ConnectTimeout=15','-o','ServerAliveInterval=15','-o','ServerAliveCountMax=3',
@@ -179,7 +183,8 @@ async def upload_stream(path,metadata,transfer,timeout,start,completed):
         if item.get('status')!='ready':raise RuntimeError('invalid_backup_receipt')
         fd=os.open(path,os.O_RDONLY|os.O_NONBLOCK|os.O_NOFOLLOW)
         if not stat.S_ISFIFO(os.fstat(fd).st_mode):raise ValueError('invalid_backup_stream')
-        start(True);sha=hashlib.sha256();size=0
+        start(True);sha=hashlib.sha256();size=0;ended=False;probe=0
+        loop=asyncio.get_running_loop()
         while True:
             try:data=os.read(fd,1024**2)
             except BlockingIOError:data=None
@@ -187,8 +192,16 @@ async def upload_stream(path,metadata,transfer,timeout,start,completed):
                 size+=len(data)
                 if size>metadata['max_bytes']:raise RuntimeError('backup_stream_size_limit')
                 sha.update(data);process.stdin.write(struct.pack('!I',len(data))+data);await process.stdin.drain()
-            elif data==b'' and size:break
-            else:await asyncio.sleep(.01)
+            elif data==b'' and (size or ended):break
+            else:
+                # EOF before any byte means no writer is attached yet. A worker
+                # that already failed never opens the FIFO: stop waiting for the
+                # whole deadline, read once more for bytes written before it
+                # exited, then let the independent result decide.
+                if data==b'' and stopped is not None and loop.time()>=probe:
+                    probe=loop.time()+1
+                    if stopped():ended=True;continue
+                await asyncio.sleep(.01)
         # Source/age integrity is an independent result. EOF alone must never
         # turn failed encryption or changed originals into a published backup.
         result=await completed()
@@ -386,8 +399,12 @@ class Runner:
             if (result.get('v')!=2 or result.get('id')!=metadata['id'] or result.get('status')!='encrypted' or
                 result.get('snapshot_sha256')!=metadata['snapshot_sha256']):raise RuntimeError('invalid_backup_result')
             return result
+        def stopped():
+            if (work/'result.json').exists():return True
+            info=self.check_worker(self.docker.inspect(self.journal['container']))
+            return info is None or not info['State']['Running']
         receipt=asyncio.run(self.stream_send(work/'ciphertext.fifo',metadata,self.cfg['transfer'],
-                                          self.cfg['timeout_seconds'],start,completed))
+                                          self.cfg['timeout_seconds'],start,completed,stopped=stopped))
         # A failed/changed source cannot publish a terminal frame. A duplicate
         # receipt instead asks the worker to exit without re-encryption.
         while True:
