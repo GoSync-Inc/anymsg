@@ -58,6 +58,10 @@ Calls, results, decisions and followups inherit it. No agent tool can submit an
 owner decision or read/activate global learned prompts. Optional archive context
 uses that principal's separate private archive configuration; it never falls back
 to the owner archive credential. Phone preparation works without an archive.
+With `calls:read`, `list_briefs` and `list_calls` page only the principal's own items
+newest first as short summaries without notes, facts, prompts or destinations.
+Capabilities report each granted channel's configured state (from settings only, no
+provider contact), allowlisted recipient counts and the enforced request limits.
 
 ## Outcomes and verification
 

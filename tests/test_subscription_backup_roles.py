@@ -29,9 +29,9 @@ def test_schema26_manifest_includes_definitions_sources_and_exact_match_referenc
     _, definition, event = _subscription(store, 'synthetic-manifest-subscriber')
     match_subscriptions(store)
     with store.pool.connection() as connection:
-        assert connection.execute("SELECT value FROM probe_metadata WHERE name='schema_version'").fetchone()['value'] == '31'
+        assert connection.execute("SELECT value FROM probe_metadata WHERE name='schema_version'").fetchone()['value'] == '32'
         manifest = database_manifest(connection)
-    assert len(manifest) == 52
+    assert len(manifest) == 58
     assert all(manifest[name]['rows'] == 1 for name in (
         'subscriptions', 'subscription_sources', 'subscription_matches'))
     assert all(len(manifest[name]['sha256']) == 64 for name in (
@@ -78,6 +78,23 @@ def test_native_schema26_quarantine_closes_versions_preserves_refs_and_revokes_r
                 VALUES('synthetic-quarantine-subscriber',%s,'telegram-demo','telegram-demo-chat',
                 'synthetic.txt','text/plain',1,%s,1,'ready','fs:synthetic','synthetic-restore-upload')""",
                 (credential,'a'*64))
+            receiver = uuid4()
+            connection.execute('''INSERT INTO subscription_receivers(id,principal,key_id,endpoint,secret_file)
+                VALUES(%s,'synthetic-quarantine-subscriber',%s,'https://synthetic.invalid/wake',
+                '/private/synthetic-receiver.key')''', (receiver, credential))
+            connection.execute('INSERT INTO subscription_delivery(subscription,receiver) VALUES(%s,%s)',
+                (active['subscription_id'], receiver))
+            connection.execute('''INSERT INTO subscription_outbox(subscription,subscription_version,receiver,
+                through_position,kind) VALUES(%s,1,%s,1,'events')''', (active['subscription_id'], receiver))
+            connection.execute('INSERT INTO subscription_consumption(subscription,acked_through) VALUES(%s,0)',
+                (active['subscription_id'],))
+            connection.execute('''INSERT INTO subscription_receipts(receipt_hash,subscription,principal,key_id,
+                scope_version,key_permission_version,subscription_version,consumption_version,after_position,
+                through_position) VALUES(%s,%s,'synthetic-quarantine-subscriber',%s,1,1,1,1,0,1)''',
+                ('b'*64, active['subscription_id'], credential))
+            connection.execute('''INSERT INTO agent_feedback(principal,key_id,request_id,request_hash,category,
+                description,refs) VALUES('synthetic-quarantine-subscriber',%s,'synthetic-feedback',%s,
+                'bug','Synthetic restore fixture','{}')''', (credential, 'c'*64))
             before_versions = {str(row['id']): row['version'] for row in
                 connection.execute('SELECT id,version FROM subscriptions').fetchall()}
             before = database_manifest(connection)
@@ -92,7 +109,12 @@ def test_native_schema26_quarantine_closes_versions_preserves_refs_and_revokes_r
             leases = connection.execute('SELECT expires_at<clock_timestamp() AS expired FROM collector_leases').fetchall()
             statuses = connection.execute('SELECT status,coverage,detail_code FROM source_status').fetchall()
             assert connection.execute('SELECT state FROM file_uploads').fetchone()['state']=='expired'
-        assert len(after) == 52 and after['subscriptions']['rows'] == 2
+            assert not connection.execute('SELECT enabled FROM subscription_receivers').fetchone()['enabled']
+            assert connection.execute('SELECT state FROM subscription_outbox').fetchone()['state'] == 'cancelled'
+            assert connection.execute('SELECT count(*) AS n FROM subscription_receipts').fetchone()['n'] == 0
+            assert after['subscription_consumption'] == before['subscription_consumption']
+            assert after['agent_feedback'] == before['agent_feedback']
+        assert len(after) == 58 and after['subscriptions']['rows'] == 2
         assert all(row['state'] == 'closed' and row['version'] == before_versions[str(row['id'])] + 1
             for row in definitions)
         assert after['subscription_sources'] == before['subscription_sources']

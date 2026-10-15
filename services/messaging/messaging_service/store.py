@@ -202,22 +202,26 @@ class Store:
     def capabilities(self, token):
         with self.authorized(token,'capabilities') as (c, p):
             from .messenger_operations import CATALOG_VERSION,OPERATIONS,operation_manifest
-            from .whatsapp_capabilities import account_provider
+            from .commands import manifest
             dataset=self.dataset(c,p)
             accounts = c.execute('SELECT id,platform,label,synthetic FROM accounts WHERE id=ANY(%s) ORDER BY id',
                                  ([r['id'] for r in dataset['sources']],)).fetchall()
             supported_by_account={}
             for account in accounts:
-                provider=account_provider(c,account['id'],account['platform'])
-                supported=[row['operation'] for row in operation_manifest(account['platform'],provider=provider)
-                           if row['supported']]
-                supported_by_account[account['id']]={'provider':provider,'count':len(supported),'operations':supported}
+                # Same rows as list_messenger_operations: supported, plus what this key
+                # can use now (key permitted and opted in for the account).
+                listed=manifest(c,p,account['id'])
+                supported=[row['operation'] for row in listed['items']]
+                supported_by_account[account['id']]={'provider':listed['provider'],'count':len(supported),
+                    'operations':supported,'available_operations':[row['operation'] for row in listed['items'] if row['available']]}
             features={'read':['search','history','context','updates','reviews','search_people','search_files','get_file_text','get_file_occurrences','get_sync_status','get_file_segments','resolve_reference','preview_message'], 'download':['attachment','request_file_download'], 'cursor-write':['ack'], 'send':['send_message','get_send_status']}
             if 'read' in p['permissions']:
                 features['review-write']=['record_review']
                 features['cursor-write'].append('dismiss_reply')
-                features['read'].extend(['list_subscriptions','get_subscription','get_subscription_events'])
-                features['subscription-write']=['create_subscription','update_subscription']
+                features['read'].extend(['list_subscriptions','get_subscription','get_subscription_events','fetch_subscription_events','wait_for_subscription_events','list_feedback'])
+                features['subscription-ack']=['ack_subscription_events']
+                features['feedback-write']=['submit_feedback']
+                features['subscription-write']=['create_subscription','update_subscription','configure_subscription_delivery','test_subscription']
             available=[feature for permission,names in features.items() if permission in p['permissions'] for feature in names]
             if {'read','send','upload'}<=set(p['permissions']):
                 available.extend(['prepare_file_upload','upload_file_chunk','get_file_upload'])
@@ -236,7 +240,7 @@ class Store:
                 'key_permission_version':p['key_permission_version'],
                 'chat_scope':{'all_in_permitted_accounts':p['chat_ids'] is None,'chat_ids':p['chat_ids']},
                 'auth_mode': 'managed_bearer_keys',
-                'search_options':{'filters':['accounts','chats','senders','from_time','to_time','direction'],
+                'search_options':{'filters':['accounts','chats','senders','from_time','to_time','direction','exclude_channels'],
                     'query_modes':['all','phrase','web','exact'],'orders':['asc','desc','relevance'],
                     'languages':['auto','simple','russian','english','indonesian'],
                     'fuzzy':'explicit_bounded_fallback','compact':True,'optional_coverage':True,
@@ -249,8 +253,9 @@ class Store:
                     'sync_status_details':['compact','full'],
                     'updates':'version_checked_filter_reset_preserves_ack_position',
                     'update_orders':['event','sent_at_within_delivered_batch'],
-                    'updates_exclude_channels':True,'is_backfill':True,
+                    'updates_exclude_channels':True,'updates_start_from':['beginning','now_creation_only'],'is_backfill':True,
                     'detail_default':'compact','details':['compact','full'],
+                    'message_details':['compact','full','transcript'],
                     'collector_operations':['connection','live_capture','history','media'],
                 'connection_failures':'durable_terminal_gate_and_capped_retry','status_cache_seconds':10,'status_refresh':True,
                     'people_candidates':['transliteration','same_sender_grouping'],
@@ -274,10 +279,12 @@ class Store:
                     'mutation_permission':'subscription-write','read_permission_required':True,
                     'ownership':'originating_credential_and_principal','new_permission_inherited':False,
                     'source_scope_change':'masked_access_changed_recreate_required',
-                    'ack':False,'push':False,'verified_host':False,'native_reply_preset':False,
+                    'ack':True,'ack_permission':'subscription-ack','push':'operator_registered_signed_hints','wait_max_seconds':25,'verified_host':False,'native_reply_preset':True,
                     'provider_polling':False,'start_boundary':'committed_archive_frontier',
                     'existing_update_consumers_unchanged':True},
-                'sending':{'implemented':True,'approval_mode':'acting_agent_obtains_exact_owner_confirmation',
+                'events':{'fetch':'fetch_subscription_events','ack':'ack_subscription_events','wait':'wait_for_subscription_events','wait_max_seconds':25,'test':'test_subscription','delivery':'operator_registered_signed_hints','host_turn_verified':False},
+                'feedback':{'implemented':True,'write_permission':'feedback-write','ownership':'exact_credential','external_delivery':False},
+                'sending':{'implemented':True,'wait_max_seconds':25,'approval_mode':'acting_agent_obtains_exact_owner_confirmation',
                     'server_approval_gate':False,'text_only':False,'legacy_send_message_text_only':True,
                     'request_id_required':True,
                     'formatting':{'formats':['plain','markdown','html'],
@@ -413,15 +420,12 @@ class Store:
 
     def search_people(self,token,query='',*,accounts=None,chats=None,after='',limit=20,
                       transliterate=False,group_by_sender=False):
-        from .people import search_people
+        from .people_candidates import search_people
         with self.authorized(token,'search_people') as (c,p):
             if type(transliterate) is not bool or type(group_by_sender) is not bool:
                 raise APIError('invalid_filter')
-            if transliterate or group_by_sender:
-                from .people_candidates import search_people
-                return search_people(self,c,p,query,accounts=accounts,chats=chats,after=after,limit=limit,
-                    transliterate=transliterate,group_by_sender=group_by_sender)
-            return search_people(self,c,p,query,accounts=accounts,chats=chats,after=after,limit=limit)
+            return search_people(self,c,p,query,accounts=accounts,chats=chats,after=after,limit=limit,
+                transliterate=transliterate,group_by_sender=group_by_sender)
 
     def search_files(self,token,query='',account='',chat='',sender='',from_time='',to_time='',
                      after='',limit=20,*,accounts=None,chats=None,senders=None,query_mode='all',
@@ -497,12 +501,12 @@ class Store:
     def search(self, token, query='', account='', chat='', sender='', from_time='',
                to_time='', after='', limit=20, *, accounts=None, chats=None, senders=None,
                query_mode='all', order='asc', before='', direction='', search_language='auto',
-               fuzzy=False, compact=False, body_chars=None, include_coverage=True,view='archive',include_system=False):
+               fuzzy=False, compact=False, body_chars=None, include_coverage=True,view='archive',include_system=False,exclude_channels=False):
         with self.authorized(token,'search') as (c,p):
             return self._search(c,p,query,account,chat,sender,from_time,to_time,after,limit,
                 accounts=accounts,chats=chats,senders=senders,query_mode=query_mode,
                 order=order,before=before,direction=direction,search_language=search_language,
-                fuzzy=fuzzy,compact=compact,body_chars=body_chars,include_coverage=include_coverage,view=view,include_system=include_system)
+                fuzzy=fuzzy,compact=compact,body_chars=body_chars,include_coverage=include_coverage,view=view,include_system=include_system,exclude_channels=exclude_channels)
 
     def _search(self,c,p,*args,**kwargs):
         from .message_queries import search
@@ -689,8 +693,12 @@ class Store:
             return p
         with self.access('download',resolve) as (c,p):
             where,args=scope_filter(p,'m')
+            columns='''a.*,m.provider_id AS provider_message_id,
+                (SELECT platform FROM accounts WHERE id=m.account) AS provider_platform,
+                (SELECT metadata->>'media_kind' FROM message_metadata
+                    WHERE message=m.id AND revision=m.revision) AS media_kind'''
             if active is None:
-                row = c.execute('''SELECT a.* FROM download_grants g
+                row = c.execute('SELECT '+columns+''' FROM download_grants g
                     JOIN attachments a ON a.id=g.attachment JOIN messages m ON m.id=a.message
                     WHERE g.digest=%s AND g.expires_at>clock_timestamp() AND g.key_digest=%s
                     AND g.scope_version=%s AND a.active AND NOT m.deleted AND '''+where,
@@ -699,7 +707,7 @@ class Store:
             else:
                 # The expired grant row may already be deleted; its admitted
                 # binding carries the same key, scope version and attachment.
-                row = c.execute('''SELECT a.* FROM attachments a JOIN messages m ON m.id=a.message
+                row = c.execute('SELECT '+columns+''' FROM attachments a JOIN messages m ON m.id=a.message
                     WHERE a.id=%s AND a.active AND NOT m.deleted AND '''+where,
                     [active[2],*args]).fetchone()
             if not row:
@@ -713,21 +721,21 @@ class Store:
     def get_updates(self, token, consumer, limit=20, *, accounts=None,chats=None,senders=None,
                     origins=None,kinds=None,direction='',from_time='',to_time='',compact=False,
                     body_chars=None,include_coverage=True,exclude_channels=False,order='event',
-                    reset_filters=False,expected_ack_version=None):
+                    reset_filters=False,expected_ack_version=None,start_from='beginning'):
         from .update_queries import get_updates
         with self.authorized(token,'get_updates') as (c,p):
             return get_updates(self,c,p,consumer,limit,accounts=accounts,chats=chats,senders=senders,
                 origins=origins,kinds=kinds,direction=direction,from_time=from_time,to_time=to_time,
                 compact=compact,body_chars=body_chars,include_coverage=include_coverage,
                 exclude_channels=exclude_channels,order=order,reset_filters=reset_filters,
-                expected_ack_version=expected_ack_version)
+                expected_ack_version=expected_ack_version,start_from=start_from)
 
     def create_subscription(self, token, chat_ids, *, sender_ids=None, kinds=None,
-                            direction='incoming', origins=None, label='', expires_at=None):
+                            direction='incoming', origins=None, label='', expires_at=None, wake_rules=None, reply_to_send=None):
         from .subscriptions import create_subscription
         with self.authorized(token, 'create_subscription') as (c, p):
             return create_subscription(self, c, p, chat_ids, sender_ids=sender_ids, kinds=kinds,
-                direction=direction, origins=origins, label=label, expires_at=expires_at)
+                direction=direction, origins=origins, label=label, expires_at=expires_at, wake_rules=wake_rules, reply_to_send=reply_to_send)
 
     def list_subscriptions(self, token, *, limit=50):
         from .subscriptions import list_subscriptions
@@ -749,6 +757,36 @@ class Store:
         from .subscriptions import get_subscription_events
         with self.authorized(token, 'get_subscription_events') as (c, p):
             return get_subscription_events(self, c, p, subscription_id, after=after, limit=limit)
+
+    def fetch_subscription_events(self, token, subscription_id, *, limit=50):
+        from .subscription_consumption import fetch_subscription_events
+        with self.authorized(token, 'fetch_subscription_events') as (c, p):
+            return fetch_subscription_events(self, c, p, subscription_id, limit=limit)
+
+    def ack_subscription_events(self, token, subscription_id, receipt, version):
+        from .subscription_consumption import ack_subscription_events
+        with self.authorized(token, 'ack_subscription_events') as (c, p):
+            return ack_subscription_events(self, c, p, subscription_id, receipt, version)
+
+    def configure_subscription_delivery(self, token, subscription_id, version, receiver_id):
+        from .event_delivery import configure_subscription_delivery
+        with self.authorized(token, 'configure_subscription_delivery') as (c, p):
+            return configure_subscription_delivery(self, c, p, subscription_id, version, receiver_id)
+
+    def test_subscription(self, token, subscription_id, request_id):
+        from .event_delivery import test_subscription
+        with self.authorized(token, 'test_subscription') as (c, p):
+            return test_subscription(self, c, p, subscription_id, request_id)
+
+    def submit_feedback(self, token, request_id, category, description, *, operation=None, refs=None):
+        from .feedback import submit_feedback
+        with self.authorized(token, 'submit_feedback') as (c, p):
+            return submit_feedback(self, c, p, request_id, category, description, operation=operation, refs=refs)
+
+    def list_feedback(self, token, *, limit=50):
+        from .feedback import list_feedback
+        with self.authorized(token, 'list_feedback') as (c, p):
+            return list_feedback(self, c, p, limit=limit)
 
     def ack_updates(self, token, consumer, receipt, expected_version):
         with self.authorized(token,'ack_updates') as (c, p):
@@ -781,8 +819,8 @@ class Store:
             c.execute("SET LOCAL statement_timeout='180s'")
             c.execute(Path(__file__).with_name('schema.sql').read_text())
             version=int(c.execute("SELECT value FROM probe_metadata WHERE name='schema_version'").fetchone()['value'])
-            if version>31: raise RuntimeError('database_newer_than_runtime')
-            for target,name in [(2,'002_archive.sql'),(3,'003_collectors.sql'),(4,'004_whatsapp.sql'),(5,'005_access.sql'),(6,'006_reviews.sql'),(7,'007_search_indexes.sql'),(8,'008_people.sql'),(9,'009_file_index.sql'),(10,'010_search_audit.sql'),(11,'011_telegram_window.sql'),(12,'012_search.sql'),(13,'013_file_search.sql'),(14,'014_collector_health.sql'),(15,'015_enrichment.sql'),(16,'016_file_content.sql'),(17,'017_chat_evidence.sql'),(18,'018_collector_operations.sql'),(19,'019_whatsapp_identities.sql'),(20,'020_processing_admission.sql'),(21,'021_media_storage.sql'),(22,'022_outgoing.sql'),(23,'023_receipts.sql'),(24,'024_formatting.sql'),(25,'025_operations.sql'),(26,'026_subscriptions.sql'),(27,'027_reply_queue.sql'),(28,'028_send_reference.sql'),(29,'029_file_uploads.sql'),(30,'030_whatsapp_native_identities.sql'),(31,'031_media_requests.sql')]:
+            if version>32: raise RuntimeError('database_newer_than_runtime')
+            for target,name in [(2,'002_archive.sql'),(3,'003_collectors.sql'),(4,'004_whatsapp.sql'),(5,'005_access.sql'),(6,'006_reviews.sql'),(7,'007_search_indexes.sql'),(8,'008_people.sql'),(9,'009_file_index.sql'),(10,'010_search_audit.sql'),(11,'011_telegram_window.sql'),(12,'012_search.sql'),(13,'013_file_search.sql'),(14,'014_collector_health.sql'),(15,'015_enrichment.sql'),(16,'016_file_content.sql'),(17,'017_chat_evidence.sql'),(18,'018_collector_operations.sql'),(19,'019_whatsapp_identities.sql'),(20,'020_processing_admission.sql'),(21,'021_media_storage.sql'),(22,'022_outgoing.sql'),(23,'023_receipts.sql'),(24,'024_formatting.sql'),(25,'025_operations.sql'),(26,'026_subscriptions.sql'),(27,'027_reply_queue.sql'),(28,'028_send_reference.sql'),(29,'029_file_uploads.sql'),(30,'030_whatsapp_native_identities.sql'),(31,'031_media_requests.sql'),(32,'032_event_delivery.sql')]:
                 migration=Path(__file__).with_name('migrations')/name
                 sha=hashlib.sha256(migration.read_bytes()).hexdigest()
                 if version<target:
@@ -900,9 +938,12 @@ class Store:
             FROM messages WHERE id=%s AND account=%s''',(message,account)).fetchone()
         if not row: raise ValueError('invalid_event_message')
         if snapshot_metadata is not None:
-            if (not isinstance(snapshot_metadata,dict) or set(snapshot_metadata)-{'processing'} or
+            if (not isinstance(snapshot_metadata,dict) or set(snapshot_metadata)-{'processing','reply_evidence'} or
                     len(json.dumps(snapshot_metadata,ensure_ascii=False).encode())>16384):
                 raise ValueError('invalid_event_metadata')
+            if 'reply_evidence' in snapshot_metadata:
+                from .reply_evidence import validate as validate_reply_evidence
+                validate_reply_evidence(snapshot_metadata['reply_evidence'])
             row.update(snapshot_metadata)
         from .result_evidence import formatting_evidence
         formatting_evidence(c,[row])

@@ -100,7 +100,7 @@ def history(row,lower=None,upper=None):
 
 
 def chat_statuses(c,p,chat_ids,lower=None,upper=None):
-    from .sync_status import _files
+    from .sync_status import _files,empty_files
     records=rows(c,p,chat_ids);result={}
     ids=[r['chat_id'] for r in records]
     if not ids:return result
@@ -117,15 +117,14 @@ def chat_statuses(c,p,chat_ids,lower=None,upper=None):
         chat=row['chat_id'];h=history(row,lower,upper)
         count=counts.get(chat,{'messages':0,'oldest_message_at':None,'newest_message_at':None})
         conflict=conflicts.get(chat,{'active':0,'historical':0})
-        file_data=files.get(chat,{'stored_files':0,'stored_bytes':0,
-            'extraction':{},'enrichment':{},'extraction_truncated':0,'enrichment_truncated':0})
+        file_data=files.get(chat) or {**empty_files(),'extraction':{},'enrichment':{}}
         file_data['download']=downloads.get(chat,{})
         result[chat]={'chat_id':chat,'account':row['account'],'provider_chat_id':row['provider_chat'],
             'history':h,'messages':{k:v for k,v in count.items() if k!='chat'},'files':file_data,
             'conflicts':{k:v for k,v in conflict.items() if k!='chat'},
             'next_action':'check_provider_access' if h['last_error_code']=='provider_unavailable' else
                 'wait_for_provider_cooldown' if h['last_error_code']=='rate_limited' else
-                'inspect_message_conflicts' if conflict['active'] else
+                'get_context' if conflict['active'] else
                 'wait_for_history' if not h['history_traversal_complete'] else 'read_archived_history'}
     return result
 
@@ -169,7 +168,7 @@ def query_evidence(c,p,normalized,items,*,paged=False,include=True):
         else 'check_provider_access' if reason=='provider_unavailable'
         else 'wait_for_provider_cooldown' if reason=='provider_rate_limited'
         else 'resolve_chat_or_check_scope' if reason=='not_found_or_not_permitted'
-        else 'inspect_message_conflicts' if conflicts else 'read_context' if items else 'inspect_chat_coverage'}
+        else 'get_context' if conflicts else 'read_context' if items else 'inspect_chat_coverage'}
     if include:
         result.update(chats_considered=len(records),chats_not_scanned=sum(h['state']=='not_scanned' for h in histories),
             chats_loading=sum(h['state']=='loading' for h in histories),chats_with_gaps=sum(bool(h['gaps']) for h in histories))

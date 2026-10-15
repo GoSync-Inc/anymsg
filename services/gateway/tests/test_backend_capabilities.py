@@ -78,3 +78,54 @@ def test_unavailable_backend_does_not_prevent_platform_introspection(tmp_path):
         assert result["tools"] == ["platform_capabilities"]
         assert result["backend_states"] == {"calendar": "unavailable"}
         assert "private backend" not in json.dumps(result)
+
+
+def test_calendar_constraints_survive_without_advertising_hidden_writes(tmp_path):
+    key = tmp_path / "backend.key"
+    key.write_text("backend-calendar-a")
+    key.chmod(0o600)
+    value = config()
+    value["profiles"]["reader"]["tools"].append("calendar_capabilities")
+    value["principals"][0]["credentials"]["calendar"]["key_file"] = str(key)
+    path = tmp_path / "policy.json"
+    path.write_text(json.dumps(value))
+    path.chmod(0o600)
+
+    def backend(request):
+        return httpx.Response(
+            200,
+            json={
+                "permissions": ["agenda:read", "availability:read", "event:create", "plan:create"],
+                "features": {"event_create": True, "unreviewed_admin": True},
+                "constraints": {
+                    "recurrence_write": False,
+                    "window_limit_days": 31,
+                    "time_format": "ISO 8601 synthetic",
+                    "secret_option": "hidden",
+                },
+                "calendars": [
+                    {
+                        "calendar_ref": "cal-a",
+                        "write_enabled": True,
+                        "allowed_event_actions": ["create", "update", "delete"],
+                    }
+                ],
+            },
+        )
+
+    app = create_app(path, "http://testserver", transports={"calendar": httpx.MockTransport(backend)})
+    with TestClient(app) as c:
+        for tool in ("calendar_capabilities", "calendar_calendars"):
+            result = c.post("/v1/" + tool, json={}, headers={"Authorization": "Bearer gateway-a"}).json()
+            assert result["calendars"][0]["allowed_event_actions"] == []
+        assert result["calendars"][0]["write_enabled"] is True
+        result = rpc(c, "tools/call", {"name": "calendar_capabilities", "arguments": {}}).json()["result"][
+            "structuredContent"
+        ]
+        assert result["constraints"] == {
+            "recurrence_write": False,
+            "window_limit_days": 31,
+            "time_format": "ISO 8601 synthetic",
+        }
+        assert "calendar_plan" not in result["gateway_tools"]
+        assert "features" not in result and "secret_option" not in str(result)

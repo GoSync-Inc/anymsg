@@ -167,7 +167,6 @@ class Archive:
                 # no-op active updates which otherwise enqueue extraction again.
                 c.execute('''UPDATE attachments SET active=(id=ANY(%s)) WHERE message=%s
                     AND active IS DISTINCT FROM (id=ANY(%s))''',(media_ids,mid,media_ids))
-                self.store.append_event(c,aid,mid,'message.'+outcome,e['origin'],receipt)
             elif outcome=='unchanged':
                 c.execute('UPDATE messages SET provider_updated_at=greatest(provider_updated_at,%s) WHERE id=%s',(updated,mid))
             if outcome in ('created','edited','unchanged') and not e['deleted'] and e['sender']:
@@ -195,6 +194,13 @@ class Archive:
                         ELSE excluded.metadata END,
                     observed_at=clock_timestamp()''',
                     (Jsonb(e['metadata']),mid,updated))
+            # Publish only after this observation's validated native metadata is
+            # present. The event trigger snapshots this exact revision once.
+            if outcome in ('created','edited','deleted'):
+                from .reply_evidence import capture as capture_reply
+                reply = capture_reply(c,e,cid) if outcome=='created' else None
+                self.store.append_event(c,aid,mid,'message.'+outcome,e['origin'],receipt,
+                    snapshot_metadata={'reply_evidence':reply} if reply else None)
             c.execute('INSERT INTO ingest_receipts(digest,account,envelope,outcome) VALUES(%s,%s,%s,%s)',
                       (receipt,aid,Jsonb(captured),outcome))
             if outcome=='conflict':

@@ -1,8 +1,8 @@
 """Scoped catalogue and evidence-backed, deliberately heuristic reply queue."""
 from .policy import scope_filter,targets
 from .search_query import coverage,cursor_binding,decode_cursor,encode_cursor,filter_values,valid_text
-from .conversation import meaningful_sql,numeric_order_sql,options,order_terms
-from .conversation_state import conversation_state,group_answer_sql,group_attention_sql
+from .conversation import meaningful_sql,options
+from .conversation_state import conversation_state,group_thread_query
 
 
 def meaningful(alias='m',metadata='md'):
@@ -10,7 +10,77 @@ def meaningful(alias='m',metadata='md'):
 
 
 def number(alias):
-    return numeric_order_sql(alias)
+    return 'coalesce('+index_number(alias)+',0::bigint)'
+
+
+def index_number(alias):
+    # Exact expression from migration 27; provider selection stays outside the
+    # indexed ORDER BY, and WhatsApp never uses this as chronology.
+    return f"CASE WHEN {alias}.provider_id ~ '^[0-9]{{1,18}}$' THEN {alias}.provider_id::bigint END"
+
+
+def latest_sql(sql,*,both_directions=False,platform='a.platform',limit=1):
+    """Use a bounded indexed tail per provider and direction, then merge heads.
+
+    Keeping platform selection outside the indexed ORDER BY is essential: a
+    per-message accounts subquery or CASE there forces sorting complete chats.
+    """
+    branches=[]
+    directions=('incoming','outgoing') if both_directions else (None,)
+    for direction in directions:
+        selected=sql+(" AND m.direction='"+direction+"'" if direction else '')
+        for telegram in (True,False):
+            selected_platform=platform+('=' if telegram else '<>')+"'telegram'"
+            order="m.sent_at DESC,"+(index_number('m')+' DESC NULLS LAST,' if telegram else '')+'m.id DESC'
+            eligible=selected+' AND '+selected_platform
+            tail=eligible+' ORDER BY '+order+' LIMIT '+str(limit)
+            if telegram:
+                # Legacy/synthetic IDs may be nonnumeric. They and numeric zero
+                # share the historical ID tie breaker, whereas the index puts
+                # SQL NULL after zero. Revisit only zero-valued timestamps when
+                # such an edge reaches the indexed tail; normal IDs stay bounded.
+                tail='''WITH direction_tail AS MATERIALIZED ('''+tail+'''),
+                    zero_times AS MATERIALIZED (SELECT DISTINCT sent_at FROM direction_tail WHERE numeric_id=0)
+                    SELECT * FROM (SELECT * FROM direction_tail WHERE numeric_id<>0 UNION ALL ('''+eligible+'''
+                      AND EXISTS(SELECT 1 FROM zero_times) AND m.sent_at IN (SELECT sent_at FROM zero_times)
+                      AND '''+number('m')+'''=0 ORDER BY m.sent_at DESC,m.id DESC LIMIT '''+str(limit)+''')) repaired
+                    ORDER BY sent_at DESC,numeric_id DESC,id DESC LIMIT '''+str(limit)
+            branches.append('('+tail+')')
+    # There is at most one live platform branch per direction. This outer sort
+    # combines at most two message heads, never a chat's retained history.
+    return 'SELECT * FROM ('+' UNION ALL '.join(branches)+') candidate ORDER BY sent_at DESC,coalesce(numeric_id,0) DESC,id DESC LIMIT '+str(limit)
+
+
+def raw_title_sql(chat='c'):
+    """A private chat titled only by its provider ID (for example a WhatsApp LID)."""
+    return f"({chat}.chat_type='private' AND ({chat}.title='' OR {chat}.title={chat}.provider_chat))"
+
+
+def peer_name_sql(chat='c'):
+    # Latest provider-reported name of an incoming sender in this exact chat;
+    # a label for reading, never identity proof. The owner's profile is excluded.
+    return f"""(SELECT peer.display_name FROM sender_profiles peer JOIN messages peer_source
+          ON peer_source.id=peer.source_message
+        WHERE peer.account={chat}.account AND peer.chat={chat}.id AND peer.display_name<>''
+          AND peer_source.direction='incoming' ORDER BY peer.source_sent_at DESC,peer.id LIMIT 1)"""
+
+
+SELF_CHAT_TITLE = 'Saved messages'
+
+
+def self_chat_sql(chat='c'):
+    # The provider marks the owner's own chat on the chat observation or on its
+    # recent messages (a WhatsApp LID self chat is only known per message).
+    return f"""(EXISTS(SELECT 1 FROM chat_read_observations self_ro WHERE self_ro.account={chat}.account
+          AND self_ro.chat={chat}.id AND self_ro.is_self_chat) OR EXISTS(SELECT 1 FROM (SELECT recent.id,recent.revision
+          FROM messages recent WHERE recent.account={chat}.account AND recent.chat={chat}.id
+          ORDER BY recent.sent_at DESC LIMIT 20) recent JOIN message_metadata self_md ON self_md.message=recent.id
+          AND self_md.revision=recent.revision WHERE self_md.metadata->'is_self_chat'='true'::jsonb))"""
+
+
+def title_sql(chat='c'):
+    return f"""CASE WHEN {raw_title_sql(chat)} THEN coalesce(CASE WHEN {self_chat_sql(chat)}
+        THEN '{SELF_CHAT_TITLE}' END,{peer_name_sql(chat)},{chat}.title) ELSE {chat}.title END"""
 
 
 def list_chats(store,c,p,after='',limit=100,*,accounts=None,query='',chat_types=None,
@@ -40,8 +110,9 @@ def list_chats(store,c,p,after='',limit=100,*,accounts=None,query='',chat_types=
     if selected_chat:clauses.append('c.id=%s');args.append(selected_chat)
     if accounts is not None:clauses.append('c.account=ANY(%s)');args.append(accounts)
     if query:
-        clauses.append("c.title ILIKE %s ESCAPE E'\\\\'")
-        args.append('%'+query.replace('\\','\\\\').replace('%','\\%').replace('_','\\_')+'%')
+        pattern='%'+query.replace('\\','\\\\').replace('%','\\%').replace('_','\\_')+'%'
+        clauses.append("(c.title ILIKE %s ESCAPE E'\\\\' OR "+raw_title_sql()+" AND "+peer_name_sql()+" ILIKE %s ESCAPE E'\\\\')")
+        args.extend([pattern,pattern])
     if chat_types is not None:clauses.append("coalesce(c.chat_type,'unknown')=ANY(%s)");args.append(chat_types)
     if exclude_channels:clauses.append("c.chat_type IS DISTINCT FROM 'channel'")
     if exclude_chats is not None:clauses.append('NOT c.id=ANY(%s)');args.append(exclude_chats)
@@ -70,56 +141,80 @@ def list_chats(store,c,p,after='',limit=100,*,accounts=None,query='',chat_types=
     pending+=')'
     fresh="(ro.observed_at>=CURRENT_TIMESTAMP-interval '5 minutes' AND ro.observed_at>=incoming.sent_at AND ro.unread_count IS NOT NULL)"
     unread='CASE WHEN '+fresh+' THEN ro.unread_count>0 END'
-    score="(CASE WHEN c.chat_type='private' THEN 100 ELSE 25 END + CASE WHEN attention.question THEN 25 ELSE 0 END + CASE WHEN attention.known_contact THEN 10 ELSE 0 END + least(20,greatest(0,floor(extract(epoch FROM (score_clock.at-attention.sent_at))/86400)::integer)))"
+    # Waiting points grow with the square root of hours (1h=1, 1d=4, 4d=9) up to
+    # 20 at about 17 days, so recent requests differ before a day has passed.
+    waited="greatest(0,extract(epoch FROM (score_clock.at-attention.sent_at))/3600)"
+    waiting="least(20,floor(sqrt("+waited+"))::integer)"
+    score="(CASE WHEN c.chat_type='private' THEN 100 ELSE 25 END + CASE WHEN attention.question THEN 25 ELSE 0 END + CASE WHEN attention.known_contact THEN 10 ELSE 0 END + "+waiting+")"
     if awaiting_reply:clauses.append(pending)
     if only_questions:clauses.append('attention.question')
+    if (awaiting_reply or only_questions) and awaiting_reply_days:
+        # Attention needs a recent incoming message. One indexed probe per chat
+        # skips the attention, head and owner-thread lookups for quiet chats,
+        # which are most of a large catalogue, before both the count and page.
+        # OFFSET 0 keeps it a chat filter instead of a semi-join after them.
+        clauses.append(f'''EXISTS(SELECT 1 FROM messages recent WHERE recent.account=c.account
+            AND recent.chat=c.id AND recent.direction='incoming' AND NOT recent.deleted
+            AND recent.sent_at>=CURRENT_TIMESTAMP-interval '{awaiting_reply_days} days' OFFSET 0)''')
     for bound,op in [(lower,'>='),(upper,'<')]:
         if bound:clauses.append('last.sent_at'+op+'%s');args.append(bound)
     after_owner=f'''(own_last.sent_at IS NULL OR m.sent_at>own_last.sent_at OR
         (a.platform='telegram' AND m.sent_at=own_last.sent_at AND {number('m')}>own_last.numeric_id)
         OR (a.platform='whatsapp' AND m.sent_at=own_last.sent_at))'''
-    ordered=','.join(term+' DESC' for term in order_terms())
-    select_message=f'''SELECT m.id,m.provider_id,m.revision,m.sender,m.sent_at,m.direction,
+    message_projection=f'''m.id,m.provider_id,m.revision,m.sender,m.sent_at,m.direction,
+        CASE WHEN a.platform='telegram' THEN {number('m')} ELSE 0::bigint END AS numeric_id,
         coalesce(nullif(left(m.body,160),''),'['||coalesce(md.metadata->>'media_kind','attachment')||']') AS snippet,
         md.metadata->'is_self_chat'='true'::jsonb AS is_self_chat,
         md.metadata->'sender_is_contact'='true'::jsonb AS known_contact,
         (position('?' in m.body)>0 OR position('？' in m.body)>0) AS question,
         CASE WHEN c.chat_type='private' THEN 'last_archived_message_incoming'
-          WHEN md.metadata->'mentions_owner'='true'::jsonb THEN 'owner_mention' ELSE 'reply_to_owner_message' END AS basis
+          WHEN md.metadata->'mentions_owner'='true'::jsonb THEN 'owner_mention' ELSE 'reply_to_owner_message' END AS basis'''
+    select_message='SELECT '+message_projection+f'''
         FROM messages m LEFT JOIN message_metadata md ON md.message=m.id AND md.revision=m.revision
         WHERE m.account=c.account AND m.chat=c.id AND {meaningful()}'''
     attention_filter='''(c.chat_type='private' AND NOT coalesce(md.metadata->'sender_is_bot'='true'::jsonb,false)
         OR c.chat_type='group' AND (md.metadata->'mentions_owner'='true'::jsonb
-          OR md.metadata->'reply_to_owner'='true'::jsonb OR EXISTS(
+          OR md.metadata->'reply_to_owner'='true'::jsonb OR (md.metadata->>'reply_to_provider_id' IS NOT NULL AND EXISTS(
             SELECT 1 FROM messages quoted WHERE quoted.account=m.account AND quoted.chat=m.chat
               AND NOT quoted.deleted AND quoted.direction='outgoing' AND
               (quoted.provider_id=md.metadata->>'reply_to_provider_id' OR (right(c.provider_chat,5)='@g.us'
                 AND left(quoted.provider_id,length('true_'||c.provider_chat||'_'))='true_'||c.provider_chat||'_'
                 AND split_part(substr(quoted.provider_id,length('true_'||c.provider_chat||'_')+1),'_',1)
-                  =md.metadata->>'reply_to_provider_id')))))'''
+                  =md.metadata->>'reply_to_provider_id')) OFFSET 0))))'''
     attention_after=after_owner
     if view=='conversation':
-        attention_after=f"(c.chat_type='private' AND {after_owner} OR c.chat_type='group' AND NOT {group_answer_sql()})"
+        attention_after=f"(c.chat_type='private' AND {after_owner})"
     last_filter=meaningful() if view=='conversation' else 'NOT m.deleted'
+    last_sql=f'''SELECT m.sent_at,m.id,m.direction,left(m.body,160) AS snippet,
+        CASE WHEN a.platform='telegram' THEN {number('m')} ELSE 0::bigint END AS numeric_id FROM messages m
+        LEFT JOIN message_metadata md ON md.message=m.id AND md.revision=m.revision
+        WHERE m.account=c.account AND m.chat=c.id AND {last_filter}'''
+    owner_sql=f'''SELECT m.sent_at,m.id,{number('m')} AS numeric_id FROM messages m
+        LEFT JOIN message_metadata md ON md.message=m.id AND md.revision=m.revision
+        WHERE m.account=c.account AND m.chat=c.id AND m.direction='outgoing' AND {meaningful()}'''
+    attention_sql=select_message+" AND m.direction='incoming' AND "+attention_after+' AND '+attention_age+' AND '+attention_filter
+    if view!='conversation':
+        attention_sql+=" AND m.sent_at>=coalesce(own_last.sent_at,'-infinity'::timestamptz)"
+    else:
+        attention_sql+=" AND m.sent_at>=CASE WHEN c.chat_type='private' THEN coalesce(own_last.sent_at,'-infinity'::timestamptz) ELSE '-infinity'::timestamptz END"
+    attention_lookup=latest_sql(attention_sql)
+    if view=='conversation':
+        attention_lookup='SELECT * FROM (('+attention_lookup+') UNION ALL ('+group_thread_query(
+            message_projection,enabled="c.chat_type='group'",criteria=attention_age,limit=1)+')) owner_attention'
     base=f''' FROM chats c JOIN accounts a ON a.id=c.account
       CROSS JOIN (SELECT %s::timestamptz AS at) score_clock
-      LEFT JOIN LATERAL (SELECT m.sent_at,m.id,m.direction,left(m.body,160) AS snippet FROM messages m
-        LEFT JOIN message_metadata md ON md.message=m.id AND md.revision=m.revision
-        WHERE m.account=c.account AND m.chat=c.id AND {last_filter} ORDER BY {ordered} LIMIT 1) last ON true
-      LEFT JOIN LATERAL (SELECT m.sent_at,{number('m')} AS numeric_id FROM messages m
-        LEFT JOIN message_metadata md ON md.message=m.id AND md.revision=m.revision
-        WHERE m.account=c.account AND m.chat=c.id AND m.direction='outgoing' AND {meaningful()}
-        ORDER BY {ordered} LIMIT 1) own_last ON true
-      LEFT JOIN LATERAL ({select_message} AND m.direction='incoming'
-        ORDER BY {ordered} LIMIT 1) incoming ON true
-      LEFT JOIN LATERAL ({select_message} AND m.direction='incoming' AND {attention_after} AND {attention_age}
-        AND {attention_filter} ORDER BY {ordered} LIMIT 1) attention ON true
+      LEFT JOIN LATERAL ({latest_sql(last_sql,both_directions=True)}) last ON true
+      LEFT JOIN LATERAL ({latest_sql(owner_sql)}) own_last ON true
+      LEFT JOIN LATERAL ({latest_sql(select_message+" AND m.direction='incoming'")}) incoming ON true
+      LEFT JOIN LATERAL ({attention_lookup}) attention ON true
       LEFT JOIN sender_profiles sp ON sp.account=c.account AND sp.chat=c.id AND sp.sender=attention.sender
       LEFT JOIN chat_read_observations ro ON ro.account=c.account AND ro.chat=c.id
       LEFT JOIN reply_dismissals d ON d.key_id=%s AND d.chat=c.id WHERE '''
     base_args=[score_at,p['key_id']]
+    # A first queue page counts the same filtered rows it sorts, in one pass.
+    inline_totals=awaiting_reply and not only_unread and not after
     totals=c.execute('SELECT count(*) AS n,count(*) FILTER(WHERE '+unread+' IS NULL) AS unknown'+base+
-        ' AND '.join(clauses),[*base_args,*args]).fetchone() if awaiting_reply else None
+        ' AND '.join(clauses),[*base_args,*args]).fetchone() if awaiting_reply and not inline_totals else None
     if only_unread:clauses.append(unread+' IS TRUE')
     total=c.execute('SELECT count(*) AS n'+base+' AND '.join(clauses),[*base_args,*args]).fetchone()['n'] if awaiting_reply and only_unread else (totals['n'] if totals else None)
     if after:
@@ -135,7 +230,19 @@ def list_chats(store,c,p,after='',limit=100,*,accounts=None,query='',chat_types=
                 clauses.append('(-'+score+',attention.sent_at,c.id)>(-%s,%s,%s)');args.extend([pos['score'],at,cid])
     sort={'id':'c.id','activity':"coalesce(last.sent_at,'-infinity') DESC,c.id DESC",
         'priority':score+' DESC,attention.sent_at,c.id'}[order]
-    rows=c.execute('''SELECT c.id,c.account,c.title,c.provider_chat AS provider_chat_id,c.chat_type AS type,
+    prefix='';where=' AND '.join(clauses);query_args=[*base_args,*args,limit+1]
+    if not awaiting_reply and not only_questions and not only_unread and exclude_senders is None and (
+            order=='activity' or order=='id' and lower is None and upper is None):
+        # Catalog ordering needs only the last head. Owner/reply/read evidence
+        # belongs to the returned page, not every permitted chat before LIMIT.
+        page_from=' FROM chats c'
+        if order=='activity':
+            page_from+=' JOIN accounts a ON a.id=c.account LEFT JOIN LATERAL ('+latest_sql(last_sql,both_directions=True)+') last ON true'
+        prefix='WITH chat_page AS MATERIALIZED (SELECT c.*'+page_from+' WHERE '+where+' ORDER BY '+sort+' LIMIT %s) '
+        base=base.replace(' FROM chats c JOIN accounts a',' FROM chat_page c JOIN accounts a',1)
+        query_args=[*args,limit+1,*base_args,limit+1];where='true'
+    rows=c.execute(prefix+'''SELECT c.id,c.account,c.title,c.provider_chat AS provider_chat_id,c.chat_type AS type,
+        '''+raw_title_sql()+''' AS _raw_title,
         last.sent_at AS last_activity,last.id AS last_message_id,last.direction AS last_message_direction,
         last.snippet AS last_message_snippet,ro.unread_count AS provider_unread_count,ro.unread_count AS unread_count,
         '''+unread+''' AS provider_unread,ro.observed_at AS read_state_observed_at,ro.basis AS read_state_basis,
@@ -153,12 +260,17 @@ def list_chats(store,c,p,after='',limit=100,*,accounts=None,query='',chat_types=
         attention.known_contact AS awaiting_reply_known_contact,'''+score+''' AS awaiting_reply_priority,
         array_remove(ARRAY[CASE WHEN c.chat_type='private' THEN 'private_chat' ELSE 'group_attention' END,
           CASE WHEN attention.question THEN 'question_mark' END,CASE WHEN attention.known_contact THEN 'provider_contact' END,
-          'waiting_age_capped_20_days'],NULL) AS awaiting_reply_priority_reasons,
+          CASE WHEN '''+waiting+'''>=20 THEN 'waiting_age_capped' WHEN '''+waiting+'''>0 THEN 'waiting_age' END],NULL)
+          AS awaiting_reply_priority_reasons,floor('''+waited+''')::integer AS awaiting_reply_waiting_hours,
         '''+incoming_head+''' AS _incoming_head,own_last.sent_at AS _own_sent_at,own_last.numeric_id AS _own_numeric_id,
         a.platform AS _platform,coalesce('''+dismissed+''',false) AS awaiting_reply_dismissed,
         CASE WHEN a.platform='whatsapp' AND attention.sent_at=own_last.sent_at THEN
-          'ambiguous_message_order' ELSE 'heuristic_not_obligation' END AS awaiting_reply_confidence'''+base+' AND '.join(clauses)+
-        ' ORDER BY '+sort+' LIMIT %s',[*base_args,*args,limit+1]).fetchall()
+          'ambiguous_message_order' ELSE 'heuristic_not_obligation' END AS awaiting_reply_confidence'''+(
+        ',count(*) OVER() AS _total,count(*) FILTER(WHERE '+unread+' IS NULL) OVER() AS _unknown' if inline_totals else '')+base+where+
+        ' ORDER BY '+sort+' LIMIT %s',query_args).fetchall()
+    if inline_totals:
+        totals={'n':rows[0]['_total'] if rows else 0,'unknown':rows[0]['_unknown'] if rows else 0};total=totals['n']
+        for row in rows:row.pop('_total');row.pop('_unknown')
     items=rows[:limit];cursor=None
     if len(rows)>limit:
         row=items[-1];position={'id':row['id'],'at':row['last_activity']}
@@ -168,11 +280,10 @@ def list_chats(store,c,p,after='',limit=100,*,accounts=None,query='',chat_types=
     for row in items:
         if row['awaiting_reply']:
             if view=='conversation' and row['type']=='group':
-                row['awaiting_reply_incoming_count']=c.execute(f'''SELECT count(*) AS n FROM messages m
-                    JOIN chats c ON c.id=m.chat AND c.account=m.account JOIN accounts a ON a.id=m.account
-                    LEFT JOIN message_metadata md ON md.message=m.id AND md.revision=m.revision
-                    WHERE m.account=%s AND m.chat=%s AND m.direction='incoming' AND {meaningful()}
-                    AND {group_attention_sql()} AND NOT {group_answer_sql()} AND {attention_age}''',
+                row['awaiting_reply_incoming_count']=c.execute('''SELECT threads.n FROM chats c
+                    JOIN accounts a ON a.id=c.account CROSS JOIN LATERAL ('''+group_thread_query(
+                        'count(*) AS n',criteria=attention_age,count=True)+
+                    ') threads WHERE c.account=%s AND c.id=%s',
                     (row['account'],row['id'])).fetchone()['n']
             else:row['awaiting_reply_incoming_count']=c.execute(f'''SELECT count(*) AS n FROM messages m
                 LEFT JOIN message_metadata md ON md.message=m.id AND md.revision=m.revision
@@ -198,6 +309,14 @@ def list_chats(store,c,p,after='',limit=100,*,accounts=None,query='',chat_types=
             if state['last_turn']=='unknown':row['last_message_direction']=None
             if row['awaiting_reply'] and state['suggested_action']=='unclear':
                 row['awaiting_reply_confidence']=state['basis']['code']
+    raw=[row['id'] for row in items if row.pop('_raw_title')]
+    if raw:
+        labels={r['id']:r for r in c.execute('SELECT c.id,'+peer_name_sql()+' AS name,'+self_chat_sql()+
+            ' AS self FROM chats c WHERE c.id=ANY(%s)',(raw,))}
+        for row in items:
+            label=labels.get(row['id'])
+            if label and label['self']:row.update(title=SELF_CHAT_TITLE,title_basis='self_chat')
+            elif label and label['name']:row.update(title=label['name'],title_basis='latest_incoming_sender_name')
     targets(p,[r['id'] for r in items])
     if include_coverage:
         from .chat_evidence import chat_statuses

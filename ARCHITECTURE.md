@@ -92,7 +92,7 @@ Examples of boundaries that must stay explicit:
   prove current provider completeness, transcription quality, server capacity
   or health of an off-site backup receiver.
 
-Future behavior belongs in [ROADMAP.md](ROADMAP.md) or an explicitly scoped
+Future behavior belongs in [BACKLOG.md](BACKLOG.md) or an explicitly scoped
 change intent. It must not silently become an implemented baseline spec during
 a repository scan.
 

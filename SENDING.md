@@ -16,13 +16,34 @@ approval. The API intentionally does not accept `approved: true` as proof.
 1. Resolve the account and archive chat ID. Display the account, recipient,
    exact text and optional reply to the owner; obtain confirmation.
 2. Generate an action ID (8–128 ASCII letters/digits or `_.:-`), then call
-   `send_message(account, chat_id, text, request_id, reply_to="")`.
+   `send_message(account, chat_id, text, request_id, reply_to="", wait_s=0)`.
    `reply_to` is the archive message ID in the **same chat and account**.
 3. Poll `get_send_status(send_id)`. An HTTP/MCP response or `queued` status
    alone does not prove that the provider accepted the message.
 4. After a lost response, reuse the **same request ID and exact payload**.
    Changing the payload with that ID fails with `idempotency_conflict`.
    Never create another action ID automatically to bypass an uncertain result.
+
+### Optional bounded status wait
+
+`wait_s` accepts a number from 0 to 25 seconds. Its default, `0`, returns the
+enqueue receipt immediately. A positive value observes the same send until it
+leaves `queued`/`dispatching`, or the wait expires. Each short poll authorizes
+the same key again; no database connection is held between polls. Waiting never
+dispatches another attempt or changes the request ID.
+
+Wait responses preserve the normal status and receipt fields and add
+`wait_elapsed_s` and `wait_timed_out`. A timed-out wait can still return `queued`
+or `dispatching`; continue with `get_send_status(send_id)`. `unknown` ends the
+wait immediately and remains uncertain. A matching body or timestamp in history
+does not become a provider receipt. `sent` continues to mean provider acceptance,
+with recipient delivery described separately by `delivery_receipt`.
+
+The service admits at most 32 concurrent waits per process. `send_wait_busy`
+or `send_status_timeout` describes the observation request, not a failed send.
+Inspect the same action; after a lost enqueue response, reuse its original
+request ID and exact payload. Cancelling or timing out a wait never cancels or
+retries the already queued action.
 
 `preview_message` requires only `read` and does not require sending to be enabled
 or a collector to be connected. For rich text, first preview the exact account,
@@ -33,7 +54,7 @@ The digest detects payload changes; it does not prove human approval.
 Sending tools are also available as `POST /v1/send_message` and
 `POST /v1/get_send_status`, using the same scoped bearer key. Responses contain
 receipt metadata, not the outgoing text or provider session credentials.
-Refresh MCP discovery after upgrading; the expanded manifest contains 24 tools.
+Refresh MCP discovery after upgrading; the messaging manifest contains 41 tools.
 
 | State | Meaning | Next action |
 | --- | --- | --- |

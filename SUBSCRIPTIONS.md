@@ -1,16 +1,18 @@
 # Durable subscriptions and agent delivery
 
-Status: **0.9.16 / schema 26 implements the general subscription core**:
-explicit sources and senders, persistent lifecycle, committed-event matching and
-passive event pages. The delivery architecture below also describes subsequent
-work. Subscription ACKs, dispatch outbox, batching, notifications, host wake-up
-and confirmed-send reply/mention presets are **not implemented** in this slice.
-The JSON POST transport, existing archive ACKs and sending rules are unchanged.
-Installing or upgrading does not create a subscription or activate a provider.
+Current delivery work and priority: [BACKLOG.md](BACKLOG.md), DK-08–DK-10.
+This document is the API and delivery contract.
+
+Status: **schema 32** implements persistent structural subscriptions, passive
+inspection, independent fetch/ACK, bounded long polling, native wake selectors,
+operator-registered signed hints and private feedback. Installing the package
+does not register a receiver, create a subscription, activate a provider or
+verify a host turn. Batching, quiet hours, silence timers and unsolicited MCP
+resource notifications remain future work.
 
 ## Available API
 
-The same five operations are MCP tools, `/v1/<operation>` POST endpoints and
+The core operations are MCP tools, `/v1/<operation>` POST endpoints and
 Python/npm client methods:
 
 | Operation | Arguments | Behavior |
@@ -126,280 +128,118 @@ an unconditional model turn. Batch delivery groups references; it does not run a
 summarizer in the core. A batch must flush at its maximum wait even under a
 continuous message stream.
 
-## Planned delivery architecture
+## Schema 32: explicit consumption and registered hints
 
-```mermaid
-flowchart LR
-    C[Existing Telegram / WhatsApp collectors] --> J[Committed archive event journal]
-    F[Original / extraction / enrichment workers] --> J
-    J --> M[Bounded subscription matcher]
-    S[Subscription definitions and source sets] --> M
-    M --> Q[Durable event references and dispatch outbox]
-    Q --> P[Authenticated event fetch + ACK]
-    Q --> N[MCP resource-change hints]
-    Q --> W[Registered signed receiver]
-    N --> H[Host adapter / task scheduler]
-    W --> H
-    H --> P
-    P --> A[Agent: read, aggregate, propose actions]
+Schema 32 adds independent subscription consumption. `fetch_subscription_events`
+returns a bounded page after this subscription's server ACK position. A key with
+explicit `subscription-ack` also receives a random five-minute page receipt;
+only its SHA-256 is stored. `ack_subscription_events(subscription_id, receipt,
+version)` atomically advances that position. Exact receipt retries return the
+original result; competing pages, configuration changes, expiry and changed
+permissions cannot advance it. At most 128 live receipts are retained for one
+subscription. Passive `get_subscription_events` remains independent. Neither ACK
+changes the provider's read state or archive consumer positions.
+
+`wait_for_subscription_events(subscription_id, timeout=25, limit=50)` polls those
+pages for at most 25 seconds. Every read reauthorizes and releases its connection
+before the short sleep. There are at most 32 admitted waits per API process;
+client cancellation or a response deadline retains admission until an in-flight
+DB read finishes. `timeout=0` performs one read with a separate five-second
+response deadline. A deadline before any authorized page returns
+`subscription_wait_timeout`; a normal empty authorized page returns
+`wait_status=timeout`. No connection is retained while waiting for new events.
+
+Creation accepts optional `wake_rules`, an OR selection of `incoming_message`,
+`owner_mention`, `reply_to_owner` and `reply_to_confirmed_send`. Reasons come from
+immutable event snapshots of validated native metadata on incoming
+`message.created` events. Edits, receipts/status changes and processing readiness
+never count as a new human reply. `reply_to_send` freezes
+a sent reference owned by this exact key, including its account, chat and exact
+provider receipt; unknown/failed sends and another key's send cannot become an
+anchor. `reply_to_confirmed_send` requires that anchor and an exact native reply
+reference in the same account/chat. Names, body text and nearby timestamps never
+establish a match. Telegram owner replies freeze the exact outgoing archive
+target and its current revision when the incoming event is captured. Missing or
+other-chat targets stay unknown, even if imported later. A WhatsApp confirmed
+watch can freeze its native stanza from the exact outgoing archive row when the
+watch is created: only the known chat prefix and exact known participant suffix
+are removed, preserving underscores and the original provider ID. Missing target
+or ambiguous components leave the stanza projection unknown. Matching and page
+reads never resolve these proofs against a later message revision, infer PN/LID
+aliases or rewrite provider identifiers. Only a complete native participant JID
+can be removed as a participant suffix; a bare legacy sender value cannot shorten
+the stanza. An explicit native `reply_to_owner=false` excludes a projected stanza
+match because it identifies a quote to another participant. Historical events have a separate `historical_event` reason
+and do not satisfy live wake rules. Existing selectors without these rules keep
+their behavior. There are no quiet-hours or silence timers in this version.
+
+A webhook receiver is an **operator registration**, not an agent-supplied URL.
+The operator installs `delivery_role.sql` and supplies a separate restricted
+LOGIN inheriting `messaging_event_delivery`. A private JSON registration contains
+`receiver_id` (fresh UUID), `principal`, `key_id`, `endpoint` (HTTPS, port 443,
+no credentials/query/fragment), and `secret_file` (absolute private regular file,
+32–4096 secret bytes). With an owner DSN, run:
+
+```sh
+DATABASE_URL_FILE=/private/operator.dsn python -m messaging_service.delivery_worker \
+  --register-receiver /private/receiver.json
 ```
 
-Use the existing PostgreSQL journal and a small background matcher/dispatcher.
-Do not add Kafka, a second messenger client, an LLM in the ingestion transaction,
-or a separate database for this first implementation. This is a design choice,
-not a capacity benchmark. PostgreSQL wake-up signals can reduce polling latency;
-the durable journal remains the recovery source if a signal is lost.
+The agent sees only the opaque receiver ID. The receiver is immutable; rotation
+registers another ID, then `configure_subscription_delivery(subscription_id,
+version, receiver_id)` explicitly binds it and advances the subscription version.
+Passing `receiver_id=null` disables delivery. `test_subscription(subscription_id,
+request_id)` enqueues a synthetic hint without creating an archive event. Its
+request ID is idempotent, with at most one new test per subscription per minute.
+A receiver HTTP success is not a verified host turn; all hints and probes report
+`host_turn_verified=false`. Host adapters must separately prove that integration.
 
-## Reused foundation and remaining delivery work
+Run `python -m messaging_service.delivery_worker` using only the dispatcher DSN
+and private receiver secret mounts. `--once` is a bounded operator pass. Keep the
+matcher on its existing internal-only network; public HTTPS egress belongs to a
+separate dispatcher deployment. No dispatcher is started by installing the
+package. Operator `--disable-receiver UUID` uses the same authorization fence as
+in-flight delivery and cancels queued hints. No internal/private IP exceptions
+are enabled.
 
-The implementation preserves these boundaries:
+The matcher commits opaque outbox hints with exact match references and its
+checkpoint. Hints contain only a stable ID, subscription ID/version, journal
+boundary, kind and the unverified-host flag. A separate dispatcher uses leased
+at-least-once delivery, retries transient failures with bounded backoff, and moves
+exhausted hints to `dead_letter` after eight durably reserved attempts or seven
+days. The reservation commits before external I/O, so a crash after POST cannot
+reset the attempt budget. It checks
+credential, scope, lifecycle and exact receiver binding before each attempt. A
+successful hint never ACKs events. Receivers deduplicate `X-DeedKit-Hint-ID` and
+verify `X-DeedKit-Signature` as `sha256=HMAC(secret, timestamp + '.' + exact body)`;
+check timestamp age before accepting a request. TLS pins a validated public DNS
+address for the connection; redirects, private addresses and mixed public/private
+DNS responses fail closed. Response reads and TLS exchange are bounded. Hint
+counts are visible through `get_subscription`.
 
-- `Store.append_event` writes revision snapshots and advances `feed_counter` in
-  the transaction. Its counter row lock serializes the publication frontier;
-  preserve that property instead of substituting a sequence that can expose
-  gaps from uncommitted transactions.
-- `get_updates` filters accounts, chats, senders, event kinds, origin, direction
-  and dates. Consumers bind their filters and use version-checked page ACKs.
-- `events`, `consumers` and `deliveries` already exist. Agent-send provenance and
-  provider receipt observations can supply a confirmed reply anchor.
-- ACLs intersect principal permissions with a credential ceiling. The common
-  authorization layer coordinates access with operator policy changes.
-- Existing event kinds are `message.created`, `message.edited`,
-  `message.deleted`, `message.status` and `attachment.ready`. Extraction,
-  transcript and description readiness now have independent file event kinds.
-- The transport does not currently deliver unsolicited resource updates or
-  start an agent turn. A filtered archive consumer is not a push subscription.
+Schema-32 backup manifests include consumption, hashed receipts, receiver
+registrations, bindings, outbox and local feedback. Quarantine disables receivers,
+cancels pending/leased hints and removes receipts, in addition to closing
+subscriptions and revoking credentials. Receiver secrets stay in private operator
+configuration and must be backed up separately under the recovery-state policy.
 
-Do not repurpose `consumers` or silently change old filter/ACK semantics. Reuse
-the journal and common policy code with separate subscription state.
+`submit_feedback(request_id, category, description, operation?, refs?)` records
+private feedback locally with explicit `feedback-write`. Categories are `bug`,
+`feature`, `quality` and `other`; descriptions are limited to 4000 characters and
+references to 32 IDs per type. Message/chat/subscription references are validated
+against the current credential. Each key has a 1000-record bound; request-ID
+retries are idempotent and changed payloads conflict. `list_feedback(limit=50)`
+returns only this exact key's records; source reference IDs are omitted to avoid
+revealing a previously authorized scope after a policy change. Feedback does not
+send messages, create external issues or forward reports to a third party.
 
-## Subscription contract
+## Remaining extensions and verification boundaries
 
-A server-generated subscription ID identifies one selection and one delivery
-stream. Persist authenticated principal, originating credential ID and permission
-versions; never take ownership from a client-supplied agent or task ID. A client
-correlation label helps routing but is not authority to contact another task.
-
-Persist the following separately:
-
-1. **Source selection:** explicit account/chat references and optional verified
-   account-scoped sender references. A named source set expands to those IDs.
-2. **Event selection:** kinds, direction, historical-origin policy and an
-   optional reply/mention predicate.
-3. **Starting boundary:** atomically observed committed journal frontier,
-   or an explicit bounded replay boundary.
-4. **Delivery:** immediate or batch, debounce, maximum wait, bounded page size,
-   registered receiver reference and task binding if configured.
-5. **Lifecycle:** active, paused, expired, closed or access-changed; expiry and
-   version-checked configuration. Definitions survive service restarts.
-
-Sources are a frozen explicit set in the first version. A source-set edit creates
-a new selection generation and defines whether newly added sources replay.
-Discovery of a new chat must not silently expand scope. A future account-wide
-subscription may explicitly include future chats, with a visible policy.
-Person names/usernames are resolved at setup; do not merge people across accounts
-by display name or assume a WhatsApp LID is a verified phone identity.
-
-Start with structural filters. Add bounded PostgreSQL text predicates later,
-reusing existing search semantics. Evaluate text against the event's revision,
-not a later edited body. File-text matching needs its own extraction-ready event
-and a visible processing frontier; an unfinished index cannot mean no match.
-LLM relevance rules and semantic filters are a later optional processing layer.
-
-## Reply and mention presets
-
-Bind a reply anchor to a confirmed outgoing receipt belonging to the caller,
-the same account/chat and its exact provider message reference. A failed or
-uncertain send is not a confirmed anchor. Keep two meanings explicit:
-
-- A new incoming private-chat message after the watch boundary is a dialogue
-  update, even if it has no native reply reference.
-- A native reply to the selected message is an explicit reply, where the
-  provider actually supplied that reference.
-
-Group policies can select native replies to the anchor, verified mentions of the
-configured account owner, or all incoming messages. Unknown mention/reply
-metadata stays unknown; textual name matching is not proof of a native mention.
-Persist unresolved reference evidence so an out-of-order anchor can be matched
-later without losing the event. Expiry and pause/replay boundaries still apply.
-Receipts and status changes are selectable but do not count as a human reply.
-
-## Event and file semantics
-
-Implemented processing event kinds are `file.text.ready`,
-`file.transcript.ready`, `file.description.ready` and `file.processing.failed`.
-They refer to an attachment occurrence, exact message revision and versioned
-artifact. Original availability remains the existing `attachment.ready` kind.
-
-Message arrival must not wait for a download or model. Original-ready,
-extracted-text-ready and derived-artifact-ready events are independent. An
-artifact reused for an exact duplicate must still produce authorized occurrence
-references where appropriate. Do not broadcast a blob hash or description to
-other chats merely because they share the same file bytes.
-
-Preserve event order separately from provider message time. Include event ID,
-kind, exact revision, source references, provider timestamp when known,
-archive observation time, origin and readiness basis. A late historical import
-or reconciliation event must not masquerade as a fresh incoming message. A
-processing completion for an older message is a new processing event, not a new
-message. Live/catch-up classification must be tested against collector behavior.
-Completion retries do not duplicate readiness. Obsolete/deleted occurrences do
-not publish a new ready artifact. A formatting-only revision rebind may retain
-an already-ready artifact without a new processing-completion event: the
-`message.edited` event announces the revision, and file tools show retained
-readiness. Exact duplicate parser reuse emits separate occurrence references.
-
-Implemented and planned persistence:
-
-| State | Purpose |
-| --- | --- |
-| Subscription + versioned source references | Definition, ownership, start and lifecycle |
-| Matcher checkpoint | Last scanned committed frontier for each bounded partition |
-| Subscription matches | References to journal events, unique by subscription generation/event |
-| Delivery outbox | Due hint, retry/backoff, lease and target binding |
-| Delivery receipts / progress | Issued page, authorized generation, ACK and expiry |
-| Registered receiver | Operator-owned destination, signing key and permitted task bindings |
-
-Avoid copying full message bodies into every subscriber queue. Match references,
-checkpoint advancement and dispatch eligibility commit atomically. A matcher
-crash before commit replays safely; after commit uniqueness prevents duplicate
-logical matches. Inspect existing revision snapshots for historical predicates
-instead of using mutable message fields without stating their semantics.
-
-## Recovery, batching and bounded work
-
-Use at-least-once delivery with stable IDs. Duplicate HTTP hints are expected.
-A receiver deduplicates before scheduling a turn; an agent ACKs only after
-durably recording or processing a page. A webhook HTTP success, MCP stream ACK,
-task enqueue, model completion and archive/provider read state are different.
-
-Within one task, overlapping subscriptions can share a wake-up hint while the
-fetch result retains every matched subscription ID and reason. Do not conflate
-that coalescing with deleting events. Different tasks have independent progress;
-one task cannot ACK another task's issued page.
-
-Paused subscriptions require an explicit resume policy: catch up or skip to a
-new committed boundary. Default to bounded catch-up. Offline replay is bounded
-by declared retention. If retention or a queue budget prevents full replay,
-return a durable gap marker and recoverable boundary, never silently drop events
-or report an empty complete result. Events that are still retained can be
-rematched incrementally without provider polling.
-
-Apply operator-tunable bounds to definitions, source references, pending rows,
-bytes, batch size, dispatch rate, retry lifetime and per-task wake-up frequency.
-Reserve scheduling capacity for dialogue replies while ensuring news batches
-are not starved. Continuous traffic must not postpone the maximum batch flush.
-Bulk matching/file processing must not occupy the existing provider sending
-lane or hold a long-running ACL lock/stream database connection.
-
-## Authorization and delivery security
-
-The implemented opt-in `subscription-write` permission requires `read`.
-A separate `subscription-ack` permission is proposed for the next consumption
-block; it is not in the current permission catalog. Do not grant new permissions to
-legacy credentials automatically. Operator policy remains the outer ceiling.
-
-Recheck current credential validity, principal/key ceilings and source scope on
-creation, every fetch/ACK, every dispatch and each stream notification. Stop
-delivery after revocation or expiry. Invalidate old receipts after scope or
-selection generation changes; restored permissions do not revive old grants.
-Credential rotation requires an explicit validated transfer, not implicit
-adoption by another key of the same principal.
-
-Separate keys/principals establish security boundaries. Multiple task labels
-sharing one key have routing and ACK separation but are not mutually isolated
-security identities. A host's verified binding controls which actual task is
-woken; an arbitrary task string supplied by an agent cannot select another
-user's task. Mask inaccessible source names, counts and freshness diagnostics
-after a scope reduction, including pending events and subscription metadata.
-
-Webhook destinations are operator-registered, not agent-supplied arbitrary
-URLs. Use HTTPS, signed bounded opaque hints, timestamp/replay protection,
-key rotation, timeouts and backoff. Validate destinations and resolved addresses,
-disallow redirects and private/link-local/metadata routes unless a particular
-internal receiver is explicitly configured. An event reference is not a bearer
-grant: the receiver fetches through its scoped credential. No message text,
-tokens, presigned URLs or file bytes in delivery hints or diagnostic logs.
-
-The first-party host adapter must also obey host authorization requirements;
-receiving a messenger event grants neither permission to message another Codex
-task nor permission to send a Telegram/WhatsApp reply.
-
-## MCP and host adapters
-
-The durable application subscription is distinct from a live MCP notification
-stream. For MCP 2026-07-28, an opted-in client uses `subscriptions/listen` with
-authorized resource URIs; `notifications/resources/updated` is an invalidation
-hint. The stream's acknowledged filter, cancellation, reconnect and bounded
-lifetime must follow the negotiated protocol. Older clients need a separately
-tested legacy adapter. Never advertise notification capability before delivery
-is implemented and tested.
-
-An illustrative resource URI is `anymsg://subscriptions/<opaque-id>/events`.
-Re-read durable pending events after reconnect; the resource update alone is
-not the event log. MCP resources are application-driven, so a host decides
-whether an update refreshes UI/context or schedules a new model turn. A
-registered webhook/task receiver is the fallback for a host without wake-up
-support. Advertise independently: fetch, notification transport, host scheduling
-and observed host-turn support. Do not claim Grok/Dot support from SDK schemas.
-
-The five implemented tools are listed above, with strict schemas and REST/SDK
-parity. Future `ack_subscription_events` and delivery configuration require their
-own tested contract. Existing `get_updates` stays usable.
-
-## Freshness and observability
-
-Expose source collection frontier/gaps, subscription match frontier, pending
-processing state and last delivery/ACK independently within the caller's scope.
-Return whether the matcher is caught up, paused or blocked, and why. No events
-with an offline collector cannot establish that a chat has no new messages.
-
-Measure provider-time-to-observation where known, committed ingest-to-match,
-match-to-dispatch, dispatch-to-host-enqueue and host-enqueue-to-model-start
-separately. Provider timestamps are not always precise enough for a true
-end-to-end latency. Host execution and file/model readiness must not be hidden
-inside an undifferentiated MCP response-time figure.
-
-## Delivery plan and acceptance
-
-1. **Implemented general core:** explicit chat/channel sets and account-scoped
-   senders, lifecycle, committed-event matching, passive pages and separate
-   file/artifact readiness. Reply/mention presets remain future work; generic
-   incoming filters do not establish that a message is a reply to a sent anchor.
-2. **Scoped consumption and dispatch policy:** independent fetch/ACK,
-   replay/gap reporting, immediate/batch, hard maximum flush, bounded outbox,
-   fair scheduling and retry/leases. Recheck current rights at every boundary.
-   A receiver simulator verifies duplicate hints and offline retry; it does
-   not establish actual host-turn support.
-3. **One actual host plus MCP transport:** verify supported wake-up mechanism,
-   implement a signed registered receiver if needed, then opt-in delivery and
-   measured reconnect/restart recovery. Support further hosts through adapters.
-   Live messenger sends need separate exact approval.
-4. **Later:** bounded text/file predicates, dynamically scoped future-source
-   policies, optional semantic relevance and agent-generated digests. These are
-   not prerequisites for dependable structural subscriptions.
-
-Required synthetic checks: separate accounts/principals/keys; same key/two tasks;
-unauthorized source/task binding; revoked/expired key during dispatch/stream;
-scope reduction and rotation; duplicate/out-of-order events; concurrent commits;
-reply versus unrelated group message; historical import versus live/catch-up;
-message/original/transcript stages; duplicate artifact occurrences; edited/deleted
-revision predicates; cold-file unavailability; overlapping subscriptions;
-restart/lease recovery; pause/resume; pagination/ACK conflicts; queue and retention
-gap; continuous batch traffic; maximum wait and fairness; signature/replay/SSRF
-failures. Preserve full existing CI and backup/quarantine coverage when schema
-tables, roles or API permissions change.
-
-Keep the three original pilot categories: durable selection/events, scoped
-fetch/ACK, and verified host delivery. Generalizing the first category must not
-erase the security/recovery checks in the other two. This architecture document alone is not test evidence; implemented tests cover
-the first category, while consumption/dispatch and actual host delivery remain
-unimplemented.
-
-## Primary protocol references
-
-- [MCP resources and application-driven interaction](https://modelcontextprotocol.io/specification/2026-07-28/server/resources)
-- [MCP notification subscriptions and cancellation](https://modelcontextprotocol.io/specification/2026-07-28/basic/patterns/subscriptions)
-- Current implementation: `messaging_service/store.py`, `update_queries.py`,
-  `policy.py`, `archive.py`, `receipts.py` and `app.py`; [ACCESS.md](ACCESS.md),
-  [SENDING.md](SENDING.md) and [MESSAGE_ACTIONS.md](MESSAGE_ACTIONS.md).
+Quiet hours, silence timers, debounce/batch windows, coalescing across overlapping
+subscriptions, stream resource notifications, automatic retention and text/model
+relevance predicates are not implemented. Current hints are eligible after each
+bounded matcher pass; retry/delivery progress remains separate from event ACK.
+There is no arbitrary agent URL registration, provider polling on demand, remote
+task execution or automatic MCP host scheduling. A host adapter must verify its
+own receipt handling, deduplication and actual turn creation with explicit live
+session authority before anyone claims end-to-end delivery.

@@ -213,3 +213,20 @@ Messaging0.6 добавляет в manifest reviews, review_sources и review_co
 не принимает schema6. В восстановленной копии проверить сохранение авторов,
 request UUID, ревизий/provenance и счётчика, затем стандартный quarantine.
 Отметки разбора не превращаются в разрешения на send или в изменения ACK.
+
+## Schema 32: event delivery and private feedback
+
+The manifest includes 58 tables, adding subscription consumption, hashed page
+receipts, registered receiver metadata, receiver bindings, the durable hint
+outbox and key-owned local feedback. Supported schema versions are 2–32. Install
+the matching backup runtime before applying schema 32; older pinned runtimes
+must reject newer schemas rather than silently omit the delivery state.
+
+Receiver signing bytes remain in separate private operator files, never in the
+DB tables or packages. Include those files and the dedicated dispatcher DSN in
+the explicit encrypted recovery-state configuration. Verify table hashes before
+quarantine. Quarantine then disables receivers, cancels pending/leased hints and
+removes page receipts, while preserving consumed positions, historical hints
+and feedback. Closed subscriptions, revoked API keys and disabled collectors
+still require explicit reviewed reconfiguration before any restored runtime
+may resume work. The dispatcher must stay stopped during a restore drill.

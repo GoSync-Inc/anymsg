@@ -1,5 +1,6 @@
 from datetime import datetime, timedelta, timezone
 import hashlib
+import re
 from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
 from psycopg.types.json import Jsonb
@@ -17,15 +18,38 @@ def window(start, end):
     return a, b
 
 
+TIME_FORMAT = (
+    "ISO 8601 date-time with offset or Z, e.g. 2026-10-20T10:00:00+08:00; plan event "
+    "start/end may omit the offset (YYYY-MM-DDTHH:MM[:SS]) and are then wall time in "
+    "the event's IANA timezone"
+)
+LOCAL_TIME = re.compile(r"\d{4}-\d{2}-\d{2}T\d{2}:\d{2}(?::\d{2}(?:\.\d{1,6})?)?")
+
+
+def wall_time(value, zone):
+    """Resolve an offset-free event time in its own zone; gaps and folds fail explicitly."""
+    if not isinstance(value, str) or not LOCAL_TIME.fullmatch(value):
+        return value
+    try:
+        t = datetime.fromisoformat(value).replace(tzinfo=zone)
+    except ValueError:
+        raise CalendarError("invalid_time") from None
+    if t.astimezone(timezone.utc).astimezone(zone).replace(tzinfo=None) != t.replace(tzinfo=None):
+        raise CalendarError("invalid_local_time")
+    if t.replace(fold=0).utcoffset() != t.replace(fold=1).utcoffset():
+        raise CalendarError("ambiguous_local_time")
+    return t
+
+
 def validate_event(event):
     allowed = {"title", "start", "end", "timezone", "location", "description"}
     if not isinstance(event, dict) or set(event) - allowed or not {"start", "end", "timezone"} <= set(event):
         raise CalendarError("invalid_event")
-    a, b = window(event["start"], event["end"])
     try:
-        ZoneInfo(event["timezone"])
-    except (ZoneInfoNotFoundError, TypeError):
+        zone = ZoneInfo(event["timezone"])
+    except (ZoneInfoNotFoundError, TypeError, ValueError):
         raise CalendarError("invalid_timezone") from None
+    a, b = window(wall_time(event["start"], zone), wall_time(event["end"], zone))
     for k, limit in [("title", 256), ("location", 512), ("description", 4000)]:
         if k in event and (not isinstance(event[k], str) or len(event[k]) > limit):
             raise CalendarError("invalid_event")
@@ -98,7 +122,6 @@ class FamilyService:
     def calendars(self, key):
         p = self.principal(key)
         out = []
-        scope = "agenda:read" if "agenda:read" in p["scopes"] else "availability:read"
         for c in self.store.query(
             "SELECT c.*,cn.provider,cn.enabled AS connection_enabled,g.scopes AS grant_scopes,"
             "g.visibility AS grant_visibility,a.visibility AS agent_visibility FROM calendars c "
@@ -107,7 +130,8 @@ class FamilyService:
             "WHERE g.group_id=%s AND g.person_id=%s AND a.principal_id=%s",
             (p["group_id"], p["person_id"], p["id"]),
         ):
-            if scope not in p["scopes"] or scope not in c["grant_scopes"] or not c["connection_enabled"]:
+            read_scopes = set(p["scopes"]) & set(c["grant_scopes"]) & {"agenda:read", "availability:read"}
+            if not read_scopes or not c["connection_enabled"]:
                 continue
             c["visibility"] = (
                 "busy_only" if "busy_only" in (c["agent_visibility"], c["grant_visibility"]) else "details"
@@ -120,13 +144,32 @@ class FamilyService:
                     "timezone": c["timezone"],
                     "visibility": c["visibility"],
                     "write_enabled": c["write_enabled"],
+                    "identity_basis": "provider_resource",
+                    "primary": None,
+                    "duplicate_of": None,
+                    "allowed_event_actions": self._event_actions(p, c),
                 }
             )
         return {"calendars": out, "group_id": p["group_id"]}
 
+    def _event_actions(self, principal, calendar):
+        if (
+            principal["role"] in ("dependent", "helper")
+            or calendar["visibility"] == "busy_only"
+            or calendar["privilege"] != "write"
+            or not calendar["write_enabled"]
+        ):
+            return []
+        scopes = set(principal["scopes"]) & set(calendar["grant_scopes"])
+        return [
+            action
+            for action in ("create", "update", "delete")
+            if {"plan:create", "plan:execute", "event:" + action} <= scopes
+        ]
+
     def family(self, key):
         p = self.principal(key)
-        return {
+        result = {
             "group_id": p["group_id"],
             "members": self.store.query(
                 "SELECT m.person_id,m.role,p.label FROM memberships m JOIN people p ON p.id=m.person_id "
@@ -134,12 +177,46 @@ class FamilyService:
                 (p["group_id"],),
             ),
         }
+        for member in result["members"]:
+            rows = self.store.query(
+                "SELECT calendar_ref FROM bindings WHERE group_id=%s AND person_id=%s ORDER BY calendar_ref",
+                (p["group_id"], member["person_id"]),
+            )
+            refs = []
+            for row in rows:
+                try:
+                    self.authorize(key, row["calendar_ref"], "availability:read")
+                except CalendarError:
+                    continue
+                refs.append(row["calendar_ref"])
+            member["availability_calendar_refs"] = refs
+            member["availability_sources_status"] = (
+                "unbound" if not rows else "configured" if len(refs) == len(rows) else "inaccessible"
+            )
+        return result
 
     def capabilities(self, key):
         calendars = self.calendars(key)
         return dict(
             calendars,
             permissions=sorted(self.principal(key)["scopes"]),
+            constraints={
+                "event_write": "single non-recurring timed guest-free event",
+                "time_format": TIME_FORMAT,
+                "recurrence_write": False,
+                "future_split": False,
+                "invitations": False,
+                "refresh": "bounded; pending jobs must be polled with refresh=false",
+                "window_limit_days": 31,
+                "calendar_limit": 32,
+                "event_limit": 500,
+                "cache_max_age_seconds": 300,
+                "refresh_wait_seconds": 20,
+                "plan_action_limit": 8,
+                "plan_ttl_seconds": 600,
+                "atomic_cross_provider": False,
+                "availability_sources": "member bindings plus additional_calendar_refs; unbound members remain unknown",
+            },
             features={
                 "agenda": True,
                 "slots": True,
@@ -204,15 +281,21 @@ class FamilyService:
             "required_sources_complete": all(c["status"] == "complete" for c in coverage),
         }
 
-    def slots(self, key, member_ids, start, end, duration_minutes):
+    def slots(self, key, member_ids, start, end, duration_minutes, additional_calendar_refs=None):
         p = self.principal(key)
         a, b = window(start, end)
         if "availability:read" not in p["scopes"] or not member_ids or len(member_ids) > 32:
             raise CalendarError("not_found_or_forbidden")
         if not isinstance(duration_minutes, int) or not 5 <= duration_minutes <= 1440:
             raise CalendarError("invalid_duration")
+        additional_calendar_refs = additional_calendar_refs or []
+        if len(additional_calendar_refs) > 32 or len(set(additional_calendar_refs)) != len(
+            additional_calendar_refs
+        ):
+            raise CalendarError("invalid_calendar_refs")
         refs = []
         missing = []
+        checked = []
         for member in member_ids:
             if not self.store.one(
                 "SELECT 1 FROM memberships WHERE group_id=%s AND person_id=%s AND enabled",
@@ -220,12 +303,14 @@ class FamilyService:
             ):
                 raise CalendarError("not_found_or_forbidden")
             rows = self.store.query(
-                "SELECT calendar_ref FROM bindings WHERE group_id=%s AND person_id=%s",
+                "SELECT calendar_ref FROM bindings WHERE group_id=%s AND person_id=%s ORDER BY calendar_ref",
                 (p["group_id"], member),
             )
             if not rows:
                 missing.append(member)
+            checked.append({"member_id": member, "calendar_refs": sorted(r["calendar_ref"] for r in rows)})
             refs.extend(r["calendar_ref"] for r in rows)
+        refs = list(dict.fromkeys(refs + additional_calendar_refs))
         agenda = (
             self.agenda(key, list(dict.fromkeys(refs)), start, end, "availability:read")
             if refs
@@ -235,10 +320,24 @@ class FamilyService:
             "availability": "unknown",
             "verified_slots": [],
             "coverage": agenda["coverage"],
-            "required_sources_complete": agenda["required_sources_complete"] and not missing,
+            "required_sources_complete": False,
+            "configured_sources_complete": agenda["required_sources_complete"] and not missing,
             "unbound_members": missing,
+            "availability_scope": "configured_and_explicit_sources"
+            if additional_calendar_refs
+            else "configured_bindings",
+            "member_sources_complete": "unknown",
+            "checked_member_sources": checked,
+            "configured_bindings_availability": "unknown",
+            "candidate_slots": [],
+            "source_selection": {
+                "scope": "configured_and_explicit_sources_only",
+                "calendar_refs": refs,
+                "member_sources": checked,
+                "additional_calendar_refs": additional_calendar_refs,
+            },
         }
-        if not result["required_sources_complete"]:
+        if not result["configured_sources_complete"]:
             return result
         busy = [
             (max(a, instant(e["start"])), min(b, instant(e["end"]))) for e in agenda["events"] if e["busy"]
@@ -252,9 +351,12 @@ class FamilyService:
         cursor = a
         for left, right in sorted(busy) + [(b, b)]:
             if left - cursor >= timedelta(minutes=duration_minutes):
-                result["verified_slots"].append({"start": cursor.isoformat(), "end": left.isoformat()})
+                result["candidate_slots"].append({"start": cursor.isoformat(), "end": left.isoformat()})
             cursor = max(cursor, right)
-        result["availability"] = "verified"
+        # Bindings identify checked sources, not an owner-reviewed inventory of
+        # every source of a person's availability. Never promote that subset to
+        # a claim that the member is free in every calendar.
+        result["configured_bindings_availability"] = "verified"
         return result
 
     def plan(self, key, actions):
@@ -316,6 +418,7 @@ class FamilyService:
                     },
                 )
             prepared.append(step)
+        overlap_check = self._overlap_check(key, p, prepared, touched)
         plan_id = ref("plan")
         expires = datetime.now(timezone.utc) + timedelta(minutes=10)
         payload = {"steps": prepared}
@@ -329,11 +432,136 @@ class FamilyService:
             "steps": [self._preview(s) for s in prepared],
             "notifications": "none; events with guests are blocked",
             "atomic": False,
+            "overlap_check": overlap_check,
         }
+
+    def _overlap_check(self, key, principal, prepared, touched):
+        """Advisory cached evidence within current read grants, never permission
+        to read a hidden calendar or a guarantee against a concurrent edit."""
+        proposed = [s for s in prepared if s["action"] != "delete"]
+        result = {
+            "status": "incomplete",
+            "scope": "visible_calendars",
+            "coverage": [],
+            "overlaps": [],
+            "checked_at": datetime.now(timezone.utc).isoformat(),
+            "execution_recheck": False,
+        }
+        if not proposed:
+            result["status"] = "not_applicable"
+            return result
+        a = min(instant(s["event"]["start"]) for s in proposed)
+        b = max(instant(s["event"]["end"]) for s in proposed)
+        # Independent valid actions may span more than the maximum read window.
+        # Such a plan stays valid but its overlap check is explicitly incomplete.
+        if b - a > timedelta(days=31):
+            result["reason"] = "combined_window_exceeds_limit"
+            return result
+        rows = self.store.query(
+            "SELECT c.ref,g.scopes FROM calendars c JOIN connections cn ON cn.id=c.connection_id "
+            "JOIN calendar_grants g ON g.calendar_ref=c.ref JOIN agent_calendars ac ON ac.calendar_ref=c.ref "
+            "WHERE g.group_id=%s AND g.person_id=%s AND ac.principal_id=%s AND cn.enabled ORDER BY c.ref",
+            (principal["group_id"], principal["person_id"], principal["id"]),
+        )
+        readable = []
+        for row in rows:
+            scopes = set(row["scopes"]) & set(principal["scopes"])
+            scope = next((s for s in ("availability:read", "agenda:read", "event:read") if s in scopes), None)
+            if scope:
+                readable.append((row["ref"], scope))
+        if len(readable) > 32:
+            result["reason"] = "calendar_limit"
+            return result
+        event_count = 0
+        for calendar_ref, scope in readable:
+            _, cal = self.authorize(key, calendar_ref, scope)
+            try:
+                agenda = self.agenda(key, [calendar_ref], a, b, scope)
+            except CalendarError as error:
+                if str(error) != "coverage_incomplete":
+                    raise
+                result["reason"] = "event_limit"
+                result["coverage"].append(
+                    {"calendar_ref": calendar_ref, "status": "unknown", "error": "event_limit"}
+                )
+                break
+            result["coverage"].extend(agenda["coverage"])
+            event_count += len(agenda["events"])
+            if event_count > 500:
+                result["reason"] = "event_limit"
+                break
+            for event in agenda["events"]:
+                if not event["busy"]:
+                    continue
+                # Exclude every occurrence of a resource moved/deleted by this
+                # plan. This lookup remains inside the same authorized calendar.
+                if (
+                    touched
+                    and cal["visibility"] == "details"
+                    and self.store.one(
+                        "SELECT 1 FROM occurrences WHERE ref=%s AND calendar_ref=%s AND resource_ref=ANY(%s)",
+                        (event.get("event_ref"), calendar_ref, list(touched)),
+                    )
+                ):
+                    continue
+                for step in proposed:
+                    if instant(event["start"]) < instant(step["event"]["end"]) and instant(
+                        event["end"]
+                    ) > instant(step["event"]["start"]):
+                        overlap = {
+                            "step": step["ordinal"],
+                            "calendar_ref": calendar_ref,
+                            "start": event["start"],
+                            "end": event["end"],
+                            "visibility": cal["visibility"],
+                        }
+                        if cal["visibility"] == "details":
+                            overlap["event_ref"] = event["event_ref"]
+                        result["overlaps"].append(overlap)
+                        if len(result["overlaps"]) >= 500:
+                            result["reason"] = "overlap_limit"
+                            return result
+        for index, step in enumerate(proposed):
+            for other in proposed[index + 1 :]:
+                if instant(step["event"]["start"]) < instant(other["event"]["end"]) and instant(
+                    step["event"]["end"]
+                ) > instant(other["event"]["start"]):
+                    result["overlaps"].append(
+                        {"step": step["ordinal"], "other_step": other["ordinal"], "kind": "proposed_overlap"}
+                    )
+        if (
+            readable
+            and not result.get("reason")
+            and all(c["status"] == "complete" for c in result["coverage"])
+        ):
+            result["status"] = "complete_within_visible_calendars"
+        return result
 
     @staticmethod
     def _preview(step):
-        return {k: v for k, v in step.items() if k not in ("target_id", "resource_ref", "expected_etag")}
+        before = step.get("before", {})
+        after = step.get("event", {})
+        fields = ("title", "start", "end", "timezone", "location", "description")
+        diff = {}
+        update = step.get("action") == "update"
+        for field in fields:
+            # Providers keep fields an update omits, and stored details carry no original
+            # timezone; neither may be shown as a change the apply would not make.
+            if update and (field not in after or field not in before):
+                continue
+            old, new = before.get(field), after.get(field)
+            equal = old == new
+            if field in ("start", "end") and old and new:
+                equal = instant(old) == instant(new)
+            if not equal:
+                diff[field] = {"before": old, "after": new}
+        if update and before.get("all_day"):
+            # Writes are always timed, so applying converts an all-day event.
+            diff["all_day"] = {"before": True, "after": False}
+        return {
+            **{k: v for k, v in step.items() if k not in ("target_id", "resource_ref", "expected_etag")},
+            "diff": diff,
+        }
 
     def validate_plan(self, plan, principal_id):
         p = self.principal(principal_id=principal_id)

@@ -17,7 +17,8 @@ def occurrence(c,p,attachment_id,*,lock=False):
     if not isinstance(attachment_id,str) or not 1<=len(attachment_id)<=256:
         raise APIError('not_found',404)
     where,args=scope_filter(p,'m')
-    row=c.execute('''SELECT j.*,j.state AS job_state,m.chat,m.provider_id AS provider_message_id,
+    row=c.execute('''SELECT j.*,j.state AS job_state,
+        (j.lease_until>clock_timestamp()) AS transfer_active,m.chat,m.provider_id AS provider_message_id,
         m.revision AS message_revision,ch.provider_chat AS provider_chat_id,
         a.digest,a.filename,a.mime,a.bytes,a.id AS registered_id,
         p.enabled AS collection_enabled,p.include_chats,p.exclude_chats,p.discover_chats
@@ -62,6 +63,10 @@ def request(store,c,p,attachment_id):
             not (row['discover_chats'] or row['provider_chat_id'] in row['include_chats'])):
         result.update(request_status='blocked',reason='collection_disabled',requested_until=None,
             next_action='check_collection_policy')
+        return serial(result)
+    if row['job_state']=='leased' and row['transfer_active']:
+        result.update(request_status='processing',requested_until=row['requested_until'],
+            next_action='get_attachment')
         return serial(result)
     if row['job_state']=='failed' or row['attempts']>=5:
         result.update(request_status='failed',reason=row['error_code'] or 'retry_exhausted',

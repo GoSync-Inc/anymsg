@@ -268,8 +268,11 @@ def test_native_contact_gaps_do_not_remove_telegram_support_or_expand_grants(tmp
     app, value, path, seen = setup(
         tmp_path,
         {
-            "wa": {"provider": "whatsmeow", "operations": ["block_contact"]},
-            "tg": {"operations": ["add_contact", "block_contact", "unreviewed_operation"]},
+            "wa": {"provider": "whatsmeow", "operations": ["block_contact"], "available_operations": ["add_contact"]},
+            "tg": {
+                "operations": ["add_contact", "block_contact", "unreviewed_operation"],
+                "available_operations": ["add_contact", "block_contact", "unreviewed_operation"],
+            },
         },
         selected=["add_contact"],
         permissions=["contacts-manage"],

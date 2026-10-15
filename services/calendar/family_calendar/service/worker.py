@@ -156,11 +156,17 @@ class Worker:
             conn.execute("UPDATE sync_jobs SET state='sending' WHERE id=%s", (job["id"],))
         try:
             # Refresh requests cannot bypass the same calendar visibility boundary.
-            p = self.service.principal(principal_id=job["principal_id"])
-            scope = "agenda:read" if "agenda:read" in p["scopes"] else "availability:read"
-            _, cal = self.service.authorize(
-                None, job["calendar_ref"], scope, principal_id=job["principal_id"]
-            )
+            for scope in ("agenda:read", "availability:read"):
+                try:
+                    _, cal = self.service.authorize(
+                        None, job["calendar_ref"], scope, principal_id=job["principal_id"]
+                    )
+                    break
+                except CalendarError as error:
+                    if error.code != "not_found_or_forbidden":
+                        raise
+            else:
+                raise CalendarError("not_found_or_forbidden")
             with self.store.transaction() as lock:
                 if not lock.execute(
                     "SELECT pg_try_advisory_xact_lock(hashtextextended(%s,0)) AS ok",
@@ -180,8 +186,10 @@ class Worker:
             state = "failed"
         except Exception:
             self.store.query(
-                "UPDATE coverage SET status='blocked',error='provider_unavailable' WHERE calendar_ref=%s",
-                (job["calendar_ref"],),
+                "INSERT INTO coverage(calendar_ref,start_at,end_at,status,error) "
+                "VALUES (%s,%s,%s,'blocked','provider_unavailable') ON CONFLICT(calendar_ref) "
+                "DO UPDATE SET status='blocked',error='provider_unavailable'",
+                (job["calendar_ref"], job["start_at"], job["end_at"]),
             )
             state = "failed"
         self.store.query("UPDATE sync_jobs SET state=%s WHERE id=%s", (state, job["id"]))

@@ -36,6 +36,7 @@ def test_timeout_after_mutation_dispatch_is_unknown_and_never_retried(tmp_path):
             "error": "mutation_outcome_unknown",
             "outcome": "unknown",
             "automatic_retry": False,
+            "reason": "gateway_timeout",
         }
         assert attempts == [args]
         value["revision"] += 1

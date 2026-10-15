@@ -15,3 +15,7 @@ GRANT SELECT ON subscriptions TO messaging_subscriptions;
 GRANT UPDATE(state,version,updated_at,matched_through,blocked_reason,gap,
              missing_evidence,last_matched_at) ON subscriptions TO messaging_subscriptions;
 GRANT SELECT,INSERT ON subscription_matches TO messaging_subscriptions;
+
+-- Atomically enqueue opaque references only; no endpoint/secret access or egress.
+GRANT SELECT ON subscription_delivery TO messaging_subscriptions;
+GRANT SELECT,INSERT ON subscription_outbox TO messaging_subscriptions;

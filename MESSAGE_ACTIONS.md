@@ -1,11 +1,13 @@
 # Message actions and agent feedback
 
-This plan keeps collection/retrieval separate from external actions. Existing
-history, storage and file-understanding work remains in [ROADMAP.md](ROADMAP.md).
+This document preserves feedback history and action/acceptance boundaries.
+Current work and status are maintained only in [BACKLOG.md](BACKLOG.md),
+including optional server approvals (DK-27) and discovery notifications (DK-30).
+Collection/retrieval remains separate from external actions.
 An agent report is evidence about a client/version, not permission to send or
 change approval policy. Reproduce findings against the current server first.
 
-## Immediate follow-up (0.9.12)
+## Implemented sender/provenance follow-up (0.9.12)
 
 - Complete missing Telegram private short-send senders from the cached self
   entity after checking the configured account owner ID. Never infer anonymous
@@ -44,12 +46,12 @@ Receipt capture must not mark provider chats read or acknowledge archive updates
    supplies a peer and maximum message ID, not an exact recipient read timestamp
    or separate device-delivery timestamp. Unknown times stay null. A private-chat
    boundary must not be described as every participant reading a group message.
-3. Capture WhatsApp observations through the current whatsapp-web.js
-   [`message_ack` event](https://docs.wwebjs.dev/Client.html#event:message_ack) and
-   [ACK states](https://docs.wwebjs.dev/global.html#MessageAck). The report's
-   whatsmeow example does not describe the deployed transport. Missing read
-   receipts mean unknown. Start with events, without extra authenticated sessions
-   or background provider polling.
+3. The historical browser adapter captures WhatsApp observations through
+   [`message_ack`](https://docs.wwebjs.dev/Client.html#event:message_ack) and
+   [ACK states](https://docs.wwebjs.dev/global.html#MessageAck). The native
+   [whatsmeow provider](docs/whatsapp-native.md) is now also implemented, with
+   bounded observed receipt evidence. Missing read receipts remain unknown;
+   observation does not start extra sessions or imply continuous provider polling.
 4. Expose receipt state, basis, `observed_at` and optional provider time in send
    status and message evidence. Emit deduplicated receipt updates; extend kind
    filters without silently changing existing consumer bindings.
@@ -57,7 +59,7 @@ Receipt capture must not mark provider chats read or acknowledge archive updates
    isolation, groups, ACL changes, migrations and quarantine backup restore.
    Live acceptance needs a separately approved send and a recipient read.
 
-## Then: reactions and expanded sends
+## Implemented formatting and supported expanded actions
 
 Formatting is a new requirement from the subsequent feedback. Its implemented 0.9.14
 contract is in [FORMATTING.md](FORMATTING.md): bounded maintained parser,
@@ -66,22 +68,27 @@ format evidence. It is implemented after receipt capture
 and before expanded sends; it uses the existing provider sessions. Long messages stay
 single actions until an explicit multipart protocol exists.
 
-| Stage | Scope | Acceptance boundary |
-| --- | --- | --- |
-| Read reactions | Emoji, actor/time only when supplied; changes/removals | Unknown/anonymous actors explicit; account isolation |
-| Files and voice | Registered originals; no arbitrary filesystem path or URL | Exact attachment approval, MIME/size quotas, upload uncertainty |
-| Edit/delete own sends | Explicit target revision and approved change | Reject stale targets; preserve evidence; no blind retries |
-| Reactions/read marks | Separate external actions and permissions | Exact approval; ordinary retrieval stays passive |
-| Server approvals | Optional drafts and owner approval channel | Payload-bound, single-use, expiring proof; agent keys cannot approve drafts |
+Reaction reads, file/voice sends, supported own-message edits/deletes,
+reactions and explicit read marks are implemented through the allowlisted
+[operation catalog](MESSENGER_OPERATIONS.md). Support differs by provider/account;
+check the current manifest instead of treating an upstream capability as a
+completed adapter. [Scoped file uploads](https://github.com/GoSync-Inc/deedkit/pull/22)
+also exist; staging bytes does not approve or send them.
 
-Text reply targeting already exists and needs regression/live verification.
-Typing indicators are lower priority. A future server approval flow must be
-explicitly configured: the report does not change acting-agent approval mode.
+The acceptance boundaries remain: observed/unknown actors, account isolation,
+exact attachment/target approval, bounded resources, stale-target rejection,
+retained evidence and no blind retries. Ordinary reads stay passive. An unknown
+mutation outcome must be reconciled, not resent with a new request ID.
+
+Optional typing extensions and server approvals are DK-26/DK-27 in the central
+backlog. If enabled, server approval must be payload-bound, single-use and
+expiring; agent keys cannot approve drafts. The report does not change the
+owner's acting-agent approval mode.
 
 ## Client discovery
 
-The current manifest has 20 tools. A different client count alone does not prove
-caching: compare actual names, the authenticated server's `tools/list`,
+Tool counts depend on the current version, provider and grants. A different
+client count alone does not prove caching: compare actual names, `tools/list`,
 `capabilities.tool_manifest` and any host filtering/configuration first. Check
 the caller's effective permissions separately; discovery never grants sending
 access. The existing REST fallback uses the same ACL and is useful for diagnosis
@@ -95,10 +102,10 @@ delivery. The [tools specification](https://modelcontextprotocol.io/specificatio
 ties that capability to list-change notifications; it does not guarantee that
 every client discards its persistent cache.
 
-Implement discovery notifications as a separate compatibility stage: bind streams
-to authenticated principals, recheck revoked/expired keys, isolate clients,
-bound queues/reconnect resources and announce only manifest changes. Test server
-restart/deployment recovery and fresh `tools/list` in representative clients.
+The optional DK-30 discovery design binds streams to authenticated principals,
+rechecks revoked/expired keys, isolates clients, bounds queues/reconnect resources
+and announces only manifest changes. Acceptance includes server restart/deployment
+recovery and fresh `tools/list` in representative clients.
 Avoid adding a GET stream that never emits data merely to hide the old timeout.
 Until then, refresh/recreate the connector when stale discovery is established,
 and keep unresolved host filtering/cache behavior explicit.
@@ -114,5 +121,6 @@ capacity, file analysis and MCP notification transport remain outstanding.
 catch-up gaps, archive conflicts and media download failures. Storage-paused
 originals need capacity/lifecycle work, not a lower safety floor or a blind
 collector restart. Classify conflicting observations with evidence; never clear
-them in bulk to make an account summary look healthy. The retrieval roadmap and
-action roadmap remain separate work streams, with neither declared complete.
+them in bulk to make an account summary look healthy. Remaining retrieval and
+action work is recorded in the single central backlog;
+neither a source increment nor this historical report proves live completeness.
