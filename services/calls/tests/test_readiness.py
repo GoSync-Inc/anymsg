@@ -5,7 +5,7 @@ import pytest
 from fastapi.testclient import TestClient
 from app import create_app
 from test_agent_api import registry
-from test_tasks import Archive, HEADERS
+from test_tasks import Archive, HEADERS, owner_headers
 
 
 def test_capabilities_report_scoped_blockers_without_provider_io(tmp_path):
@@ -34,6 +34,7 @@ def test_ready_twilio_configuration_requires_scoped_recipient_and_selected_model
     doc['principals'][1]['destinations']['phone']=['+12025550124'];save()
     app=create_app(tmp_path/'data',Archive(),agent_registry=path)
     with TestClient(app) as client:
+        client.headers.update(owner_headers(tmp_path/'data'))
         client.post('/api/credentials',json={'xai':'synthetic-xai-key'},headers=HEADERS)
         setup={'enabled':True,'allowed':{'phone':['+12025550123']},'twilio':{
             'account_sid':'AC'+'1'*32,'auth_token':'synthetic-token','phone_from':'+12025550125',
@@ -57,6 +58,7 @@ def test_twilio_preflight_requires_the_briefs_own_model_credential(tmp_path,cred
     path,_,_=registry(tmp_path)
     app=create_app(tmp_path/'data',Archive(),agent_registry=path)
     with TestClient(app) as client:
+        client.headers.update(owner_headers(tmp_path/'data'))
         client.post('/api/credentials',json={credential:'synthetic-model-key'},headers=HEADERS)
         setup={'enabled':True,'allowed':{'phone':['+12025550123']},'twilio':{
             'account_sid':'AC'+'1'*32,'auth_token':'synthetic-token','phone_from':'+12025550125',

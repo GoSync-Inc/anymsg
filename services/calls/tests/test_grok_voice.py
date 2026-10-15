@@ -13,7 +13,7 @@ from pipecat.services.xai.realtime.llm import GrokRealtimeLLMService
 from app import create_app
 from core import BriefInput, GROK_MODEL, ServiceError, TOOL_MODELS, VoiceService
 from outbound import ExternalBrief
-from test_tasks import Archive, BRIEF, HEADERS
+from test_tasks import Archive, BRIEF, HEADERS, owner_headers
 from voice import create_model, tool_schemas
 
 
@@ -128,6 +128,7 @@ async def test_grok_owner_update_uses_system_input_without_assistant_transcript(
 def test_xai_key_is_separate_private_and_removed_on_forget(tmp_path,monkeypatch):
     monkeypatch.setenv('VOICE_PERSIST_CREDENTIALS','1')
     with TestClient(create_app(tmp_path,Archive())) as client:
+        client.headers.update(owner_headers(tmp_path))
         for body in ({},{'xai':'   '},{'xai':'secret'*200}):
             response=client.post('/api/credentials',json=body,headers=HEADERS)
             assert response.status_code==422 and 'secretsecret' not in response.text
@@ -138,6 +139,7 @@ def test_xai_key_is_separate_private_and_removed_on_forget(tmp_path,monkeypatch)
         assert 'synthetic-xai-key' not in json.dumps(config)
         assert (tmp_path/'model-key.json').stat().st_mode&0o077==0
     with TestClient(create_app(tmp_path,Archive())) as client:
+        client.headers.update(owner_headers(tmp_path))
         assert client.get('/api/config').json()['credentials']['xai']
         client.post('/api/credentials',json={'gemini':'synthetic-gemini-key'},headers=HEADERS)
         assert client.get('/api/config').json()['credentials']=={'gemini':True,'xai':True}

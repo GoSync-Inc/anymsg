@@ -34,7 +34,7 @@ async def test_browser_cleanup_preserves_model_error_instead_of_owner_stop(monke
     async with app.router.lifespan_context(app):
         monkeypatch.setattr(app.state.rtc,'handle_web_request',handle)
         async with httpx.AsyncClient(transport=httpx.ASGITransport(app),base_url='http://testserver',
-            headers={'Origin':'http://testserver','X-Voice-Service':'1'}) as c:
+            headers={**owner_headers(tmp_path),'Origin':'http://testserver','X-Voice-Service':'1'}) as c:
             await c.post('/api/credentials',json={'gemini':'fixture-key'})
             brief=(await c.post('/api/briefs',json=BRIEF)).json()
             call=(await c.post('/api/calls/start',json={'brief_id':brief['id']})).json()
