@@ -4,11 +4,14 @@ import (
 	"bytes"
 	"context"
 	"crypto/sha256"
+	"encoding/json"
+	"errors"
 	"io"
 	"os"
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 
 	"go.mau.fi/whatsmeow"
 	"go.mau.fi/whatsmeow/proto/waE2E"
@@ -309,4 +312,91 @@ func TestStartupSweepsOnlyStaleNativeTemporaries(t *testing.T) {
 			t.Fatal("startup sweep removed a file it does not own", path, err)
 		}
 	}
+}
+
+func TestNativeMediaDeadlineScalesWithDeclaredSize(t *testing.T) {
+	for size, want := range map[int64]time.Duration{0: time.Minute, 1 << 20: 64 * time.Second, 512 << 20: time.Minute + 2048*time.Second, 4 << 30: mediaDeadlineCap} {
+		if got := mediaDeadline(size); got != want {
+			t.Fatalf("%d -> %s want %s", size, got, want)
+		}
+	}
+	// A 512 MiB original over 20 Mbit/s needs about 215 s; Python's own
+	// transfer bound is 3600 s and must never be reached first.
+	if mediaDeadline(512<<20) < 215*time.Second || mediaDeadlineCap >= time.Hour {
+		t.Fatal("deadline does not fit a large original on a slow link")
+	}
+}
+
+func shortMediaWatch(t *testing.T, keepalive, idle time.Duration) {
+	t.Helper()
+	oldKeepalive, oldIdle := mediaKeepaliveInterval, mediaIdleTimeout
+	mediaKeepaliveInterval, mediaIdleTimeout = keepalive, idle
+	t.Cleanup(func() { mediaKeepaliveInterval, mediaIdleTimeout = oldKeepalive, oldIdle })
+}
+
+func TestNativeMediaSlowDownloadIsKeptAliveWithoutUnverifiedBytes(t *testing.T) {
+	// Total transfer time exceeds the idle timeout; each gap does not.
+	shortMediaWatch(t, 10*time.Millisecond, 300*time.Millisecond)
+	data := bytes.Repeat([]byte("synthetic-only "), 2000)
+	req, cfg, m := mediaFixture(t, data)
+	var output bytes.Buffer
+	keepalives, dataStarted := 0, false
+	err := downloadMedia(context.Background(), req, cfg, mediaPolicy, mediaGet(m), func(_ context.Context, _ whatsmeow.DownloadableMessage, file whatsmeow.File) error {
+		for offset := 0; offset < len(data); offset += len(data) / 8 {
+			time.Sleep(60 * time.Millisecond)
+			if _, e := file.Write(data[offset:min(offset+len(data)/8, len(data))]); e != nil {
+				return e
+			}
+		}
+		return nil
+	}, func(chunk []byte) error {
+		if len(chunk) == 0 {
+			// The frame must encode as an empty base64 string, never null.
+			if frame, _ := json.Marshal(map[string]any{"chunk": chunk}); chunk == nil || string(frame) != `{"chunk":""}` || dataStarted {
+				t.Error("invalid or late keepalive frame", string(frame))
+			}
+			keepalives++
+			return nil
+		}
+		dataStarted = true
+		_, e := output.Write(chunk)
+		return e
+	})
+	if err != nil {
+		t.Fatal("progressing download was cancelled", err)
+	}
+	if keepalives == 0 || !bytes.Equal(output.Bytes(), data) {
+		t.Fatal("no keepalive before verified data, or data changed", keepalives)
+	}
+}
+
+func TestNativeMediaStalledDownloadEndsWithTimeoutFrame(t *testing.T) {
+	shortMediaWatch(t, 10*time.Millisecond, 100*time.Millisecond)
+	req, cfg, m := mediaFixture(t, []byte("synthetic"))
+	started := time.Now()
+	nonEmpty := 0
+	err := downloadMedia(context.Background(), req, cfg, mediaPolicy, mediaGet(m), func(ctx context.Context, _ whatsmeow.DownloadableMessage, _ whatsmeow.File) error {
+		<-ctx.Done() // a stalled CDN connection that honours cancellation
+		return ctx.Err()
+	}, func(chunk []byte) error {
+		if len(chunk) > 0 {
+			nonEmpty++
+		}
+		return nil
+	})
+	requireError(t, err, "media_timeout")
+	if nonEmpty != 0 || time.Since(started) > 5*time.Second {
+		t.Fatal("stall emitted data or was not ended by the idle watchdog", nonEmpty)
+	}
+	requireNoNativeTemp(t, cfg.PagesDirectory)
+}
+
+func TestNativeMediaKeepaliveWriteFailureStopsTransfer(t *testing.T) {
+	shortMediaWatch(t, 10*time.Millisecond, time.Minute)
+	req, cfg, m := mediaFixture(t, []byte("synthetic"))
+	err := downloadMedia(context.Background(), req, cfg, mediaPolicy, mediaGet(m), func(ctx context.Context, _ whatsmeow.DownloadableMessage, _ whatsmeow.File) error {
+		<-ctx.Done()
+		return ctx.Err()
+	}, func([]byte) error { return errors.New("provider_response_too_large") })
+	requireError(t, err, "provider_response_too_large")
 }

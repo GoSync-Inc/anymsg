@@ -11,6 +11,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"sync/atomic"
 	"syscall"
 	"time"
 
@@ -97,12 +98,29 @@ type mediaRequest struct {
 type boundedMediaFile struct {
 	File  *os.File
 	Limit int64
+	// Optional: last successful I/O (UnixNano) for the media idle watchdog.
+	progress *atomic.Int64
 }
 
-func (f *boundedMediaFile) Read(b []byte) (int, error)            { return f.File.Read(b) }
-func (f *boundedMediaFile) ReadAt(b []byte, o int64) (int, error) { return f.File.ReadAt(b, o) }
-func (f *boundedMediaFile) Seek(o int64, w int) (int64, error)    { return f.File.Seek(o, w) }
-func (f *boundedMediaFile) Stat() (os.FileInfo, error)            { return f.File.Stat() }
+func (f *boundedMediaFile) touch(n int) {
+	if f.progress != nil && n > 0 {
+		f.progress.Store(time.Now().UnixNano())
+	}
+}
+func (f *boundedMediaFile) idle() time.Duration { return time.Since(time.Unix(0, f.progress.Load())) }
+
+func (f *boundedMediaFile) Read(b []byte) (int, error) {
+	n, e := f.File.Read(b)
+	f.touch(n)
+	return n, e
+}
+func (f *boundedMediaFile) ReadAt(b []byte, o int64) (int, error) {
+	n, e := f.File.ReadAt(b, o)
+	f.touch(n)
+	return n, e
+}
+func (f *boundedMediaFile) Seek(o int64, w int) (int64, error) { return f.File.Seek(o, w) }
+func (f *boundedMediaFile) Stat() (os.FileInfo, error)         { return f.File.Stat() }
 
 func (f *boundedMediaFile) Write(b []byte) (int, error) {
 	o, err := f.File.Seek(0, io.SeekCurrent)
@@ -112,13 +130,17 @@ func (f *boundedMediaFile) Write(b []byte) (int, error) {
 	if o < 0 || int64(len(b)) > f.Limit-o {
 		return 0, errors.New("media_size_limit")
 	}
-	return f.File.Write(b)
+	n, err := f.File.Write(b)
+	f.touch(n)
+	return n, err
 }
 func (f *boundedMediaFile) WriteAt(b []byte, o int64) (int, error) {
 	if o < 0 || int64(len(b)) > f.Limit-o {
 		return 0, errors.New("media_size_limit")
 	}
-	return f.File.WriteAt(b, o)
+	n, err := f.File.WriteAt(b, o)
+	f.touch(n)
+	return n, err
 }
 func (f *boundedMediaFile) Truncate(n int64) error {
 	if n < 0 || n > f.Limit {
@@ -215,30 +237,44 @@ func downloadMedia(ctx context.Context, req mediaRequest, cfg Config, policy fun
 	if err = check(); err != nil {
 		return err
 	}
-	ctx, cancel := context.WithTimeout(ctx, 60*time.Second)
+	// One deadline covers the provider download and the stream to Python. It
+	// scales with the declared size; the idle watchdog still ends a stall early.
+	ctx, cancel := context.WithTimeout(ctx, mediaDeadline(meta.Bytes))
 	defer cancel()
 	// Native decrypt writes ciphertext then plaintext in place, so admit a small
 	// cryptographic overhead but never an unbounded provider-controlled length.
-	err = download(ctx, meta.Payload, &boundedMediaFile{File: tmp, Limit: meta.Bytes + 65536})
+	file := &boundedMediaFile{File: tmp, Limit: meta.Bytes + 65536, progress: &atomic.Int64{}}
+	stopWatch := watchMediaDownload(ctx, cancel, file, emit)
+	err = func() error {
+		if err := download(ctx, meta.Payload, file); err != nil {
+			return safeMediaError(err)
+		}
+		info, err := tmp.Stat()
+		if err != nil {
+			return errors.New("media_network_error")
+		}
+		if info.Size() != meta.Bytes {
+			return errors.New("media_size_mismatch")
+		}
+		if _, err = tmp.Seek(0, io.SeekStart); err != nil {
+			return errors.New("media_network_error")
+		}
+		h := sha256.New()
+		// Read through the wrapper: local hashing is progress for the watchdog.
+		if _, err = io.Copy(h, file); err != nil {
+			return errors.New("media_network_error")
+		}
+		if !bytes.Equal(h.Sum(nil), meta.Payload.GetFileSHA256()) {
+			return errors.New("media_hash_mismatch")
+		}
+		return nil
+	}()
+	// The watchdog has stopped emitting before any verified chunk is sent.
+	if keepaliveErr := stopWatch(); keepaliveErr != nil {
+		return keepaliveErr
+	}
 	if err != nil {
-		return safeMediaError(err)
-	}
-	info, err := tmp.Stat()
-	if err != nil {
-		return errors.New("media_network_error")
-	}
-	if info.Size() != meta.Bytes {
-		return errors.New("media_size_mismatch")
-	}
-	if _, err = tmp.Seek(0, io.SeekStart); err != nil {
-		return errors.New("media_network_error")
-	}
-	h := sha256.New()
-	if _, err = io.Copy(h, tmp); err != nil {
-		return errors.New("media_network_error")
-	}
-	if !bytes.Equal(h.Sum(nil), meta.Payload.GetFileSHA256()) {
-		return errors.New("media_hash_mismatch")
+		return err
 	}
 	if _, err = tmp.Seek(0, io.SeekStart); err != nil {
 		return errors.New("media_network_error")
@@ -263,6 +299,72 @@ func downloadMedia(ctx context.Context, req mediaRequest, cfg Config, policy fun
 		if readErr != nil {
 			return errors.New("media_network_error")
 		}
+	}
+}
+
+// The transfer deadline assumes a conservative minimum rate (about 2 Mbit/s):
+// a 512 MiB original gets about 35 minutes. The cap stays below the Python
+// collector's 3600 s transfer bound, so a request always ends with a
+// synchronized error frame instead of a killed provider.
+const (
+	mediaDeadlineBase      = 60 * time.Second
+	mediaMinBytesPerSecond = 256 << 10
+	mediaDeadlineCap       = 50 * time.Minute
+)
+
+// Variables only so tests can shorten them. Python waits at most 90 s for each
+// reply frame; keepalives are sent well inside that.
+var (
+	mediaKeepaliveInterval = 30 * time.Second
+	mediaIdleTimeout       = 2 * time.Minute
+)
+
+func mediaDeadline(size int64) time.Duration {
+	if size <= 0 {
+		return mediaDeadlineBase
+	}
+	if size/mediaMinBytesPerSecond >= int64((mediaDeadlineCap-mediaDeadlineBase)/time.Second) {
+		return mediaDeadlineCap
+	}
+	return mediaDeadlineBase + time.Duration(size/mediaMinBytesPerSecond)*time.Second
+}
+
+// A native original is emitted only after it has been downloaded and verified,
+// which can take longer than Python's per-frame wait. Until then the watchdog
+// sends empty chunks (an existing frame shape carrying no byte at all) and
+// cancels the transfer when the temporary file shows no I/O for
+// mediaIdleTimeout. The returned stop function waits for it to exit, so frames
+// are never emitted concurrently.
+func watchMediaDownload(ctx context.Context, cancel context.CancelFunc, file *boundedMediaFile, emit func([]byte) error) func() error {
+	file.progress.Store(time.Now().UnixNano())
+	stop, done := make(chan struct{}), make(chan struct{})
+	var emitErr error
+	go func() {
+		defer close(done)
+		ticker := time.NewTicker(mediaKeepaliveInterval)
+		defer ticker.Stop()
+		for {
+			select {
+			case <-stop:
+				return
+			case <-ctx.Done():
+				return
+			case <-ticker.C:
+			}
+			if file.idle() > mediaIdleTimeout {
+				cancel()
+				return
+			}
+			if emitErr = emit([]byte{}); emitErr != nil {
+				cancel()
+				return
+			}
+		}
+	}()
+	return func() error {
+		close(stop)
+		<-done
+		return emitErr
 	}
 }
 
