@@ -20,8 +20,12 @@ Each HTTP path is `/v1/<tool name>` with the agent's own bearer key. Call
 `list_messenger_operations(account=...)` first. Its rows identify platform support,
 required permission, target, full-account requirement, strict parameters and
 limitations. A supported adapter remains conditional on provider permissions,
-account type, group type and current provider behavior. Unsupported rows cannot be
-queued. There is no implicit fallback to another action.
+account type, group type and current provider behavior. Unsupported operations are
+omitted from this account catalog and cannot be queued. The gateway narrows its
+operation enum to explicit backend support plus the selected profile and key
+permissions, and rechecks support for the exact target account on every call.
+There is no implicit fallback to another action. Receipt reads for prior actions
+retain their existing permission checks independently of current provider support.
 
 ## Permission boundaries
 

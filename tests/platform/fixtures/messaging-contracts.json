@@ -194,7 +194,7 @@
         "openWorldHint": false,
         "readOnlyHint": true
       },
-      "description": "Discover allowlisted operations, platform support and your account/key permissions.\n\nPassive archive/policy read; no provider request. Inspect supported/conditional,\nlimitations, target, full-account requirements and permission before planning.\nCatalog presence does not grant access or prove current provider acceptance.\nExisting keys gain no new roles. No arbitrary provider method or raw API payload.\n",
+      "description": "Discover implemented operations and your account/key permissions.\n\nUnsupported provider operations are omitted. Passive archive/policy read;\nno provider request. Inspect conditional support,\nlimitations, target, full-account requirements and permission before planning.\nCatalog presence does not grant access or prove current provider acceptance.\nExisting keys gain no new roles. No arbitrary provider method or raw API payload.\n",
       "inputSchema": {
         "properties": {
           "account": {

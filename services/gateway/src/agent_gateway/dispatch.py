@@ -11,6 +11,25 @@ class Dispatch:
     def __init__(self, policy, clients, tickets=None):
         self.policy, self.clients, self.tickets = policy, clients, tickets
 
+    def actions(self, snapshot, agent, caps, account=None):
+        """Intersect reviewed grants with explicit current account implementation support.
+
+        Counts/provider names are not evidence of individual implemented actions.
+        Missing or malformed account contracts expose no actions for that account.
+        """
+        allowed = set(self.policy.actions(snapshot, agent, caps.get("permissions", [])))
+        operations = caps.get("messenger_operations")
+        accounts = operations.get("supported_by_account") if isinstance(operations, dict) else None
+        if not isinstance(accounts, dict):
+            return []
+        rows = [accounts.get(account)] if account is not None else accounts.values()
+        supported = set()
+        for row in rows:
+            values = row.get("operations") if isinstance(row, dict) else None
+            if isinstance(values, list) and all(isinstance(value, str) for value in values):
+                supported.update(values)
+        return sorted(allowed & supported)
+
     async def backend_capabilities(self, snapshot, agent, module):
         target = snapshot["deployment"]["backends"].get(module)
         if target != self.clients.deployment["backends"].get(module):
@@ -35,12 +54,13 @@ class Dispatch:
         async def one(module):
             try:
                 caps = await self.backend_capabilities(snapshot, agent, module)
-                return module, caps["permissions"], "ready"
+                return module, caps, "ready"
             except Denied:
-                return module, [], "unavailable"
+                return module, {"permissions": []}, "unavailable"
 
         results = await asyncio.gather(*(one(module) for module in modules))
-        scopes = {module: set(permissions) for module, permissions, _ in results}
+        capabilities = {module: caps for module, caps, _ in results}
+        scopes = {module: set(caps["permissions"]) for module, caps, _ in results}
         states = {module: state for module, _, state in results}
         # Recheck current local policy after discovery; a slow backend does not
         # let the old policy snapshot survive a revocation.
@@ -48,6 +68,7 @@ class Dispatch:
         if current["revision"] != snapshot["revision"]:
             raise Denied("policy_changed", 409)
         visible = [n for n in visible if n in self.policy.visible(current, principal)]
+        actions = self.actions(current, principal, capabilities.get("messaging", {}))
         visible = [
             n
             for n in visible
@@ -57,11 +78,15 @@ class Dispatch:
                 and set(CATALOG[n]["scopes"]) <= scopes[CATALOG[n]["module"]]
                 and (
                     not CATALOG[n].get("action_group")
-                    or bool(self.policy.actions(current, principal, scopes["messaging"]))
+                    or bool(actions)
+                    or (
+                        CATALOG[n]["operation"] == "get_messenger_operation"
+                        and bool(self.policy.actions(current, principal, scopes.get("messaging", [])))
+                    )
                 )
             )
         ]
-        return current, principal, visible, {"states": states, "scopes": scopes}
+        return current, principal, visible, {"states": states, "scopes": scopes, "actions": actions}
 
     async def call(self, key, name, values):
         snapshot, agent, tool = self.policy.authorize(key, name)
@@ -96,12 +121,17 @@ class Dispatch:
         caps = await self.backend_capabilities(snapshot, agent, module)
         if not set(tool["scopes"]) <= set(caps["permissions"]):
             raise Denied()
-        allowed_actions = (
-            self.policy.actions(snapshot, agent, caps["permissions"]) if module == "messaging" else []
-        )
+        allowed_actions = self.actions(snapshot, agent, caps) if module == "messaging" else []
+        if tool["operation"] == "get_messenger_operation":
+            # Retained receipts are independent of current provider support.
+            allowed_actions = self.policy.actions(snapshot, agent, caps["permissions"])
         if tool.get("action_group"):
             if not allowed_actions or ("operation" in args and args["operation"] not in allowed_actions):
                 raise Denied()
+            if "account" in args:
+                allowed_actions = self.actions(snapshot, agent, caps, args["account"])
+                if "operation" in args and args["operation"] not in allowed_actions:
+                    raise Denied()
         started = datetime.now(timezone.utc).timestamp()
         # Admission is rechecked after all local work; a cached MCP session is
         # never authority. ACK is not retried if its network outcome is unknown.
@@ -127,7 +157,9 @@ class Dispatch:
                 result = {
                     **result,
                     "items": [
-                        row for row in result.get("items", []) if row.get("operation") in allowed_actions
+                        row
+                        for row in result.get("items", [])
+                        if row.get("operation") in allowed_actions and row.get("supported") is True
                     ],
                 }
             elif result.get("operation") not in allowed_actions:
@@ -144,7 +176,14 @@ class Dispatch:
                 for n in self.policy.visible(snapshot, agent)
                 if CATALOG[n]["module"] == module
                 and set(CATALOG[n]["scopes"]) <= set(caps["permissions"])
-                and (not CATALOG[n].get("action_group") or bool(allowed_actions))
+                and (
+                    not CATALOG[n].get("action_group")
+                    or bool(allowed_actions)
+                    or (
+                        CATALOG[n]["operation"] == "get_messenger_operation"
+                        and bool(self.policy.actions(snapshot, agent, caps["permissions"]))
+                    )
+                )
             ]
             result = dict(result)
             for field in (
@@ -158,5 +197,13 @@ class Dispatch:
                 result.pop(field, None)
             result["gateway_tools"] = visible
             result["gateway_actions"] = allowed_actions
+            if module == "messaging":
+                reports = caps.get("messenger_operations", {})
+                accounts = reports.get("supported_by_account", {}) if isinstance(reports, dict) else {}
+                result["gateway_actions_by_account"] = (
+                    {account: self.actions(snapshot, agent, caps, account) for account in accounts}
+                    if isinstance(accounts, dict)
+                    else {}
+                )
             result["gateway_policy_revision"] = snapshot["revision"]
         return result

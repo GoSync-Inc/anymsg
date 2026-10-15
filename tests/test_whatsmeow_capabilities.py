@@ -87,8 +87,27 @@ def test_fenced_observation_updates_manifest_without_expanding_grants(native_acc
         s.set_messenger_operations('wa-native',['add_contact'])
     caps=s.capabilities(key)['messenger_operations']['supported_by_account']['wa-native']
     assert caps['provider']=='whatsmeow' and caps['count']==43
+    assert len(caps['operations'])==43
+    assert 'delete_message' in caps['operations'] and 'add_contact' not in caps['operations']
     a.release('wa-native','native-test',state.lease[1])
     with pytest.raises(RuntimeError,match='collector_lease_lost'):state.provider_observation('webjs')
+
+
+def test_account_discovery_omits_unsupported_operations_and_cannot_queue_them(native_account):
+    s,a,state,key,args=native_account
+    state.provider_observation('whatsmeow')
+    rows=s.list_messenger_operations(key,'wa-native')['items']
+    assert rows and all(x['supported'] for x in rows)
+    assert not ({'add_contact','delete_contact','get_labels','set_chat_labels'} & {x['operation'] for x in rows})
+    with pytest.raises(APIError,match='unsupported_operation'):
+        s.preview_messenger_operation(key,account='wa-native',operation='add_contact',
+            parameters={'phone':'+123456789','first_name':'Synthetic'})
+    with pytest.raises(APIError,match='unsupported_operation'):
+        s.execute_messenger_operation(key,account='wa-native',operation='add_contact',
+            parameters={'phone':'+123456789','first_name':'Synthetic'},
+            request_id='synthetic-unsupported',preview_digest='a'*64)
+    with s.pool.connection() as c:
+        assert c.execute('SELECT count(*) AS n FROM messenger_commands').fetchone()['n']==0
 
 
 def test_provider_change_invalidates_reviewed_preview_before_dispatch(native_account):
@@ -110,6 +129,38 @@ def test_provider_change_invalidates_reviewed_preview_before_dispatch(native_acc
     with s.pool.connection() as c:
         row=c.execute('SELECT status,error_code FROM messenger_commands WHERE id=%s',(pending['operation_id'],)).fetchone()
     assert row['status']=='cancelled' and row['error_code']=='operation_target_changed'
+
+
+@pytest.mark.parametrize('claimed',[False,True])
+def test_pending_receipt_survives_provider_change_without_authorizing_dispatch(native_account,claimed):
+    from messaging_service.commands import CommandRejected
+    s,a,state,key,_=native_account
+    s.set_messenger_operations('wa-native',['add_contact'])
+    args={'account':'wa-native','operation':'add_contact',
+          'parameters':{'phone':'+123456789','first_name':'Synthetic'}}
+    draft=s.preview_messenger_operation(key,**args)
+    pending=s.execute_messenger_operation(key,**args,request_id='synthetic-native-pending',
+        preview_digest=draft['preview_digest'])
+    calls=[]
+    async def execute(job):calls.append(job);return {'outcome':'confirmed'}
+    worker=CommandWorker(state,execute)
+    job=worker.claim() if claimed else None
+    state.provider_observation('whatsmeow')
+    expected='dispatching' if claimed else 'queued'
+    assert s.get_messenger_operation(key,pending['operation_id'])['status']==expected
+    if claimed:
+        with pytest.raises(CommandRejected,match='unsupported_operation'):worker.preflight(job)
+    else:
+        assert asyncio.run(worker.once())
+        receipt=s.get_messenger_operation(key,pending['operation_id'])
+        assert receipt['status']=='cancelled' and receipt['error_code']=='unsupported_operation'
+    assert not calls
+    other=s.issue_key('native-agent',['wa-native'],permissions=['read','contacts-manage'])
+    with pytest.raises(APIError,match='not_found'):
+        s.get_messenger_operation(other,pending['operation_id'])
+    s.set_access('native-agent',chats=[])
+    with pytest.raises(APIError,match='forbidden'):
+        s.get_messenger_operation(key,pending['operation_id'])
 
 
 def test_history_diagnostics_are_fenced_partial_and_visible_in_status(native_account):

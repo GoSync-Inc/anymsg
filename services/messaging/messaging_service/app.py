@@ -313,9 +313,10 @@ def create_app(store: Store, allowed_hosts: list[str]):
 
     @mcp.tool(structured_output=True, annotations=read)
     def list_messenger_operations(ctx: Context, account: StrictStr) -> dict[str, Any]:
-        """Discover allowlisted operations, platform support and your account/key permissions.
+        """Discover implemented operations and your account/key permissions.
 
-        Passive archive/policy read; no provider request. Inspect supported/conditional,
+        Unsupported provider operations are omitted. Passive archive/policy read;
+        no provider request. Inspect conditional support,
         limitations, target, full-account requirements and permission before planning.
         Catalog presence does not grant access or prove current provider acceptance.
         Existing keys gain no new roles. No arbitrary provider method or raw API payload.
