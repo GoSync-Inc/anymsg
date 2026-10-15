@@ -22,13 +22,14 @@ from pydantic import BaseModel, ConfigDict, Field, SecretStr
 from anymsg import AnyMsg, UnconfiguredArchive
 from core import ACTIVE, MODEL, PROMPT_VERSION, VOICES, BriefInput, ServiceError, VoiceService
 from control import control_key, create_control
+from agent_api import AgentAPI, AgentRegistry
 from learning import LearningWorker, ANALYZER_MODEL
 from supervisor import Supervisor, SUPERVISOR_MODEL
 from outbound import Outbound,CallingSettings,TwilioCalls,ExternalBrief
 from settings import Setup,read_private,write_private
 
 SOURCE = Path(__file__).resolve()
-PRIVATE = (SOURCE.parents[2] if len(SOURCE.parents)>2 else SOURCE.parent) / '.local' / 'voice-service'
+PRIVATE = Path(os.environ.get('VOICE_STATE_DIR', str(Path.home() / '.local' / 'share' / 'deedkit' / 'calls')))
 
 
 class Input(BaseModel):
@@ -121,8 +122,10 @@ class CaseReview(Input):
     expected_behavior:str | None=Field(default=None,min_length=3,max_length=1500)
 
 
-def create_app(data_dir=None, archive=None, control_token=None, reviewer=None, advisor=None):
+def create_app(data_dir=None, archive=None, control_token=None, reviewer=None, advisor=None, agent_registry=None):
     directory = Path(data_dir or os.environ.get('VOICE_DATA_DIR',str(PRIVATE / 'data')))
+    if data_dir is None and (not directory.is_absolute() or not directory.is_dir()):
+        raise ValueError("Set VOICE_DATA_DIR to an explicitly initialized absolute state directory")
     service = VoiceService(directory)
     archive_config = Path(os.environ.get('VOICE_ANYMSG_CONFIG', str(PRIVATE / 'anymsg.json')))
     archive = archive if archive is not None else AnyMsg.from_config(archive_config) if archive_config.exists() else UnconfiguredArchive()
@@ -216,6 +219,8 @@ def create_app(data_dir=None, archive=None, control_token=None, reviewer=None, a
         if request.url.path.startswith('/control/'):
             if not hmac.compare_digest(request.headers.get('authorization',''), 'Bearer '+control_token):
                 return JSONResponse({'detail':'Control credential required'},status_code=401)
+        elif request.url.path.startswith('/v1/'):
+            pass  # Separate principal credential and bounded body enforced by AgentAPI.
         elif request.method not in {'GET','HEAD'}:
             if request.headers.get('origin') != str(request.base_url).rstrip('/') or request.headers.get('x-voice-service') != '1':
                 return JSONResponse({'detail':'Local interface required'}, status_code=403)
@@ -500,6 +505,13 @@ def create_app(data_dir=None, archive=None, control_token=None, reviewer=None, a
     app.state.control_app=create_control(service,prepare,control_start,control_stop,control_capabilities,
                                          outbound=outbound if os.environ.get('VOICE_EXTERNAL_MCP')=='1' else None,
                                          browser_url=os.environ.get('VOICE_BROWSER_URL','http://127.0.0.1:13842/'))
+
+    app.state.agent_api=AgentAPI(service,AgentRegistry(agent_registry or os.environ.get('VOICE_AGENT_REGISTRY')),
+                                 control_start,control_stop,outbound)
+
+    @app.post('/v1/{operation}')
+    async def agent_operation(operation:str,request:Request):
+        return await app.state.agent_api.endpoint(operation,request)
 
     @app.post('/provider/twilio/status/{identity}')
     async def twilio_status(identity:str,request:Request):

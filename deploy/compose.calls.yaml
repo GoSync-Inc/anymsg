@@ -1,0 +1,42 @@
+name: deedkit-calls
+services:
+  calls:
+    image: deedkit-calls:${DEEDKIT_VERSION:-0.1.0}
+    build: {context: ../services/calls}
+    env_file: ./private/calls.env
+    environment:
+      VOICE_DATA_DIR: /data
+      VOICE_AGENT_REGISTRY: /run/deedkit/agents.json
+      VOICE_BROWSER_ENABLED: "0"
+      VOICE_EXTERNAL_MCP: "0"
+    volumes:
+      - type: bind
+        source: ${CALLS_STATE_DIR:?Set explicit existing calls state directory}
+        target: /data
+        bind: {create_host_path: false}
+      - type: bind
+        source: ./private/calls-agents.json
+        target: /run/deedkit/agents.json
+        read_only: true
+        bind: {create_host_path: false}
+    networks: [integration, calls-egress]
+    ports: ["127.0.0.1:13842:13842"]
+    restart: unless-stopped
+    init: true
+    read_only: true
+    user: "10001:10001"
+    cap_drop: [ALL]
+    security_opt: [no-new-privileges:true]
+    tmpfs: ["/tmp:size=64m,noexec,nosuid"]
+    mem_limit: 1536m
+    cpu_shares: 512
+    pids_limit: 128
+    stop_grace_period: 40s
+    logging:
+      driver: json-file
+      options: {max-size: 5m, max-file: "2"}
+networks:
+  calls-egress: {}
+  integration:
+    external: true
+    name: ${DEEDKIT_NETWORK:-deedkit-integration}

@@ -233,8 +233,10 @@ class VoiceService:
             self.learning.enqueue(v)
         self.db.commit()
 
-    def prepare(self,selected,messages,*,followup=None,inherited_facts=None):
+    def prepare(self,selected,messages,*,followup=None,inherited_facts=None,owner_principal=None,use_learning=True):
         b=selected.model_dump()
+        if owner_principal is not None:
+            b["owner_principal"]=owner_principal
         fields=b["success_fields"]
         if len(set(fields)) != len(fields) or any(not re.fullmatch(r"[a-z][a-z0-9_]{0,63}",f) for f in fields):
             raise ServiceError("invalid_result_fields",422)
@@ -263,7 +265,7 @@ class VoiceService:
         if followup is not None:
             b['followup']=followup
         with self.lock:
-            learned=self.learning.active_candidate()
+            learned=self.learning.active_candidate() if use_learning else None
         if learned and b.get('dialog_engine')!='gemini_live_flows':
             b['prompt_version']=learned['prompt_version']
             b['learned_instruction']=learned['instruction']
@@ -825,13 +827,15 @@ class VoiceService:
             self._save_call(v)
             return d
 
-    def decision_inbox(self,limit=100,offset=0):
+    def decision_inbox(self,limit=100,offset=0,*,owner_principal=None):
         """Read durable requests without requiring a live conversation or notifications."""
         with self.lock:
             items=[]
             # Page decisions, not calls: old unresolved requests must remain reachable.
             for body, in self.db.execute('SELECT body FROM calls ORDER BY rowid DESC'):
                 v=json.loads(body)
+                if owner_principal is not None and v['brief'].get('owner_principal')!=owner_principal:
+                    continue
                 for d in reversed(v['decisions']):
                     if d['status']=='superseded':
                         continue
@@ -889,7 +893,8 @@ class VoiceService:
             link={'parent_call_id':identity,'decision_id':d['id'],'round':d['round'],'question':d['question'],
                   'conditions':d['conditions'],'conditions_sha256':d['conditions_sha256'],
                   'owner_answer':d['answer'],'answered_at':d['answered_at'],'external_action_authorized':False}
-            b=self.prepare(selected,[],followup=link,inherited_facts=parent['facts'])
+            b=self.prepare(selected,[],followup=link,inherited_facts=parent['facts'],
+                           owner_principal=parent.get('owner_principal'),use_learning=not parent.get('owner_principal'))
             d['followup_brief_id']=b['id']
             self._event(v,{'kind':'followup_prepared','decision_id':decision_id,'brief_id':b['id'],
                            'channel':b['channel'],'external_action_authorized':False})

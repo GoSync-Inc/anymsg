@@ -149,7 +149,7 @@ class Outbound:
         if not provider: raise ServiceError('provider_not_configured')
         return await provider.preflight(b)
 
-    async def dial(self,brief_id,authorization_reference):
+    async def dial(self,brief_id,authorization_reference,*,admission=None):
         if not isinstance(authorization_reference,str) or not 3<=len(authorization_reference.strip())<=1500:
             raise ServiceError('owner_instruction_reference_required',422)
         async with self.lock:
@@ -158,6 +158,8 @@ class Outbound:
             row=self.service.db.execute('SELECT id FROM calls WHERE brief_id=?',(brief_id,)).fetchone()
             if row: return self.service.get_call(row[0])
             await self.preflight(brief_id)
+            if admission is not None:
+                admission()
             call=self.service.start(brief_id); cid=call['id']; token=secrets.token_urlsafe(32)
             self.service.db.execute('INSERT INTO outbound_attempts VALUES (?,?)',(cid,token)); self.service.db.commit()
             self.service.provider_update(cid,dial_state='requesting',authorization_reference=authorization_reference.strip())

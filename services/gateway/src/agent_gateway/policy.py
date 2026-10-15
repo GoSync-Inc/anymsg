@@ -11,7 +11,7 @@ from urllib.parse import urlsplit
 
 from pydantic import BaseModel, ConfigDict, Field, ValidationError
 
-from .catalog import CATALOG
+from .catalog import CATALOG, ACTIONS
 
 
 class Denied(Exception):
@@ -121,7 +121,7 @@ class Policy:
             ):
                 raise ValueError
             modules = doc["deployment"]["modules"]
-            if set(modules) - {"calendar", "messaging"} or len(modules) != len(set(modules)):
+            if set(modules) - {"calendar", "messaging", "calls"} or len(modules) != len(set(modules)):
                 raise ValueError
             if set(modules) - doc["deployment"]["backends"].keys():
                 raise ValueError
@@ -151,9 +151,7 @@ class Policy:
                     set(profile["tools"])
                 ):
                     raise ValueError
-                # This release intentionally has no generic live-operation tools.
-                if any(profile["actions"].values()):
-                    raise ValueError
+                self.validate_actions(profile["actions"])
             for agent in doc["principals"]:
                 if (
                     agent["id"] in ids
@@ -164,7 +162,8 @@ class Policy:
                 ids.add(agent["id"])
                 keys.add(agent["key_sha256"])
                 expiry = datetime.fromisoformat(agent["expires_at"].replace("Z", "+00:00"))
-                if expiry.tzinfo is None or any(agent["actions"].values()):
+                self.validate_actions(agent["actions"])
+                if expiry.tzinfo is None:
                     raise ValueError
                 if any(not Path(v["key_file"]).is_absolute() for v in agent["credentials"].values()):
                     raise ValueError
@@ -186,6 +185,25 @@ class Policy:
         raise Denied("unauthorized", 401)
 
     @staticmethod
+    def validate_actions(actions):
+        if set(actions) - {"messenger_operations"}:
+            raise ValueError("unknown action group")
+        values = actions.get("messenger_operations", [])
+        if set(values) - ACTIONS.keys() or len(values) != len(set(values)):
+            raise ValueError("unknown action or wildcard")
+
+    @staticmethod
+    def actions(snapshot, agent, backend_permissions=None):
+        profile = snapshot["profiles"][agent["profile"]]
+        selected = set(profile["actions"].get("messenger_operations", [])) & set(
+            agent["actions"].get("messenger_operations", [])
+        )
+        scopes = set(agent["grants"].get("messaging", []))
+        if backend_permissions is not None:
+            scopes &= set(backend_permissions)
+        return sorted(action for action in selected if set(ACTIONS[action]) <= scopes)
+
+    @staticmethod
     def visible(snapshot, agent):
         profile = snapshot["profiles"][agent["profile"]]
         modules = {"gateway", *snapshot["deployment"]["modules"]}
@@ -195,6 +213,7 @@ class Policy:
             if CATALOG[name]["module"] in modules
             and (CATALOG[name]["module"] == "gateway" or CATALOG[name]["module"] in agent["credentials"])
             and set(CATALOG[name]["scopes"]) <= set(agent["grants"].get(CATALOG[name]["module"], []))
+            and (not CATALOG[name].get("action_group") or bool(Policy.actions(snapshot, agent)))
         ]
 
     def authorize(self, key, name):

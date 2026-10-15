@@ -185,7 +185,8 @@ def publish(directory: Path, manifest: dict, branch: str, product: str, cli: str
             raise RuntimeError("Run recorded, but Tiden did not associate test evidence with the expected branch")
         if result.get("status") not in {"passed", "failed"}:
             raise RuntimeError("Tiden run has no terminal test verdict")
-        expected_attempts = sum(manifest["test_counts"].values()) + len(CHECKS)
+        check_count = len(CHECKS) + (len(MODULE_REPORTS) if "module_checks" in manifest else 0)
+        expected_attempts = sum(manifest["test_counts"].values()) + check_count
         if int(result["stats"]["attempts"]) != expected_attempts:
             raise RuntimeError("Tiden result count differs from the authentic CI evidence")
         expected_failure = (manifest["test_counts"].get("failed", 0)

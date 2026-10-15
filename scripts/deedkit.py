@@ -69,18 +69,23 @@ def resolve(profile, root=ROOT):
     for name in ordered:
         m = manifests[name]
         services = list(m["services"])
+        compose_files = [m["compose"]]
+        required_files = list(m.get("required_files", []))
         for connector in connectors:
             feature = features[connector]
             if feature["module"] == name:
                 services += feature.get("services", [])
+                compose_files += feature.get("compose", [])
+                required_files += feature.get("required_files", [])
         result.append(
             {
                 "module": name,
                 "mode": "external" if name in external else "managed",
                 "project": m["project"],
                 "compose": m["compose"],
+                "compose_files": list(dict.fromkeys(compose_files)),
                 "services": sorted(set(services)),
-                "required_files": m.get("required_files", [])
+                "required_files": required_files
                 if name not in external
                 else [],
                 "env_file": m.get("env_file"),
@@ -108,6 +113,8 @@ def commands(plan, action, root=ROOT):
             "-f",
             str(root / module["compose"]),
         ]
+        for overlay in module.get("compose_files", [module["compose"]])[1:]:
+            argv += ["-f", str(root / overlay)]
         if module.get("env_file"):
             argv += ["--env-file", str(root / module["env_file"])]
         argv += {

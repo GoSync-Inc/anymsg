@@ -18,6 +18,7 @@ def load_catalog(rows):
 
 
 CATALOG = load_catalog(json.loads(files(__package__).joinpath("catalog.json").read_text()))
+ACTIONS = json.loads(files(__package__).joinpath("actions.json").read_text())
 CATALOG["platform_capabilities"] = {
     "name": "platform_capabilities",
     "module": "gateway",
@@ -44,9 +45,12 @@ def arguments(tool, value):
     return result
 
 
-def public(tool):
-    return {
+def public(tool, actions=None):
+    result = {
         k: deepcopy(v)
         for k, v in tool.items()
         if k in {"name", "title", "description", "inputSchema", "outputSchema", "annotations", "_meta"}
     }
+    if tool.get("action_group") and "operation" in result["inputSchema"].get("properties", {}):
+        result["inputSchema"]["properties"]["operation"]["enum"] = sorted(actions or [])
+    return result

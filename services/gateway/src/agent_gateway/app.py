@@ -47,8 +47,9 @@ def create_app(policy_path, public_url, *, transports=None):
     async def list_tools(context, params):
         if params and params.cursor:
             raise ValueError("catalog_cursors_not_supported")
-        _, _, visible, _ = await dispatch.discover(current_key.get())
-        return ListToolsResult(tools=[Tool(**public(CATALOG[n])) for n in visible])
+        snapshot, agent, visible, details = await dispatch.discover(current_key.get())
+        actions = policy.actions(snapshot, agent, details["scopes"].get("messaging", []))
+        return ListToolsResult(tools=[Tool(**public(CATALOG[n], actions)) for n in visible])
 
     async def call_tool(context, params):
         try:

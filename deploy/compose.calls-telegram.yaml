@@ -1,0 +1,17 @@
+# Mount the existing messaging session owner's broker, never another session client.
+services:
+  calls:
+    environment:
+      VOICE_TELEGRAM_SOCKET: /run/telegram-broker/broker.sock
+      VOICE_TELEGRAM_TOKEN_FILE: /run/deedkit/telegram-broker.token
+    volumes:
+      - type: bind
+        source: ${CALLS_TELEGRAM_BROKER_DIR:?Set existing broker socket directory}
+        target: /run/telegram-broker
+        read_only: true
+        bind: {create_host_path: false}
+      - type: bind
+        source: ./private/calls-telegram-broker.token
+        target: /run/deedkit/telegram-broker.token
+        read_only: true
+        bind: {create_host_path: false}

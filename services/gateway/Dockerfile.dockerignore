@@ -1,0 +1,16 @@
+*
+!services/
+services/*
+!services/gateway/
+services/gateway/*
+!services/gateway/pyproject.toml
+!services/gateway/uv.lock
+!services/gateway/src/
+!services/gateway/src/**
+!packages/
+packages/*
+!packages/platform-contracts/
+!packages/platform-contracts/**
+**/__pycache__
+**/.venv
+**/dist

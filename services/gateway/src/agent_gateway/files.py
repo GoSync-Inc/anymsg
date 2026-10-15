@@ -38,7 +38,7 @@ class FileResponse(StreamingResponse):
                     if self.backend_check and time.monotonic() - last_backend_check >= 1:
                         await self.backend_check()
                         last_backend_check = time.monotonic()
-                except Denied:
+                except Exception:
                     # Also interrupts a blocked upstream read or client send.
                     # Headers may already be sent; abort instead of a second
                     # response pretending the partial file was complete.

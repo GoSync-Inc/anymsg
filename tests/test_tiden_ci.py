@@ -120,6 +120,13 @@ def test_publisher_refuses_partial_results_even_when_tiden_returns_passed(tmp_pa
         publish(tmp_path, manifest, "intent/feature", "product")
 
 
+def test_publisher_counts_additive_module_checks_without_changing_legacy_checks(tmp_path, monkeypatch):
+    _, manifest = cli_fixture(monkeypatch, tmp_path, attempts="11")
+    manifest["module_checks"] = {name: "success" for name in ("gateway", "calendar", "calls", "calls_frontend")}
+    manifest["check_counts"] = {"passed": 11}
+    assert publish(tmp_path, manifest, "intent/feature", "product")["status"] == "passed"
+
+
 def test_failed_completion_still_gets_a_verified_failure_receipt(tmp_path, monkeypatch):
     _, manifest = cli_fixture(monkeypatch, tmp_path, status="failed")
     manifest["check_counts"] = {"passed": 6, "failed": 1}

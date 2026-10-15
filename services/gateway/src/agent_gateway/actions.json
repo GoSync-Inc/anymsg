@@ -1,0 +1,148 @@
+{
+  "add_contact": [
+    "contacts-manage"
+  ],
+  "add_participant": [
+    "groups-manage"
+  ],
+  "archive_chat": [
+    "chat-manage"
+  ],
+  "block_contact": [
+    "contacts-manage"
+  ],
+  "chat_info": [
+    "read-live"
+  ],
+  "create_group": [
+    "groups-manage"
+  ],
+  "delete_contact": [
+    "contacts-manage"
+  ],
+  "delete_message": [
+    "message-delete"
+  ],
+  "demote_participant": [
+    "groups-manage"
+  ],
+  "edit_message": [
+    "message-edit"
+  ],
+  "forward_message": [
+    "read",
+    "send"
+  ],
+  "get_contact": [
+    "contacts-read"
+  ],
+  "get_invite_link": [
+    "groups-manage"
+  ],
+  "get_labels": [
+    "contacts-read"
+  ],
+  "get_message_info": [
+    "read-live"
+  ],
+  "get_pinned_messages": [
+    "read-live"
+  ],
+  "get_profile": [
+    "profile-read"
+  ],
+  "get_reactions": [
+    "read-live"
+  ],
+  "leave_group": [
+    "groups-manage"
+  ],
+  "list_blocked": [
+    "contacts-read"
+  ],
+  "list_contacts": [
+    "contacts-read"
+  ],
+  "list_participants": [
+    "groups-read"
+  ],
+  "list_topics": [
+    "groups-read"
+  ],
+  "mark_read": [
+    "read-state"
+  ],
+  "mark_unread": [
+    "read-state"
+  ],
+  "mute_chat": [
+    "chat-manage"
+  ],
+  "pin_chat": [
+    "chat-manage"
+  ],
+  "pin_message": [
+    "message-pin"
+  ],
+  "promote_participant": [
+    "groups-manage"
+  ],
+  "remove_participant": [
+    "groups-manage"
+  ],
+  "rename_group": [
+    "groups-manage"
+  ],
+  "revoke_invite_link": [
+    "groups-manage"
+  ],
+  "send_contact": [
+    "send"
+  ],
+  "send_file": [
+    "download",
+    "send"
+  ],
+  "send_location": [
+    "send"
+  ],
+  "send_poll": [
+    "send"
+  ],
+  "send_reaction": [
+    "message-react"
+  ],
+  "set_chat_labels": [
+    "chat-manage"
+  ],
+  "set_group_description": [
+    "groups-manage"
+  ],
+  "star_message": [
+    "chat-manage"
+  ],
+  "unarchive_chat": [
+    "chat-manage"
+  ],
+  "unblock_contact": [
+    "contacts-manage"
+  ],
+  "unmute_chat": [
+    "chat-manage"
+  ],
+  "unpin_chat": [
+    "chat-manage"
+  ],
+  "unpin_message": [
+    "message-pin"
+  ],
+  "unstar_message": [
+    "chat-manage"
+  ],
+  "update_profile": [
+    "profile-manage"
+  ],
+  "vote_poll": [
+    "message-react"
+  ]
+}

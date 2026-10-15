@@ -1,6 +1,4 @@
-import json
 import os
-from pathlib import Path
 from uuid import uuid4
 
 import pytest
@@ -10,12 +8,9 @@ import pytest
 def store():
     from family_calendar.service.store import Store
 
-    config = Path(".local/service/runtime.json")
-    dsn = os.environ.get("FCS_TEST_DSN") or (
-        json.loads(config.read_text())["dsn"] if config.exists() else None
-    )
+    dsn = os.environ.get("FCS_TEST_DSN")
     if not dsn:
-        pytest.skip("isolated PostgreSQL required: FCS_TEST_DSN")
+        pytest.fail("FCS_TEST_DSN is required; never fall back to a runtime database")
     s = Store(dsn, schema="test_" + uuid4().hex)
     s.migrate()
     yield s

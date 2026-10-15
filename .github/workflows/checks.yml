@@ -84,6 +84,7 @@ jobs:
         run: |
           uv sync --locked --group dev
           uv run pytest -q -o junit_family=xunit1 --junitxml="$RUNNER_TEMP/ci-evidence/gateway.xml"
+          uv build --project ../../packages/platform-contracts --out-dir "$RUNNER_TEMP/gateway-dist"
           uv build --out-dir "$RUNNER_TEMP/gateway-dist"
           uv venv "$RUNNER_TEMP/gateway-installed" --python 3.13
           uv pip install --python "$RUNNER_TEMP/gateway-installed/bin/python" "$RUNNER_TEMP"/gateway-dist/*.whl
