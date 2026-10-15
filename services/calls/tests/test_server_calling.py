@@ -2,11 +2,11 @@ import json
 
 from fastapi.testclient import TestClient
 from app import create_app
-from test_tasks import Archive,BRIEF,HEADERS
+from test_tasks import owner_headers, Archive,BRIEF,HEADERS
 
 
 def test_telegram_only_setup_preserves_public_url_before_twilio_credentials(tmp_path):
-    with TestClient(create_app(tmp_path,Archive())) as client:
+    with TestClient(create_app(tmp_path,Archive()), headers=owner_headers(tmp_path)) as client:
         setup={'enabled':False,'allowed':{'telegram':['123456789']},
                'twilio':{'public_url':'https://voice.test/voice'}}
         response=client.post('/api/calling',json=setup,headers=HEADERS)
@@ -15,13 +15,13 @@ def test_telegram_only_setup_preserves_public_url_before_twilio_credentials(tmp_
         assert status['twilio']['configured'] is False
         assert status['twilio']['public_url']=='https://voice.test/voice'
         assert client.get('/api/calling').json()['twilio']['public_url']=='https://voice.test/voice'
-    with TestClient(create_app(tmp_path,Archive())) as client:
+    with TestClient(create_app(tmp_path,Archive()), headers=owner_headers(tmp_path)) as client:
         assert client.get('/api/calling').json()['twilio']['public_url']=='https://voice.test/voice'
 
 
 def test_private_server_credentials_routes_and_no_browser_dial_bypass(tmp_path,monkeypatch):
     monkeypatch.setenv('VOICE_PERSIST_CREDENTIALS','1');monkeypatch.setenv('VOICE_EXTERNAL_MCP','1')
-    with TestClient(create_app(tmp_path,Archive())) as client:
+    with TestClient(create_app(tmp_path,Archive()), headers=owner_headers(tmp_path)) as client:
         assert client.post('/api/calling',json={'enabled':False}).status_code==403
         assert client.post('/api/credentials',json={'gemini':'fixture-model-key'},headers=HEADERS).status_code==200
         setup={'enabled':True,'allowed':{'phone':['+628123456789']},'twilio':{
@@ -39,7 +39,7 @@ def test_private_server_credentials_routes_and_no_browser_dial_bypass(tmp_path,m
         assert client.get('https://voice.test/api/calls').status_code==403
     assert (tmp_path/'model-key.json').stat().st_mode&0o077==0
     assert (tmp_path/'calling.json').stat().st_mode&0o077==0
-    with TestClient(create_app(tmp_path,Archive())) as client:
+    with TestClient(create_app(tmp_path,Archive()), headers=owner_headers(tmp_path)) as client:
         assert client.get('/api/config').json()['credentials']['gemini'] is True
         assert client.get('/api/calling').json()['allowed']['phone']==['+628123456789']
         assert client.delete('/api/credentials',headers=HEADERS).status_code==200
@@ -53,7 +53,7 @@ def test_signed_provider_webhook_bound_to_exact_attempt(tmp_path):
     app=create_app(tmp_path,Archive())
     cfg={'account_sid':'AC'+'1'*32,'auth_token':'fixture-secret','public_url':'https://voice.test/voice'}
     provider=TwilioCalls(cfg);app.state.outbound.providers['twilio']=provider
-    with TestClient(app) as client:
+    with TestClient(app, headers=owner_headers(tmp_path)) as client:
         b=app.state.service.prepare(ExternalBrief(**BRIEF,channel='phone',account='twilio',destination='+628123456789'),[])
         call=app.state.service.start(b['id']);sid='CA'+'2'*32
         app.state.service.provider_update(call['id'],provider_call_id=sid,dial_state='accepted')
@@ -92,7 +92,7 @@ def test_signed_websocket_carries_real_twilio_audio_and_hangs_up(monkeypatch,tmp
     provider=TwilioCalls(cfg)
     async def hangup(sid):hung_up.append(sid)
     provider.hangup=hangup;app.state.outbound.providers['twilio']=provider
-    with TestClient(app) as client:
+    with TestClient(app, headers=owner_headers(tmp_path)) as client:
         client.post('/api/credentials',json={'gemini':'fixture-model-key'},headers=HEADERS)
         b=app.state.service.prepare(ExternalBrief(**BRIEF,channel='phone',account='twilio',destination='+628123456789'),[])
         call=app.state.service.start(b['id']);sid='CA'+'2'*32
