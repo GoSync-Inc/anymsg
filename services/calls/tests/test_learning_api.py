@@ -6,13 +6,13 @@ from fastapi.testclient import TestClient
 from google.genai import types
 
 from app import create_app
-from test_tasks import Archive, BRIEF, HEADERS, prepared, started
+from test_tasks import owner_headers, Archive, BRIEF, HEADERS, prepared, started
 from test_regressions import proposed
 
 
 def test_post_call_analysis_is_visible_and_manual_feedback_changes_input_revision(tmp_path):
     app=create_app(tmp_path,Archive())
-    with TestClient(app) as client:
+    with TestClient(app, headers=owner_headers(tmp_path)) as client:
         call=started(client,prepared(client))
         assert client.get(f'/api/calls/{call["id"]}/analysis').json()['status']=='conversation_active'
         app.state.service.connected(call['id'])
@@ -69,7 +69,7 @@ async def test_case_review_starts_comparison_but_does_not_activate_candidate(tmp
     import httpx
     app=create_app(tmp_path,Archive())
     candidate,case=await proposed(app.state.service)
-    async with httpx.AsyncClient(transport=httpx.ASGITransport(app),base_url='http://testserver') as client:
+    async with httpx.AsyncClient(transport=httpx.ASGITransport(app),base_url='http://testserver', headers=owner_headers(tmp_path)) as client:
         headers={'Origin':'http://testserver','X-Voice-Service':'1'}
         reviewed=await client.post('/api/learning/cases/'+case['id'],headers=headers,json={'status':'accepted'})
         assert reviewed.status_code==200,reviewed.text
@@ -95,7 +95,7 @@ async def test_forgetting_key_cancels_inflight_analysis_and_keeps_it_for_later(t
         identity=conversation(store)
         store.transcript(identity,'user','До свидания.')
         store.stop(identity)
-        async with httpx.AsyncClient(transport=httpx.ASGITransport(app),base_url='http://testserver') as client:
+        async with httpx.AsyncClient(transport=httpx.ASGITransport(app),base_url='http://testserver', headers=owner_headers(tmp_path)) as client:
             await client.post('/api/credentials',headers=HEADERS,json={'gemini':'fixture-key'})
             await asyncio.wait_for(started_review.wait(),timeout=3)
             await client.delete('/api/credentials',headers=HEADERS)
