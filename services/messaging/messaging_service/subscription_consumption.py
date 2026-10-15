@@ -10,6 +10,7 @@ from .subscriptions import _owned, get_subscription_events
 
 _WAIT_SLOTS = threading.BoundedSemaphore(32)
 _IMMEDIATE_READ_TIMEOUT_S = 5
+_RECEIPT_LIMIT = 128
 
 
 class _Admission:
@@ -101,9 +102,11 @@ def fetch_subscription_events(store, c, p, subscription_id, *, limit=50):
         return page
     c.execute('DELETE FROM subscription_receipts WHERE subscription=%s AND expires_at<=clock_timestamp()',
         (row['id'],))
-    if c.execute('SELECT count(*) AS n FROM subscription_receipts WHERE subscription=%s',
-            (row['id'],)).fetchone()['n'] >= 128:
-        raise APIError('subscription_receipt_limit', 429)
+    # Repeated unacknowledged polls must not lock the consumer out: the newest page always
+    # gets a receipt, and the oldest outstanding receipts are evicted to stay within the cap.
+    c.execute('''DELETE FROM subscription_receipts WHERE receipt_hash IN (
+        SELECT receipt_hash FROM subscription_receipts WHERE subscription=%s
+        ORDER BY expires_at DESC, receipt_hash OFFSET %s)''', (row['id'], _RECEIPT_LIMIT - 1))
     receipt = secrets.token_urlsafe(32)
     issued = c.execute('''INSERT INTO subscription_receipts(receipt_hash,subscription,principal,key_id,
         scope_version,key_permission_version,subscription_version,consumption_version,

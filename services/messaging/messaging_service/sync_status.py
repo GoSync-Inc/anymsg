@@ -10,6 +10,9 @@ from .operational import liveness, operations
 DOWNLOAD_STATES = ('queued', 'leased', 'ready', 'failed', 'superseded')
 EXTRACTION_STATES = ('queued', 'leased', 'ready', 'unsupported', 'failed', 'unknown')
 ENRICHMENT_STATES = ('unconfigured', 'queued', 'leased', 'ready', 'unsupported', 'failed', 'unknown')
+# download counts each current file occurrence once: ready equals stored_files;
+# current_files sums every state except superseded (replaced older revisions).
+DOWNLOAD_BASIS = 'current_file_occurrences'
 
 
 def _latest(previous, value):
@@ -97,22 +100,37 @@ def _checkpoints(c, p, allowed_chats):
     return grouped
 
 
+def empty_files():
+    return {'stored_files': 0, 'stored_bytes': 0, 'current_files': 0, 'download_basis': DOWNLOAD_BASIS,
+            'extraction': dict.fromkeys(EXTRACTION_STATES, 0), 'enrichment': dict.fromkeys(ENRICHMENT_STATES, 0),
+            'extraction_truncated': 0, 'enrichment_truncated': 0}
+
+
 def _files(c, p, *, group_by_chat=False):
     where, args = scope_filter(p, alias='m')
     key = "m.chat" if group_by_chat else "m.account"
+    # One row per file occurrence of a non-deleted message, in exactly one state
+    # (the per-file download_status rule): a registered active original is ready
+    # whatever its job says (an edit can re-queue an original that is still
+    # stored), a jobless legacy original is ready and a ready job without a
+    # registered original is unavailable. Superseded jobs are older revisions.
     downloads = {}
-    for row in c.execute('SELECT '+key+''' AS account,j.state,count(*) AS count FROM media_jobs j
-            JOIN messages m ON m.id=j.message AND m.account=j.account
-            WHERE NOT m.deleted AND '''+where+' GROUP BY '+key+',j.state', args):
-        downloads.setdefault(row['account'], {})[row['state']] = row['count']
     errors={};error_states={}
-    for row in c.execute('SELECT '+key+''' AS account,j.error_code,j.state,count(*) AS count FROM media_jobs j
-        JOIN messages m ON m.id=j.message AND m.account=j.account WHERE NOT m.deleted
-        AND j.state IN ('queued','leased','failed') AND j.error_code IS NOT NULL AND '''+where+
-        ' GROUP BY '+key+',j.error_code,j.state',args):
-        account_errors=errors.setdefault(row['account'],{})
-        account_errors[row['error_code']]=account_errors.get(row['error_code'],0)+row['count']
-        error_states.setdefault(row['account'],{}).setdefault(row['error_code'],{})[row['state']]=row['count']
+    for row in c.execute('SELECT account,state,error_code,count(*) AS count FROM (SELECT '+key+''' AS account,
+            CASE WHEN a.id IS NOT NULL THEN 'ready' WHEN j.state='ready' THEN 'unavailable' ELSE j.state END AS state,
+            CASE WHEN a.id IS NULL AND j.state IN ('queued','leased','failed') THEN j.error_code END AS error_code
+        FROM media_jobs j JOIN messages m ON m.id=j.message AND m.account=j.account
+        LEFT JOIN attachments a ON a.id=j.id AND a.message=j.message AND a.active
+        WHERE NOT m.deleted AND '''+where+' UNION ALL SELECT '+key+''','ready',NULL
+        FROM attachments a JOIN messages m ON m.id=a.message WHERE a.active AND NOT m.deleted
+        AND NOT EXISTS(SELECT FROM media_jobs j WHERE j.id=a.id) AND '''+where+''') occurrence
+        GROUP BY account,state,error_code''', args+args):
+        counts=downloads.setdefault(row['account'], {})
+        counts[row['state']]=counts.get(row['state'], 0)+row['count']
+        if row['error_code'] is not None:
+            account_errors=errors.setdefault(row['account'],{})
+            account_errors[row['error_code']]=account_errors.get(row['error_code'],0)+row['count']
+            error_states.setdefault(row['account'],{}).setdefault(row['error_code'],{})[row['state']]=row['count']
     # Count current occurrences, not global digests. Stale extraction/enrichment
     # rows must never inflate ready counts or expose another chat's derived state.
     indexed = c.execute('SELECT '+key+''' AS account,
@@ -135,10 +153,7 @@ def _files(c, p, *, group_by_chat=False):
         GROUP BY '''+key+',f.state,enrichment_state', args)
     files = {}
     for row in indexed:
-        item = files.setdefault(row['account'], {'stored_files': 0, 'stored_bytes': 0,
-            'extraction': dict.fromkeys(EXTRACTION_STATES, 0),
-            'enrichment': dict.fromkeys(ENRICHMENT_STATES, 0),
-            'extraction_truncated': 0, 'enrichment_truncated': 0})
+        item = files.setdefault(row['account'], empty_files())
         item['stored_files'] += row['count']
         item['stored_bytes'] += int(row['bytes'])
         item['extraction'][row['extraction_state']] += row['count']
@@ -146,9 +161,8 @@ def _files(c, p, *, group_by_chat=False):
         item['extraction_truncated'] += row['extraction_truncated']
         item['enrichment_truncated'] += row['enrichment_truncated']
     for account in downloads:
-        item=files.setdefault(account,{'stored_files':0,'stored_bytes':0,
-            'extraction':dict.fromkeys(EXTRACTION_STATES,0),'enrichment':dict.fromkeys(ENRICHMENT_STATES,0),
-            'extraction_truncated':0,'enrichment_truncated':0})
+        item=files.setdefault(account,empty_files())
+        item['current_files']=sum(n for state,n in downloads[account].items() if state!='superseded')
         item['download_errors']=errors.get(account,{})
         item['download_error_states']=error_states.get(account,{})
     return downloads, files
@@ -211,10 +225,7 @@ def get_sync_status(c, p):
             row['alerts']=[]
             if row['history'].get('gap_chats'):row['alerts'].append('provider_history_gaps')
             if row['active_conflicts']:row['alerts'].append('archive_version_conflicts')
-        row['files'] = files.get(account, {'stored_files': 0, 'stored_bytes': 0,
-            'extraction': dict.fromkeys(EXTRACTION_STATES, 0),
-            'enrichment': dict.fromkeys(ENRICHMENT_STATES, 0),
-            'extraction_truncated': 0, 'enrichment_truncated': 0})
+        row['files'] = files.get(account) or empty_files()
         row['files']['download'] = {**dict.fromkeys(DOWNLOAD_STATES, 0), **downloads.get(account, {})}
         if not scoped:
             row['operations']=operations(row,row['history'],row['files'])

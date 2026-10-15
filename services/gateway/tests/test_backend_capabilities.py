@@ -100,6 +100,7 @@ def test_calendar_constraints_survive_without_advertising_hidden_writes(tmp_path
                 "constraints": {
                     "recurrence_write": False,
                     "window_limit_days": 31,
+                    "time_format": "ISO 8601 synthetic",
                     "secret_option": "hidden",
                 },
                 "calendars": [
@@ -121,6 +122,10 @@ def test_calendar_constraints_survive_without_advertising_hidden_writes(tmp_path
         result = rpc(c, "tools/call", {"name": "calendar_capabilities", "arguments": {}}).json()["result"][
             "structuredContent"
         ]
-        assert result["constraints"] == {"recurrence_write": False, "window_limit_days": 31}
+        assert result["constraints"] == {
+            "recurrence_write": False,
+            "window_limit_days": 31,
+            "time_format": "ISO 8601 synthetic",
+        }
         assert "calendar_plan" not in result["gateway_tools"]
         assert "features" not in result and "secret_option" not in str(result)

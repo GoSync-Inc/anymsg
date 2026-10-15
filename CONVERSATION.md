@@ -19,6 +19,27 @@ raw provider objects. Unclassified empty records stay visible as `unknown`.
 Older archive records can only use retained metadata; newly observed provider
 metadata improves location/contact/poll classification without rewriting bodies.
 
+## Detail levels
+
+In the conversation view each message tool returns every message text once.
+
+- `detail="compact"` (default): structured messages with `id`, `chat`, `sender`,
+  `sender_name`, `sent_at`, `direction`, `kind`, `revision` and one readable text,
+  `display_text` (bounded; `truncated` marks a cut). Search adds `snippet` only
+  when it locates a match inside a long text. Attachments, owner mentions,
+  replies, delivery state, `order_status="ambiguous"` and integrity problems
+  appear only when they apply. `conversation_view` keeps warnings and the
+  untrusted-content marker, without the transcript. `get_context` returns the
+  anchor once, in `message`; `context_window.anchor_index` is its position among
+  the `context` neighbours. `list_chats` groups the reply hint into one
+  `awaiting_reply` object and shows the latest message once in `last_message`.
+- `detail="transcript"`: only the numbered transcript with message IDs, its
+  warnings, cursors and file references (`files`). Message text defaults to
+  2000 characters; `body_chars` changes it. Requires `view="conversation"`.
+- `detail="full"`: every field documented below, including `body`, ordering,
+  timestamp precision and the complete conversation state. Unchanged by the
+  compact and transcript levels, as is `view="archive"` compact output.
+
 ## Ordering and windows
 
 `position` is local to the returned page/window, never a permanent chat sequence.

@@ -557,3 +557,36 @@ def test_receipts_edits_and_file_readiness_do_not_become_new_human_reply(kind):
     selector = {'reply_anchor': {'account': 'synthetic', 'chat': 'synthetic', 'provider_id': 'native'}}
     reasons = wake_reason(item, selector)
     assert not {'incoming_message', 'owner_mention', 'reply_to_owner', 'reply_to_confirmed_send'} & set(reasons)
+
+
+def test_unacked_polls_evict_old_receipts_instead_of_locking_out(seeded):
+    store, _, _ = seeded
+    token = identity(store)
+    sid = subscription(store, token)
+    emit(store)
+    match_subscriptions(store)
+    pages = [call(store, token, 'fetch_subscription_events', sid) for _ in range(130)]
+    assert all(page['receipt'] for page in pages)
+    with store.pool.connection() as c:
+        assert c.execute('SELECT count(*) AS n FROM subscription_receipts').fetchone()['n'] == 128
+    with pytest.raises(APIError, match='invalid_receipt'):
+        call(store, token, 'ack_subscription_events', sid, pages[0]['receipt'], 1)
+    ack = call(store, token, 'ack_subscription_events', sid, pages[-1]['receipt'], 1)
+    assert ack['acked_through'] == pages[-1]['next_after']
+
+
+def test_certificate_failure_retries_and_non_ascii_path_is_rejected(seeded, tmp_path):
+    import ssl
+    from messaging_service.event_delivery import dispatch_hints, validate_endpoint
+    with pytest.raises(ValueError, match='unsafe_receiver'):
+        validate_endpoint('https://hooks.example.test/wäke', resolver=lambda *a, **k: ['93.184.216.34'])
+    store, _, _ = seeded
+    token = identity(store)
+    sid = subscription(store, token)
+    rid, _ = receiver(store, token, tmp_path)
+    call(store, token, 'configure_subscription_delivery', sid, 1, rid)
+    emit(store)
+    match_subscriptions(store)
+    def untrusted(*args, **kwargs):
+        raise ssl.SSLCertVerificationError('synthetic certificate failure')
+    assert dispatch_hints(store, transport=untrusted, resolver=lambda *a, **k: ['93.184.216.34'])['retried'] == 1
