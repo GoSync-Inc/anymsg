@@ -69,7 +69,9 @@ test('voice-note codec parameters normalize consistently for captures and media 
   const message={id:{fromMe:false,remote:'123@c.us',id:'VOICE'},fromMe:false,from:'123@c.us',
     timestamp:1800000000,body:'',hasMedia:true,_data:{size:10,mimetype:'Audio/Ogg; codecs=opus'}};
   assert.equal(event(message).mimetype,'audio/ogg');
-  // Untrusted control characters never reach the archive or abort capture.
+  // Changed assertion: this input used to throw invalid_provider_mime, which
+  // stopped the provider. Untrusted control characters now normalize to the
+  // generic type and never reach the archive.
   message._data.mimetype='audio/ogg; codecs=opus\r\nInjected: header';
   assert.equal(event(message).mimetype,'application/octet-stream');
   assert.ok(!JSON.stringify(event(message)).includes('Injected'));
