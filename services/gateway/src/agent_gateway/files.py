@@ -70,12 +70,15 @@ class Tickets:
             ttl, size, sha = result["download_expires_in"], result["bytes"], result["sha256"]
             if origin(result["download_url"]) != origin(target.get("download_origin") or target["url"]):
                 raise ValueError
+            prefix = urlsplit(target.get("download_origin") or target["url"]).path.rstrip("/")
+            backend_path = source.path.removeprefix(prefix)
             if (
-                source.username
+                not source.path.startswith(prefix + "/")
+                or source.username
                 or source.password
                 or source.query
                 or source.fragment
-                or not re.fullmatch(r"/v1/download/[A-Za-z0-9_-]{43}", source.path)
+                or not re.fullmatch(r"/v1/download/[A-Za-z0-9_-]{43}", backend_path)
             ):
                 raise ValueError
             if (
@@ -102,7 +105,7 @@ class Tickets:
             "principal": agent["id"],
             "backend_key_digest": hashlib.sha256(credential.encode()).hexdigest(),
             "target": target,
-            "path": source.path,
+            "path": backend_path,
             "expires": expires,
             "sha256": sha,
             "bytes": size,

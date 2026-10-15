@@ -10,7 +10,15 @@ from agent_gateway.app import create_app
 from test_policy import config
 
 
-def setup(tmp_path, *, ttl=120, source="https://archive.example.test", redirect=False):
+def setup(
+    tmp_path,
+    *,
+    ttl=120,
+    source="https://archive.example.test",
+    redirect=False,
+    public="http://testserver",
+    download_origin="https://archive.example.test",
+):
     path = tmp_path / "policy.json"
     key = tmp_path / "backend.key"
     key.write_text("backend-messaging-a")
@@ -21,7 +29,7 @@ def setup(tmp_path, *, ttl=120, source="https://archive.example.test", redirect=
         "backends": {
             "messaging": {
                 "url": "http://messaging-api:8080",
-                "download_origin": "https://archive.example.test",
+                "download_origin": download_origin,
             }
         },
     }
@@ -59,7 +67,7 @@ def setup(tmp_path, *, ttl=120, source="https://archive.example.test", redirect=
             else httpx.Response(200, stream=httpx.ByteStream(data))
         )
 
-    app = create_app(path, "http://testserver", transports={"messaging": httpx.MockTransport(handler)})
+    app = create_app(path, public, transports={"messaging": httpx.MockTransport(handler)})
     return app, path, data, requests
 
 
@@ -119,3 +127,22 @@ def test_unreviewed_download_origin_and_redirect_never_followed(tmp_path):
     with TestClient(app) as client:
         assert client.get(issue(client).json()["download_url"]).status_code == 503
     assert len(requests) == 2
+
+
+def test_explicit_proxy_prefixes_preserve_public_ticket_and_canonical_upstream(tmp_path):
+    app, path, data, seen = setup(
+        tmp_path,
+        source="https://archive.example.test/legacy",
+        public="http://testserver/deedkit",
+        download_origin="https://archive.example.test/legacy",
+    )
+    with TestClient(app) as client:
+        result = issue(client).json()
+        assert result["download_url"].startswith("http://testserver/deedkit/v1/files/")
+        # The trusted proxy removes only the configured public prefix.
+        response = client.get(
+            result["download_url"].replace("/deedkit/", "/", 1), headers={"Origin": "http://testserver"}
+        )
+        assert response.content == data
+        assert seen[-1].url.path == "/v1/download/" + "a" * 43
+        assert client.get("/healthz", headers={"Origin": "http://testserver/deedkit"}).status_code == 403

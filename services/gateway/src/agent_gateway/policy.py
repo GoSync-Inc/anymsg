@@ -5,6 +5,7 @@ import hashlib
 import hmac
 import json
 import os
+import re
 from pathlib import Path
 import stat
 from urllib.parse import urlsplit
@@ -140,7 +141,7 @@ class Policy:
                         or not download.hostname
                         or download.username
                         or download.password
-                        or download.path not in ("", "/")
+                        or not re.fullmatch(r"(?:/[A-Za-z0-9_-]+)*/?", download.path)
                         or download.query
                         or download.fragment
                     ):

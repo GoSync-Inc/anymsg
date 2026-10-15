@@ -4,6 +4,7 @@ from contextlib import asynccontextmanager
 from contextvars import ContextVar
 import json
 import logging
+import re
 from urllib.parse import urlsplit
 
 from fastapi import FastAPI
@@ -31,13 +32,14 @@ def create_app(policy_path, public_url, *, transports=None):
     if (
         origin.scheme not in ("http", "https")
         or not origin.netloc
-        or origin.path not in ("", "/")
+        or not re.fullmatch(r"(?:/[A-Za-z0-9_-]+)*/?", origin.path)
         or origin.query
         or origin.fragment
         or origin.username
     ):
         raise ValueError("invalid_public_origin")
     public_url = public_url.rstrip("/")
+    public_origin = origin.scheme + "://" + origin.netloc
     clients = Clients(deployment, transports)
     tickets = Tickets(policy, clients, public_url)
     dispatch = Dispatch(policy, clients, tickets)
@@ -79,7 +81,9 @@ def create_app(policy_path, public_url, *, transports=None):
         json_response=True,
         max_request_body_size=65536,
         transport_security=TransportSecuritySettings(
-            enable_dns_rebinding_protection=True, allowed_hosts=[origin.netloc], allowed_origins=[public_url]
+            enable_dns_rebinding_protection=True,
+            allowed_hosts=[origin.netloc],
+            allowed_origins=[public_origin],
         ),
     )
 
@@ -145,7 +149,7 @@ def create_app(policy_path, public_url, *, transports=None):
             try:
                 if request.headers.get("host") != origin.netloc or request.headers.get("origin") not in (
                     None,
-                    public_url,
+                    public_origin,
                 ):
                     raise Denied("invalid_origin", 403)
                 if request.url.path == "/healthz" and request.method == "GET":
