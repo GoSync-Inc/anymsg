@@ -24,7 +24,7 @@
       "name": "family_calendars"
     },
     {
-      "description": "Family members and roles. Roles do not imply access to personal calendars.",
+      "description": "Family members, roles and authorized availability bindings; inaccessible or unbound sources are explicit.",
       "inputSchema": {
         "properties": {},
         "type": "object",
@@ -72,7 +72,7 @@
       "name": "family_agenda"
     },
     {
-      "description": "Find candidate intervals within explicit member bindings. Overall member availability stays unknown without a complete source inventory; inspect checked_member_sources and coverage.",
+      "description": "Find candidate intervals within member bindings plus additional_calendar_refs. Inspect source_selection and coverage; overall member availability stays unknown without a complete source inventory. Poll pending refresh with refresh=false.",
       "inputSchema": {
         "properties": {
           "member_ids": {
@@ -102,6 +102,14 @@
             "default": true,
             "title": "Refresh",
             "type": "boolean"
+          },
+          "additional_calendar_refs": {
+            "items": {
+              "type": "string"
+            },
+            "maxItems": 32,
+            "title": "Additional Calendar Refs",
+            "type": "array"
           }
         },
         "required": [

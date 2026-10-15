@@ -98,7 +98,6 @@ class FamilyService:
     def calendars(self, key):
         p = self.principal(key)
         out = []
-        scope = "agenda:read" if "agenda:read" in p["scopes"] else "availability:read"
         for c in self.store.query(
             "SELECT c.*,cn.provider,cn.enabled AS connection_enabled,g.scopes AS grant_scopes,"
             "g.visibility AS grant_visibility,a.visibility AS agent_visibility FROM calendars c "
@@ -107,7 +106,8 @@ class FamilyService:
             "WHERE g.group_id=%s AND g.person_id=%s AND a.principal_id=%s",
             (p["group_id"], p["person_id"], p["id"]),
         ):
-            if scope not in p["scopes"] or scope not in c["grant_scopes"] or not c["connection_enabled"]:
+            read_scopes = set(p["scopes"]) & set(c["grant_scopes"]) & {"agenda:read", "availability:read"}
+            if not read_scopes or not c["connection_enabled"]:
                 continue
             c["visibility"] = (
                 "busy_only" if "busy_only" in (c["agent_visibility"], c["grant_visibility"]) else "details"
@@ -123,13 +123,29 @@ class FamilyService:
                     "identity_basis": "provider_resource",
                     "primary": None,
                     "duplicate_of": None,
+                    "allowed_event_actions": self._event_actions(p, c),
                 }
             )
         return {"calendars": out, "group_id": p["group_id"]}
 
+    def _event_actions(self, principal, calendar):
+        if (
+            principal["role"] in ("dependent", "helper")
+            or calendar["visibility"] == "busy_only"
+            or calendar["privilege"] != "write"
+            or not calendar["write_enabled"]
+        ):
+            return []
+        scopes = set(principal["scopes"]) & set(calendar["grant_scopes"])
+        return [
+            action
+            for action in ("create", "update", "delete")
+            if {"plan:create", "plan:execute", "event:" + action} <= scopes
+        ]
+
     def family(self, key):
         p = self.principal(key)
-        return {
+        result = {
             "group_id": p["group_id"],
             "members": self.store.query(
                 "SELECT m.person_id,m.role,p.label FROM memberships m JOIN people p ON p.id=m.person_id "
@@ -137,12 +153,45 @@ class FamilyService:
                 (p["group_id"],),
             ),
         }
+        for member in result["members"]:
+            rows = self.store.query(
+                "SELECT calendar_ref FROM bindings WHERE group_id=%s AND person_id=%s ORDER BY calendar_ref",
+                (p["group_id"], member["person_id"]),
+            )
+            refs = []
+            for row in rows:
+                try:
+                    self.authorize(key, row["calendar_ref"], "availability:read")
+                except CalendarError:
+                    continue
+                refs.append(row["calendar_ref"])
+            member["availability_calendar_refs"] = refs
+            member["availability_sources_status"] = (
+                "unbound" if not rows else "configured" if len(refs) == len(rows) else "inaccessible"
+            )
+        return result
 
     def capabilities(self, key):
         calendars = self.calendars(key)
         return dict(
             calendars,
             permissions=sorted(self.principal(key)["scopes"]),
+            constraints={
+                "event_write": "single non-recurring timed guest-free event",
+                "recurrence_write": False,
+                "future_split": False,
+                "invitations": False,
+                "refresh": "bounded; pending jobs must be polled with refresh=false",
+                "window_limit_days": 31,
+                "calendar_limit": 32,
+                "event_limit": 500,
+                "cache_max_age_seconds": 300,
+                "refresh_wait_seconds": 20,
+                "plan_action_limit": 8,
+                "plan_ttl_seconds": 600,
+                "atomic_cross_provider": False,
+                "availability_sources": "member bindings plus additional_calendar_refs; unbound members remain unknown",
+            },
             features={
                 "agenda": True,
                 "slots": True,
@@ -207,13 +256,18 @@ class FamilyService:
             "required_sources_complete": all(c["status"] == "complete" for c in coverage),
         }
 
-    def slots(self, key, member_ids, start, end, duration_minutes):
+    def slots(self, key, member_ids, start, end, duration_minutes, additional_calendar_refs=None):
         p = self.principal(key)
         a, b = window(start, end)
         if "availability:read" not in p["scopes"] or not member_ids or len(member_ids) > 32:
             raise CalendarError("not_found_or_forbidden")
         if not isinstance(duration_minutes, int) or not 5 <= duration_minutes <= 1440:
             raise CalendarError("invalid_duration")
+        additional_calendar_refs = additional_calendar_refs or []
+        if len(additional_calendar_refs) > 32 or len(set(additional_calendar_refs)) != len(
+            additional_calendar_refs
+        ):
+            raise CalendarError("invalid_calendar_refs")
         refs = []
         missing = []
         checked = []
@@ -224,13 +278,14 @@ class FamilyService:
             ):
                 raise CalendarError("not_found_or_forbidden")
             rows = self.store.query(
-                "SELECT calendar_ref FROM bindings WHERE group_id=%s AND person_id=%s",
+                "SELECT calendar_ref FROM bindings WHERE group_id=%s AND person_id=%s ORDER BY calendar_ref",
                 (p["group_id"], member),
             )
             if not rows:
                 missing.append(member)
             checked.append({"member_id": member, "calendar_refs": sorted(r["calendar_ref"] for r in rows)})
             refs.extend(r["calendar_ref"] for r in rows)
+        refs = list(dict.fromkeys(refs + additional_calendar_refs))
         agenda = (
             self.agenda(key, list(dict.fromkeys(refs)), start, end, "availability:read")
             if refs
@@ -243,11 +298,19 @@ class FamilyService:
             "required_sources_complete": False,
             "configured_sources_complete": agenda["required_sources_complete"] and not missing,
             "unbound_members": missing,
-            "availability_scope": "configured_bindings",
+            "availability_scope": "configured_and_explicit_sources"
+            if additional_calendar_refs
+            else "configured_bindings",
             "member_sources_complete": "unknown",
             "checked_member_sources": checked,
             "configured_bindings_availability": "unknown",
             "candidate_slots": [],
+            "source_selection": {
+                "scope": "configured_and_explicit_sources_only",
+                "calendar_refs": refs,
+                "member_sources": checked,
+                "additional_calendar_refs": additional_calendar_refs,
+            },
         }
         if not result["configured_sources_complete"]:
             return result

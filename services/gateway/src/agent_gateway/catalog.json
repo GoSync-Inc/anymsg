@@ -1834,7 +1834,7 @@
   },
   {
     "name": "calendar_members",
-    "description": "Family members and roles. Roles do not imply access to personal calendars.",
+    "description": "Family members, roles and authorized availability bindings; inaccessible or unbound sources are explicit.",
     "inputSchema": {
       "additionalProperties": false,
       "properties": {},
@@ -1890,7 +1890,7 @@
   },
   {
     "name": "calendar_slots",
-    "description": "Find verified free intervals for selected members. Incomplete, unbound or stale sources yield unknown.",
+    "description": "Find free intervals from member bindings plus additional_calendar_refs. Inspect source_selection; incomplete, pending, unbound or stale sources yield unknown. Poll pending refresh with refresh=false.",
     "inputSchema": {
       "additionalProperties": false,
       "properties": {
@@ -1921,6 +1921,14 @@
           "default": true,
           "title": "Refresh",
           "type": "boolean"
+        },
+        "additional_calendar_refs": {
+          "items": {
+            "type": "string"
+          },
+          "maxItems": 32,
+          "title": "Additional Calendar Refs",
+          "type": "array"
         }
       },
       "required": [

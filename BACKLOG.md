@@ -8,7 +8,9 @@ status does not mean a feature passed live acceptance.
 
 Reviewed **2026-10-15** against main
 [`7c98979`](https://github.com/GoSync-Inc/deedkit/commit/7c98979), merged PRs,
-open PR #24 and the Tiden main spec tree. This is a source review, not a new
+open PRs #24/#26/#27/#28/#29 and the agent-interface remediation branch.
+The [audit matrix](docs/quality/agent-interface-audit-2026-10-15.md) maps each
+reported defect to its source change and remaining acceptance. This is a source review, not a new
 provider, production or off-site recovery test. GitHub Issues had no open items;
 GitHub Projects could not be inspected with the available token.
 
@@ -39,9 +41,9 @@ an estimate or assignment. Entries within a priority are not a strict schedule.
 | DK-05 | P1 | Planned | Bounded recovery of exhausted media jobs. Verify current sources, expose retry limits/backoff and outcomes; do not clear terminal failures or bypass storage admission blindly. Explicit demand and capped ordinary retries already exist. | [Collectors](COLLECTORS.md), [storage](MEDIA_STORAGE.md) |
 | DK-06 | P1 | Planned | Evidence-based conflict classification. Distinguish verified aliases, changed media descriptors and changed source content; preserve competing observations and audit resolutions. | [Review history](REVIEW_FOLLOWUP.md), [identity contract](WHATSAPP_IDENTITIES.md) |
 | DK-07 | P1 | Verify | Native WhatsApp rollout: incoming/group messages, media, aliases, interruptions, ACK redelivery/backpressure and sustained ingestion; record approved mutation checks and an explicit cutover/rollback decision. Native implementation is already merged. | [Parity gates](docs/quality/whatsmeow-parity.md), [operator guide](docs/whatsapp-native.md) |
-| DK-08 | P2 | Planned | Subscription event ACK: credential-owned, scope/version-checked consumption positions; passive reads must not acknowledge events or another agent's work. | [Subscription design](SUBSCRIPTIONS.md) |
-| DK-09 | P2 | Planned | Subscription dispatch, batching and reply/mention presets. Preserve durable matching, exact evidence, limits and restart behaviour; acknowledged consumption depends on DK-08. | [Subscription design](SUBSCRIPTIONS.md) |
-| DK-10 | P2 | Planned | Verified host receiver, notification delivery and agent wake-up. Re-read durable events after reconnect; prove authentication, revocation, bounded delivery and duplicate handling. Passive subscriptions cannot wake an idle agent today. | [Delivery design](SUBSCRIPTIONS.md#planned-delivery-architecture) |
+| DK-08 | P2 | Review | Subscription event ACK: schema-32 implementation has exact-key ownership, issued page receipts, scope/version checks and separate consumption positions. Merge and deploy the reviewed change; passive reads never ACK. | [Consumption contract](SUBSCRIPTIONS.md), [audit matrix](docs/quality/agent-interface-audit-2026-10-15.md) |
+| DK-09 | P2 | Review | Durable signed hint dispatch, bounded waiting and incoming/mention/exact owner-reply/confirmed-send-reply presets are implemented in the remediation branch. Merge and deploy with explicit roles, egress and receiver registration. Silence, quiet hours and batching remain DK-36. | [Delivery contract](SUBSCRIPTIONS.md), [audit matrix](docs/quality/agent-interface-audit-2026-10-15.md) |
+| DK-10 | P2 | Planned | Verified host receiver/onboarding and idle-agent wake-up. Integrate the host, re-read durable events after reconnect, and prove authentication, revocation and duplicate handling. Signed hint delivery alone does not prove a host turn; there is no agent onboarding-link API. | [Delivery boundaries](SUBSCRIPTIONS.md), DK-08/09 |
 | DK-11 | P2 | Planned | Compact incoming overview across selected chats. Separate new provider messages from historical imports; retain ingestion-order ACKs and unknown provider unread/mute/archive state. Per-chat conversation views already exist. | [Review history](REVIEW_FOLLOWUP.md), [conversation contract](CONVERSATION.md) |
 | DK-12 | P2 | Planned | Independent versioned file titles, summaries and structured analysis; reuse AI artifacts only for matching content/model/profile/version, retaining source links and partial/truncated states. Extraction and context-bound derivative reuse already exist. | [File index](FILE_INDEX.md), [enrichment](ENRICHMENT.md) |
 | DK-13 | P2 | Planned | Measure local/API file-understanding profiles on synthetic or separately authorized files; record quality, cost and limits. Installing optional Codex support does not authorize execution. | [Enrichment](ENRICHMENT.md), [Codex adapter](CODEX_ENRICHMENT.md) |
@@ -63,6 +65,13 @@ an estimate or assignment. Entries within a priority are not a strict schedule.
 | DK-29 | P2 | Planned | Publish the next reviewed package release. Choose its version explicitly, verify outside-checkout installation/distribution contents, preserve package/provider/schema identities and record publication. Development source leads published 0.9.9. | [Release procedure](RELEASING.md), [versions](README.md) |
 | DK-30 | P3 | Optional | Authenticated MCP discovery notifications. Implement a real bounded stream with revocation/restart/client compatibility evidence before advertising list-change support. JSON POST with GET 405 remains the current transport. | [Discovery reference](MESSAGE_ACTIONS.md#client-discovery) |
 | DK-31 | P2 | Triage | Reconcile open Tiden telemetry and subscription-recovery reviews with main and test evidence. Preserve IDs/links; do not merge or close an unrelated review merely because baseline code exists. | `codex/tiden-runtime-telemetry`; `intent/2026-10-14-agents-maintain-durable` |
+| DK-32 | P1 | Review | Agent-interface regressions: scoped chat-query performance, exact-name ranking, capture-qualified freshness, coherent file metadata/names, real conflict guidance, explicit discovery/identity diagnostics, bounded send observation, feedback and calendar preview/source completeness. Merge the combined reviewed source and retain synthetic/CI evidence. | [Audit acceptance matrix](docs/quality/agent-interface-audit-2026-10-15.md), [calendar PR #29](https://github.com/GoSync-Inc/deedkit/pull/29) |
+| DK-33 | P1 | Verify | Operational audit acceptance after deployment: reconnect host tools, verify WA capture drain, inspect capacity/network/terminal media jobs, review calls grants/provider readiness, and connect an explicitly authorized receiver. Historical sends remain unknown without exact receipts. Record each outcome; do not reset queues or grant rights from the report alone. | [Audit acceptance matrix](docs/quality/agent-interface-audit-2026-10-15.md), DK-02/05/07/10/21, [deployment PR #27](https://github.com/GoSync-Inc/deedkit/pull/27) |
+| DK-34 | P2 | Planned | Compact response projection: define minimal message fields and opt-in/conditional source detail, preserving degraded-state warnings, coverage and compatible defaults; measure response bytes. | [Conversation contract](CONVERSATION.md), [audit matrix](docs/quality/agent-interface-audit-2026-10-15.md) |
+| DK-35 | P2 | Planned | Owner-reviewed calendar primary/duplicate mapping and complete source inventories. Preserve provider resource identity; equal labels or timezones never imply duplicates. Bind additional sources only on explicit owner selection; missing inventory remains unknown. | [Calendar service](services/calendar/docs/SERVICE.md), DK-15/18 |
+| DK-36 | P2 | Planned | Silence/expected-reply timers, quiet hours, debounce and batching. Define clock/restart/revocation/idempotency rules and per-key delivery budgets before enabling automatic wake scheduling. Native reply evidence and durable hints are DK-09. | [Subscription boundaries](SUBSCRIPTIONS.md) |
+| DK-37 | P3 | Review | Grok voice engine integration. Merge its separate reviewed implementation and retain synthetic transport evidence; live call/owner acceptance remains DK-21. | [PR #28](https://github.com/GoSync-Inc/deedkit/pull/28) |
+| DK-38 | P2 | Planned | Human-readable fallback labels for unsupported/service message types. Preserve native type and uncertainty; hide a notification from conversation only when its service semantics are established. | [Conversation contract](CONVERSATION.md), [audit matrix](docs/quality/agent-interface-audit-2026-10-15.md) |
 
 ## Delivered source increments
 
@@ -92,7 +101,8 @@ The four specs incorrectly left in `Backlog` describe implemented contracts:
 | 201 — uncertainty-qualified actual chat head | `fd83f0d9-2c10-4a9f-8210-b1931d314795` | DONE-01; `Active` |
 | 214 — bounded original-download requests | `48f13d49-ed88-4e99-9fdc-7e77e09f4147` | DONE-07; `Active` |
 
-Read-back after reconciliation: **212 Active specs, zero Backlog specs**.
+Read-back after the original backlog reconciliation: **212 Active specs, zero Backlog specs**.
+This is a historical workflow count, not a fresh verification verdict for the audit branch.
 Future work is tracked in the open queue above.
 
 Reconciliation changes workflow status and corrects spec 200's ambiguous
