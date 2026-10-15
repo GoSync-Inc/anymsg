@@ -32,6 +32,36 @@ type Provider struct {
 	cancel      context.CancelFunc
 	workers     sync.WaitGroup
 	failureOnce sync.Once
+	failure     atomic.Value // first failure code (string)
+}
+
+// Connection failures the Python collector retries or blocks on
+// (operational.CONNECTION_ERRORS). Other codes stay behind a generic one.
+var transportFailures = map[string]bool{"whatsapp_logged_out": true, "whatsapp_pairing_required": true, "provider_auth_failed": true, "whatsapp_identity_mismatch": true, "provider_disconnected": true, "provider_not_ready": true, "provider_initialization_failed": true, "durable_capture_failed": true, "capture_overload": true, "spool_full": true, "disk_reserve": true}
+
+// whatsmeow never reconnects after these events, and reconnecting from Python
+// would repeat them: a temporary ban or a session taken over by another client
+// needs the owner (reconnecting during a ban risks extending it), while an
+// outdated client needs an upgrade. The detail stays in .transport-failure.
+func connectionFailure(value any) (code, detail string) {
+	switch value.(type) {
+	case *events.TemporaryBan:
+		return "provider_auth_failed", "whatsapp_temporary_ban"
+	case *events.StreamReplaced:
+		return "provider_auth_failed", "whatsapp_session_replaced"
+	case *events.ClientOutdated:
+		return "provider_initialization_failed", "whatsapp_client_outdated"
+	}
+	return "", ""
+}
+
+// failureError reports the recorded failure when Python understands it, so a
+// terminal code is not replaced by a retryable generic one.
+func (p *Provider) failureError(fallback string) error {
+	if code, _ := p.failure.Load().(string); transportFailures[code] {
+		return errors.New(code)
+	}
+	return errors.New(fallback)
 }
 
 // All lifecycle clients use the same durability settings, including the two
@@ -46,10 +76,17 @@ func nativeClient(device *store.Device) *whatsmeow.Client {
 	return client
 }
 
-func (p *Provider) fail(code string) {
+func (p *Provider) fail(code string) { p.failDetail(code, "") }
+
+func (p *Provider) failDetail(code, detail string) {
 	p.ready.Store(false)
 	p.failureOnce.Do(func() {
-		_ = atomicPrivate(p.Config.EventsDirectory, ".transport-failure", mustJSON(map[string]any{"code": code, "observed_at": time.Now().UTC().Format(time.RFC3339Nano)}))
+		p.failure.Store(code)
+		value := map[string]any{"code": code, "observed_at": time.Now().UTC().Format(time.RFC3339Nano)}
+		if detail != "" {
+			value["detail"] = detail
+		}
+		_ = atomicPrivate(p.Config.EventsDirectory, ".transport-failure", mustJSON(value))
 		if p.cancel != nil {
 			p.cancel()
 		}
@@ -132,6 +169,9 @@ func (p *Provider) start(ctx context.Context) (result any, err error) {
 		case *events.LoggedOut:
 			p.fail("whatsapp_logged_out")
 			return false
+		case *events.TemporaryBan, *events.StreamReplaced, *events.ClientOutdated:
+			p.failDetail(connectionFailure(e))
+			return false
 		case *events.Disconnected:
 			p.ready.Store(false)
 		case *events.Message:
@@ -178,12 +218,17 @@ func (p *Provider) start(ctx context.Context) (result any, err error) {
 	if e = p.Client.ConnectContext(child); e != nil {
 		return nil, errors.New("provider_initialization_failed")
 	}
+	return p.awaitConnected(child, connected, 60*time.Second)
+}
+
+func (p *Provider) awaitConnected(ctx context.Context, connected <-chan struct{}, timeout time.Duration) (any, error) {
 	select {
 	case <-connected:
 		return map[string]any{"ready": true}, nil
-	case <-child.Done():
-		return nil, errors.New("provider_disconnected")
-	case <-time.After(60 * time.Second):
+	case <-ctx.Done():
+		// A failure during connect (e.g. logout or ban) cancels ctx; report it.
+		return nil, p.failureError("provider_disconnected")
+	case <-time.After(timeout):
 		return nil, errors.New("provider_initialization_failed")
 	}
 }
@@ -264,7 +309,9 @@ func (p *Provider) handle(ctx context.Context, r request, emit func(any) error) 
 		return p.start(ctx)
 	}
 	if !p.ready.Load() {
-		return nil, errors.New("provider_not_ready")
+		// After a failure the process stays up; the next request tells Python
+		// why (e.g. a replaced session must block, not reconnect).
+		return nil, p.failureError("provider_not_ready")
 	}
 	policy, e := p.policy()
 	if e != nil {
