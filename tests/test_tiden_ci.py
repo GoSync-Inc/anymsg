@@ -6,7 +6,7 @@ import xml.etree.ElementTree as ET
 
 import pytest
 
-from scripts.tiden_ci import CHECKS, normalize_junit, prepare, publish, resolve_branch
+from scripts.tiden_ci import CHECKS, normalize_junit, prepare, publish, resolve_branch, route_branch
 
 
 def report(tmp_path, xml):
@@ -138,3 +138,76 @@ def test_publisher_refuses_a_green_verdict_for_blocked_ci(tmp_path, monkeypatch)
     manifest["check_counts"] = {"passed": 6, "blocked": 1}
     with pytest.raises(RuntimeError, match="contradicts"):
         publish(tmp_path, manifest, "intent/feature", "product")
+
+
+def test_unmapped_feature_branch_is_routed_under_its_own_git_branch_name():
+    meta = metadata()
+    assert route_branch(meta, {}) == ("codex/feature", True)
+    assert route_branch(meta, {"codex/feature": "intent/feature"}) == ("intent/feature", False)
+    assert route_branch({**meta, "git_branch": "main"}, {}) == ("main", False)
+    assert route_branch({**meta, "tiden_branch": "intent/specific"}, {}) == ("intent/specific", False)
+    for name in ("Codex/Feature", "release/1.2", "codex//feature", "codex/feature/", "-feature"):
+        with pytest.raises(ValueError, match="mapping"):
+            route_branch({**meta, "git_branch": name}, {})
+
+
+def routed_cli(monkeypatch, tmp_path, *, created="codex/feature", final_id="new-id",
+               final_branches=({"id": "new-id", "name": "codex/feature"},), live_doc="succeeded"):
+    import subprocess
+    calls = []
+    listed = []
+    def run(args, **kwargs):
+        calls.append(args)
+        command = args[1:3]
+        if command == ["branch", "list"]:
+            # Tiden creates or picks the branch while it processes the run.
+            value = {"branches": [{"id": "main-id", "name": "main"}, *(final_branches if listed else ())]}
+            listed.append(True)
+        elif command == ["run", "create"]:
+            value = {"seqNum": 4, "branchName": created, "buildSha": "a" * 40}
+        elif command == ["run", "get"]:
+            value = {"status": "passed", "branchId": final_id, "liveDocStatus": live_doc, "stats": {"attempts": "7"}}
+        elif command == ["run", "complete"]:
+            value = {"status": "passed"}
+        else:
+            value = {}
+        return subprocess.CompletedProcess(args, 0, stdout=json.dumps(value), stderr="")
+    monkeypatch.setattr(subprocess, "run", run)
+    (tmp_path / "ci-checks.json").write_text("[]")
+    manifest = {**metadata(), "schema": 1, "reports": ["ci-checks.json"], "test_counts": {},
+                "check_counts": {"passed": 7}}
+    return calls, manifest
+
+
+def test_routed_run_lands_on_the_same_named_branch_tiden_creates(tmp_path, monkeypatch):
+    calls, manifest = routed_cli(monkeypatch, tmp_path)
+    assert publish(tmp_path, manifest, "codex/feature", "product", routed=True)["branchId"] == "new-id"
+    creation = next(call for call in calls if call[1:3] == ["run", "create"])
+    assert creation[creation.index("--branch") + 1] == "codex/feature"
+    assert creation[creation.index("--intent-session") + 1] == "none"
+
+
+def test_routed_run_follows_the_intent_branch_tiden_attributes_it_to(tmp_path, monkeypatch):
+    _, manifest = routed_cli(monkeypatch, tmp_path, created="intent/2026-10-15-agents-feature", final_id="intent-id",
+                             final_branches=({"id": "intent-id", "name": "intent/2026-10-15-agents-feature"},))
+    assert publish(tmp_path, manifest, "codex/feature", "product", routed=True)["branchId"] == "intent-id"
+
+
+@pytest.mark.parametrize("final_id, final_branches, live_doc", [
+    ("main-id", (), "succeeded"),
+    ("other-id", ({"id": "other-id", "name": "codex/other"},), "succeeded"),
+    ("missing-id", (), "succeeded"),
+    ("new-id", ({"id": "new-id", "name": "codex/feature"},), "failed"),
+])
+def test_routed_run_never_lands_on_main_or_an_unrelated_branch(tmp_path, monkeypatch, final_id, final_branches, live_doc):
+    calls, manifest = routed_cli(monkeypatch, tmp_path, final_id=final_id, final_branches=final_branches, live_doc=live_doc)
+    with pytest.raises(RuntimeError, match="expected branch"):
+        publish(tmp_path, manifest, "codex/feature", "product", routed=True)
+    assert not any(call[1:3] == ["run", "abort"] for call in calls)
+
+
+def test_routed_run_refuses_a_rewritten_source_association(tmp_path, monkeypatch):
+    calls, manifest = routed_cli(monkeypatch, tmp_path, created="main")
+    with pytest.raises(RuntimeError, match="rewrote"):
+        publish(tmp_path, manifest, "codex/feature", "product", routed=True)
+    assert any(call[1:3] == ["run", "abort"] for call in calls)

@@ -17,14 +17,20 @@ In GitHub Actions repository settings, add:
 
 - Secret `TIDEN_API_TOKEN`: a Tiden workspace API credential.
 - Variables `TIDEN_WORKSPACE_ID` and `TIDEN_PRODUCT_ID` for the linked product.
-- Variable `TIDEN_BRANCH_MAP`: a JSON object mapping Git branches to existing
-  Tiden spec branches, for example `{"codex/example":"intent/example"}`.
+- Optional variable `TIDEN_BRANCH_MAP`: a JSON object mapping Git branches to
+  existing Tiden spec branches, for example `{"codex/example":"intent/example"}`.
   `main` maps to Tiden `main` automatically.
 
-The mapping must name an existing Tiden branch. Do not label a feature run as
-`main` just to make the main gate green. Missing mappings and failed evidence
-association fail the reporting job. Without a token the job clearly states
-that reporting is not configured. No workspace credentials belong in Git.
+A mapping must name an existing Tiden branch and always wins. A feature branch
+without a mapping is reported under its own Git branch name. Tiden attributes
+that run to the intent branch whose session (`tiden intent start` on that Git
+branch) recorded it, otherwise to a Tiden branch of the same name. The publisher
+reads the result back and accepts only that same-named branch or an `intent/`
+branch, never `main`. Git branch names Tiden cannot use (uppercase, dots) still
+need a mapping. Do not label a feature run as `main` just to make the main gate
+green. Failed evidence association fails the reporting job. Without a token the
+job clearly states that reporting is not configured. No workspace credentials
+belong in Git.
 
 For an explicit baseline rerun, dispatch `CI` on the reporting-code branch with
 `source_ref` set to the exact source revision and `tiden_branch` to the matching
@@ -33,9 +39,10 @@ Normal pull requests record their actual tested merge SHA.
 
 ## Verdicts and coverage
 
-`run create` always receives `--branch <Tiden branch> --intent-session none`:
-do not rely on inferred Git-to-intent routing. The job waits for live-doc sync
-and checks the resulting branch ID before reporting success. The authentic run
+`run create` always receives `--branch` and `--intent-session none`. A mapped
+run must land on exactly the mapped branch ID. An unmapped run must land on the
+same-named or an intent branch, as described above. The job waits for live-doc
+sync and checks the resulting branch before reporting success. The authentic run
 then adopts existing case identities or imports the reported cases. Reported
 step failures and missing required verifications are also recorded as failed
 or blocked; optional test skips remain skipped. A test run is not a statement
