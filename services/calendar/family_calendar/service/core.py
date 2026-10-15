@@ -139,6 +139,7 @@ class FamilyService:
         calendars = self.calendars(key)
         return dict(
             calendars,
+            permissions=sorted(self.principal(key)["scopes"]),
             features={
                 "agenda": True,
                 "slots": True,

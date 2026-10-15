@@ -4,14 +4,14 @@
 
 Замеры скорости обычной цепочки с отдельными распознаванием, текстовой моделью и голосом: [BENCHMARKS.md](BENCHMARKS.md).
 
-Отдельный Pipecat сервис: поручение → выбранные факты AnyMsg → Gemini Live → консультант → отложенный вопрос владельцу → новое продолжение. Добавлен серверный пилот: Telegram signaling через существующий session owner, Twilio для WhatsApp Business, телефона и SIP, отдельный MCP с 14 tools. Telegram connection проверен; живые звонки ещё не выполнены, Twilio credentials/Business sender требуют настройки. [Инструкция подключения](../../docs/architecture/VOICE_CALLING_SETUP.md).
+Отдельный Pipecat сервис: поручение → выбранные факты AnyMsg → Gemini Live → консультант → отложенный вопрос владельцу → новое продолжение. Добавлен серверный пилот: Telegram signaling через существующий session owner, Twilio для WhatsApp Business, телефона и SIP, отдельный MCP с 14 tools. Telegram connection проверен; живые звонки ещё не выполнены, Twilio credentials/Business sender требуют настройки. Сервис запускается независимо; состояние передаётся через `VOICE_DATA_DIR`. Подключение провайдеров выполняет владелец.
 
 ## Запуск
 
 Из этой папки:
 
 ```sh
-uv sync --python 3.12
+uv sync --locked --python 3.13
 cd frontend
 npm ci
 npm run build
@@ -19,7 +19,7 @@ cd ..
 uv run python app.py
 ```
 
-Открыть **http://127.0.0.1:13842/**. Сервер слушает только loopback. Python 3.12, Pipecat 1.12.0, Gemini `gemini-3.8-live`, SmallWebRTC. Это native audio: отдельные ASR/LLM/TTS сервисы не добавлены. LiveKit не подключён.
+Открыть **http://127.0.0.1:13842/**. Сервер слушает только loopback. Python 3.13, Pipecat 1.12.0, Gemini `gemini-3.8-live`, SmallWebRTC. Это native audio: отдельные ASR/LLM/TTS сервисы не добавлены. LiveKit не подключён.
 
 Кнопка **«Подключить Gemini»** принимает ключ из [Google AI Studio](https://aistudio.google.com/apikey). В новый процесс ключ нужно ввести отдельно; он не переносится из Voice Lab. При обычном локальном запуске ключ хранится только в памяти и удаляется после перезапуска или кнопкой «Удалить ключ». Серверная установка с VOICE_PERSIST_CREDENTIALS=1 сохраняет его в приватном файле; это явно показано в setup panel. Сохранение ключа не доказывает доступ к модели: API проверяется при разговоре. Аудио и выбранный контекст передаются Gemini; raw audio локально не записывается.
 

@@ -1,5 +1,5 @@
 FROM ghcr.io/astral-sh/uv:0.9.26 AS uv
-FROM python:3.12.12-slim-bookworm
+FROM python:3.13-slim-bookworm
 COPY --from=uv /uv /usr/local/bin/uv
 RUN apt-get update && apt-get install -y --no-install-recommends libglib2.0-0 libsndfile1 libopus0 ffmpeg ca-certificates && rm -rf /var/lib/apt/lists/*
 WORKDIR /app

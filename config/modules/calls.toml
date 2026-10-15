@@ -1,0 +1,22 @@
+version = 1
+id = "calls"
+requires = []
+project = "deedkit-calls"
+compose = "deploy/compose.calls.yaml"
+services = ["calls"]
+required_files = ["deploy/private/calls.env"]
+
+[connectors.calls-phone]
+module = "calls"
+requires = []
+services = []
+
+[connectors.calls-telegram]
+module = "calls"
+requires = ["messaging"]
+services = []
+
+[connectors.calls-archive]
+module = "calls"
+requires = ["messaging"]
+services = []

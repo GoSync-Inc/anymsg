@@ -1,0 +1,8 @@
+version = 1
+id = "gateway"
+requires = []
+project = "deedkit-gateway"
+compose = "deploy/compose.gateway.yaml"
+services = ["gateway"]
+required_files = ["deploy/private/gateway-policy.json", "deploy/private/gateway.env"]
+env_file = "deploy/private/gateway.env"

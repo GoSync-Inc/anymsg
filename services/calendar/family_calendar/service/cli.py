@@ -154,6 +154,12 @@ def run(argv, home):
     for name in ("httpx", "httpcore", "google.auth", "google_auth_oauthlib", "urllib3", "oauthlib", "mcp"):
         logging.getLogger(name).disabled = True
     args = parser().parse_args(argv)
+    if args.action in ("serve", "worker"):
+        profile_name = "gateway" if args.action == "serve" else "worker"
+        if not home.is_absolute() or not (home / "service" / (profile_name + ".json")).is_file():
+            raise CalendarError("existing_runtime_configuration_required")
+        if args.action == "worker" and not (home / "service/vault/key").is_file():
+            raise CalendarError("existing_vault_required")
     root = private_dir(home / "service")
     profile = args.action if args.action in ("serve", "worker") else "runtime"
     if profile == "serve":
@@ -172,11 +178,13 @@ def dispatch(args, home, root, config, store):
         from .api import create_app
 
         uvicorn.run(
-            create_app(store, config["port"]),
-            host="127.0.0.1",
+            create_app(store, config["port"], config.get("allowed_hosts"), config.get("allowed_origins")),
+            host=config.get("bind", "127.0.0.1"),
             port=config["port"],
             access_log=False,
             log_level="warning",
+            proxy_headers=False,
+            timeout_graceful_shutdown=15,
         )
         return {"stopped": True}
     if args.action == "migrate":

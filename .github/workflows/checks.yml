@@ -50,7 +50,7 @@ jobs:
       - uses: astral-sh/setup-uv@94527f2e458b27549849d47d273a16bec83a01e9 # v7
         with: {version: '0.9.26'}
       - name: Native extraction tools
-        run: sudo apt-get update && sudo apt-get install -y poppler-utils tesseract-ocr tesseract-ocr-eng tesseract-ocr-rus ffmpeg age
+        run: sudo apt-get update && sudo apt-get install -y poppler-utils tesseract-ocr tesseract-ocr-eng tesseract-ocr-rus ffmpeg age libglib2.0-0 libsndfile1 libopus0
       - name: Install pinned dependencies
         run: uv sync --frozen --group dev
       - name: Build packages
@@ -77,6 +77,50 @@ jobs:
             uv run python scripts/check_release.py
           fi
           uvx --from twine twine check dist/*.whl dist/*.tar.gz
+      - name: Gateway isolated package and transport tests
+        id: gateway
+        if: ${{ !cancelled() && steps.build.outcome == 'success' }}
+        working-directory: services/gateway
+        run: |
+          uv sync --locked --group dev
+          uv run pytest -q -o junit_family=xunit1 --junitxml="$RUNNER_TEMP/ci-evidence/gateway.xml"
+          uv build --out-dir "$RUNNER_TEMP/gateway-dist"
+          uv venv "$RUNNER_TEMP/gateway-installed" --python 3.13
+          uv pip install --python "$RUNNER_TEMP/gateway-installed/bin/python" "$RUNNER_TEMP"/gateway-dist/*.whl
+          cd "$RUNNER_TEMP"
+          "$RUNNER_TEMP/gateway-installed/bin/python" - <<'PY'
+          import importlib.util
+          from agent_gateway.catalog import CATALOG
+          assert CATALOG
+          for module in ('family_calendar', 'messaging_service', 'pipecat', 'telethon', 'psycopg'):
+              assert importlib.util.find_spec(module) is None, module
+          PY
+          "$RUNNER_TEMP/gateway-installed/bin/deedkit-gateway" --help
+      - name: Calendar provider policy and database tests
+        id: calendar
+        if: ${{ !cancelled() && steps.build.outcome == 'success' }}
+        working-directory: services/calendar
+        env:
+          FCS_TEST_DSN: postgresql://probe_owner:synthetic-ci-password@127.0.0.1:5432/messaging_probe_test
+        run: |
+          uv sync --locked --group dev
+          uv run pytest -m 'not live' -o junit_family=xunit1 --junitxml="$RUNNER_TEMP/ci-evidence/calendar.xml"
+          uv build --out-dir "$RUNNER_TEMP/calendar-dist"
+      - name: Calls Python 3.13 native transports and synthetic workflows
+        id: calls
+        if: ${{ !cancelled() && steps.build.outcome == 'success' }}
+        working-directory: services/calls
+        run: |
+          uv sync --locked --group dev
+          uv run pytest -q -o junit_family=xunit1 --junitxml="$RUNNER_TEMP/ci-evidence/calls.xml"
+      - name: Calls frontend tests and build
+        id: calls_frontend
+        if: ${{ !cancelled() && steps.build.outcome == 'success' }}
+        working-directory: services/calls/frontend
+        run: |
+          npm ci --ignore-scripts --no-audit --no-fund
+          node --test --test-reporter=junit tests/*.test.mjs > "$RUNNER_TEMP/ci-evidence/calls-frontend.xml"
+          npm run build
       - name: Python/PostgreSQL tests
         id: python
         env:
@@ -125,6 +169,8 @@ jobs:
         env:
           CHECK_OUTCOMES: >-
             {"build":"${{ steps.build.outcome }}","release":"${{ steps.release.outcome }}","python":"${{ steps.python.outcome }}","collector":"${{ steps.collector.outcome }}","npm":"${{ steps.npm.outcome }}","smoke":"${{ steps.smoke.outcome }}","distributions":"${{ steps.distributions.outcome }}"}
+          MODULE_OUTCOMES: >-
+            {"gateway":"${{ steps.gateway.outcome }}","calendar":"${{ steps.calendar.outcome }}","calls":"${{ steps.calls.outcome }}","calls_frontend":"${{ steps.calls_frontend.outcome }}"}
           SOURCE_BRANCH: ${{ github.head_ref || github.ref_name }}
           TIDEN_BRANCH_OVERRIDE: ${{ inputs.tiden_branch }}
         run: |
@@ -134,6 +180,7 @@ jobs:
           p=Path(os.environ['RUNNER_TEMP'])/'ci-evidence'
           metadata={'sha': (p/'source-sha').read_text().strip(), 'git_branch': os.environ['SOURCE_BRANCH'],
                     'tiden_branch': os.environ['TIDEN_BRANCH_OVERRIDE'], 'checks': json.loads(os.environ['CHECK_OUTCOMES']),
+                    'module_checks': json.loads(os.environ['MODULE_OUTCOMES']),
                     'ci_url': f"https://github.com/{os.environ['GITHUB_REPOSITORY']}/actions/runs/{os.environ['GITHUB_RUN_ID']}/attempts/{os.environ['GITHUB_RUN_ATTEMPT']}"}
           (p/'metadata.json').write_text(json.dumps(metadata))
           PY

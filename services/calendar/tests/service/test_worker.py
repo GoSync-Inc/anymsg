@@ -1,7 +1,48 @@
 import pytest
+import asyncio
 from family_calendar.errors import CalendarError
 from family_calendar.service.core import FamilyService
 from tests.service.test_policy import SCOPES
+
+
+@pytest.mark.asyncio
+async def test_only_one_worker_can_recover_jobs_and_run_for_a_database(store):
+    from family_calendar.service.store import Store
+    from family_calendar.service.worker import Worker
+
+    active = asyncio.Event()
+
+    class Providers:
+        closed = False
+
+        async def close(self):
+            self.closed = True
+
+    first_store, second_store = Store(store.dsn, store.schema), Store(store.dsn, store.schema)
+    first_provider, second_provider = Providers(), Providers()
+    first, second = Worker(first_store, first_provider), Worker(second_store, second_provider)
+
+    async def tick():
+        active.set()
+        await asyncio.Future()
+
+    first.tick = tick
+    running = asyncio.create_task(first.run())
+    try:
+        await asyncio.wait_for(active.wait(), 2)
+        with pytest.raises(CalendarError, match="worker_already_running"):
+            await second.run()
+        assert second_provider.closed
+    finally:
+        running.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await running
+    assert first_provider.closed
+    with store._connect() as connection:
+        assert connection.execute(
+            "SELECT pg_try_advisory_lock(hashtextextended(%s,0)) AS ok",
+            (store.lock_key("worker", "singleton"),),
+        ).fetchone()["ok"]
 
 
 @pytest.fixture

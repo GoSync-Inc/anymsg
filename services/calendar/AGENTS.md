@@ -1,6 +1,6 @@
 # Family Calendar Service
 
-Read README.md and docs/ICLOUD_PILOT.md before changing the pilot. The repository is separate from AnyMsg; do not change other services or credentials.
+Read README.md and docs/ICLOUD_PILOT.md before changing the pilot. This module is part of the DeedKit repository. Keep its environment and data separate; coordinate shared contract changes and do not change provider credentials as part of code work.
 
 Use synthetic fixtures and mock CalDAV endpoints in normal tests. Real accounts require owner-run connection setup and an explicitly allowlisted test calendar. Never infer permission to modify other calendars. Never put passwords, emails, raw live ICS, hrefs or reports in Git. Private data belongs in ignored .local/ and outputs/.
 

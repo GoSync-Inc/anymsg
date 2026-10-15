@@ -196,12 +196,23 @@ class Worker:
             await self.run_operation(op["id"])
 
     async def run(self):
-        # Reads may be safely retried after a worker crash; mutations may not.
-        self.store.query("UPDATE sync_jobs SET state='prepared' WHERE state='sending'")
         try:
-            while True:
-                await self.tick()
-                await asyncio.sleep(0.5)
+            # One session-level lease per database/schema, independent of process
+            # and checkout paths. Acquire before recovering any unfinished reads.
+            with self.store._connect() as lease:
+                lease.autocommit = True
+                acquired = lease.execute(
+                    "SELECT pg_try_advisory_lock(hashtextextended(%s,0)) AS ok",
+                    (self.store.lock_key("worker", "singleton"),),
+                ).fetchone()["ok"]
+                if not acquired:
+                    raise CalendarError("worker_already_running")
+                self.store.query("UPDATE sync_jobs SET state='prepared' WHERE state='sending'")
+                while True:
+                    # Loss of the dedicated lease connection stops the process.
+                    lease.execute("SELECT 1")
+                    await self.tick()
+                    await asyncio.sleep(0.5)
         finally:
             await self.providers.close()
             self.store.close()

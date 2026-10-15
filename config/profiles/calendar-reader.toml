@@ -1,0 +1,9 @@
+version = 1
+id = "calendar-reader"
+revision = 1
+[deployment]
+modules = ["calendar"]
+connectors = []
+external = []
+[exposure]
+tools = ["platform_capabilities", "calendar_capabilities", "calendar_calendars", "calendar_members", "calendar_agenda", "calendar_slots", "calendar_operation", "calendar_assignments"]

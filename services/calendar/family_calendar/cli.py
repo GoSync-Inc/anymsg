@@ -4,6 +4,7 @@ from datetime import datetime, timezone
 import getpass
 import json
 import logging
+import os
 from pathlib import Path
 import sys
 
@@ -19,7 +20,12 @@ from .pilot.visual import agent_visual_evidence, visual_verified
 
 def parser():
     p = argparse.ArgumentParser(description="Family Calendar Service — isolated iCloud pilot")
-    p.add_argument("--home", type=Path, default=Path.cwd() / ".local", help="Owner-only registry directory")
+    p.add_argument(
+        "--home",
+        type=Path,
+        default=Path(os.environ.get("FCS_DATA_DIR", Path.cwd() / ".local")),
+        help="Owner-only state directory; FCS_DATA_DIR is independent of checkout",
+    )
     sub = p.add_subparsers(dest="command", required=True)
     connection = sub.add_parser("connection").add_subparsers(dest="action", required=True)
     add = connection.add_parser("add-icloud", help="Enter Apple Account and app-specific password locally")
@@ -158,7 +164,7 @@ def main(argv=None):
         logging.getLogger(name).disabled = True
     try:
         args = parser().parse_args(argv)
-        registry = Registry(args.home)
+        registry = Registry(args.home) if args.command != "service" else None
         if args.command == "service":
             from .service.cli import run
 

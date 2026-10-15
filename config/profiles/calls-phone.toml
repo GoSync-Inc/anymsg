@@ -1,0 +1,10 @@
+version = 1
+id = "calls-phone"
+revision = 1
+[deployment]
+modules = ["calls"]
+connectors = ["calls-phone"]
+external = []
+[exposure]
+# Calls tools are admitted after principal ownership checks; no broad wildcard.
+tools = ["platform_capabilities"]

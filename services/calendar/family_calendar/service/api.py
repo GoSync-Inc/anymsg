@@ -168,7 +168,11 @@ class Gateway:
         )
 
 
-def create_app(store, port=13232):
+def create_app(store, port=13232, allowed_hosts=None, allowed_origins=None):
+    allowed = set(allowed_hosts or [f"localhost:{port}", f"127.0.0.1:{port}"])
+    origins = set(allowed_origins or ["http://" + h for h in allowed])
+    if any(not h or any(c in h for c in "* /\\\r\n") for h in allowed):
+        raise CalendarError("invalid_allowed_host")
     gateway = Gateway(store)
 
     async def list_tools(context, params):
@@ -220,8 +224,8 @@ def create_app(store, port=13232):
         max_request_body_size=65536,
         transport_security=TransportSecuritySettings(
             enable_dns_rebinding_protection=True,
-            allowed_hosts=[f"localhost:{port}", f"127.0.0.1:{port}"],
-            allowed_origins=[f"http://localhost:{port}", f"http://127.0.0.1:{port}"],
+            allowed_hosts=sorted(allowed),
+            allowed_origins=sorted(origins),
         ),
     )
 
@@ -281,12 +285,13 @@ def create_app(store, port=13232):
                 return await app(scope, receive, send)
             headers = {k.decode().lower(): v.decode() for k, v in scope["headers"]}
             host = headers.get("host", "")
-            allowed = {f"localhost:{port}", f"127.0.0.1:{port}"}
-            if host not in allowed or headers.get("origin") not in (None, *("http://" + h for h in allowed)):
+            if host not in allowed or headers.get("origin") not in (None, *origins):
                 return await JSONResponse({"error": "invalid_origin"}, status_code=403)(scope, receive, send)
             if scope["path"] == "/health":
                 return await app(scope, receive, send)
             auth = headers.get("authorization", "")
+            if sum(k.lower() == b"authorization" for k, _ in scope["headers"]) != 1:
+                return await JSONResponse({"error": "unauthorized"}, status_code=401)(scope, receive, send)
             key = auth[7:] if auth.startswith("Bearer ") else ""
             try:
                 await asyncio.to_thread(gateway.service.principal, key)

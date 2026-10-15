@@ -17,11 +17,12 @@ from .store import Store
 CONTAINER = "family-calendar-postgres"
 
 
-def launch_configuration(repo, role):
+def launch_configuration(repo, role, data_dir=None):
     repo = Path(repo).resolve()
     if role not in ("gateway", "worker"):
         raise CalendarError("invalid_role")
-    root = repo / ".local" / "service"
+    home = Path(data_dir).resolve() if data_dir is not None else repo / ".local"
+    root = home / "service"
     return {
         "Label": "com.family-calendar." + role,
         "ProgramArguments": [
@@ -29,7 +30,7 @@ def launch_configuration(repo, role):
             "-m",
             "family_calendar.cli",
             "--home",
-            str(repo / ".local"),
+            str(home),
             "service",
             "serve" if role == "gateway" else "worker",
         ],

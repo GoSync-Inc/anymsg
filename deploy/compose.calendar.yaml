@@ -1,0 +1,72 @@
+name: deedkit-calendar
+services:
+  calendar-db:
+    image: postgres:18-bookworm@sha256:afc7e2d441324c0388fa80c3d24f733b4194a4eb7f47dd8ee2b08eb1a24a647c
+    env_file: ${CALENDAR_STATE_DIR:?Set explicit restored calendar state}/service/postgres.env
+    volumes: ["calendar-database:/var/lib/postgresql"]
+    networks: [calendar-backend]
+    restart: unless-stopped
+    healthcheck:
+      test: [CMD-SHELL, "pg_isready -U fcs_owner -d family_calendar"]
+      interval: 5s
+      timeout: 3s
+      retries: 12
+    mem_limit: 512m
+    logging:
+      driver: json-file
+      options: {max-size: 5m, max-file: "2"}
+  calendar-api:
+    image: deedkit-calendar:${DEEDKIT_VERSION:-0.1.0}
+    build: {context: ../services/calendar}
+    command: [serve]
+    depends_on:
+      calendar-db: {condition: service_healthy}
+    volumes:
+      - ${CALENDAR_STATE_DIR}/service/gateway.json:/data/service/gateway.json:ro
+    networks:
+      calendar-backend: {}
+      integration:
+        aliases: [calendar-api]
+    ports: ["127.0.0.1:13232:13232"]
+    restart: unless-stopped
+    read_only: true
+    cap_drop: [ALL]
+    security_opt: [no-new-privileges:true]
+    tmpfs: ["/tmp:size=32m,noexec,nosuid"]
+    mem_limit: 256m
+    pids_limit: 96
+    stop_grace_period: 20s
+    logging:
+      driver: json-file
+      options: {max-size: 5m, max-file: "2"}
+  calendar-worker:
+    image: deedkit-calendar:${DEEDKIT_VERSION:-0.1.0}
+    build: {context: ../services/calendar}
+    command: [worker]
+    depends_on:
+      calendar-db: {condition: service_healthy}
+    volumes:
+      - ${CALENDAR_STATE_DIR}/service/worker.json:/data/service/worker.json:ro
+      - ${CALENDAR_STATE_DIR}/service/vault:/data/service/vault
+    networks: [calendar-backend, provider-egress]
+    restart: unless-stopped
+    read_only: true
+    cap_drop: [ALL]
+    security_opt: [no-new-privileges:true]
+    tmpfs: ["/tmp:size=32m,noexec,nosuid"]
+    mem_limit: 384m
+    pids_limit: 96
+    stop_grace_period: 40s
+    logging:
+      driver: json-file
+      options: {max-size: 5m, max-file: "2"}
+volumes:
+  calendar-database:
+    external: true
+    name: ${CALENDAR_DATABASE_VOLUME:?Set explicit initialized or restored volume}
+networks:
+  calendar-backend: {internal: true}
+  provider-egress: {}
+  integration:
+    external: true
+    name: ${DEEDKIT_NETWORK:-deedkit-integration}

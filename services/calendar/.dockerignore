@@ -1,0 +1,8 @@
+*
+!pyproject.toml
+!uv.lock
+!README.md
+!LICENSE
+!family_calendar/
+!family_calendar/**
+**/__pycache__

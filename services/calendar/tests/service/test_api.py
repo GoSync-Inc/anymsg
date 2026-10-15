@@ -107,3 +107,23 @@ def test_initialize_and_stateless_reconnect_preserve_catalog(household):
             assert "mcp-session-id" not in result.headers
             listed = c.post("/mcp", headers=headers, json={"jsonrpc": "2.0", "id": 2, "method": "tools/list"})
             assert len(listed.json()["result"]["tools"]) == 10
+
+
+def test_explicit_internal_host_does_not_trust_forwarded_identity(household):
+    from family_calendar.service.api import create_app
+
+    household.grant("family", "adult-a", "cal-a", SCOPES, "details")
+    key = household.agent("agent", "family", "adult-a", SCOPES, ["cal-a"])
+    with TestClient(
+        create_app(household, allowed_hosts=["calendar-api:13232"]), base_url="http://calendar-api:13232"
+    ) as c:
+        assert c.post("/v1/calendars", json={}, headers={"Authorization": "Bearer " + key}).status_code == 200
+        assert c.post("/v1/calendars", json={}, headers={"X-Agent-Id": "agent"}).status_code == 401
+        assert c.get("/health", headers={"Host": "unconfigured:13232"}).status_code == 403
+
+
+def test_capability_scope_discovery_matches_authenticated_principal(household):
+    c, key = client(household)
+    with c:
+        result = c.post("/v1/capabilities", json={}, headers={"Authorization": "Bearer " + key}).json()
+        assert set(result["permissions"]) == set(SCOPES)
