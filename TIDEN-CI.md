@@ -76,6 +76,21 @@ The original synthetic reports can contain failure diagnostics. Keep artifact
 access and retention appropriate for the repository; never test against live
 messenger sessions or personal archives.
 
+## DeedKit module migration
+
+The migration extends this same repository and product. Its behavior/proof
+matrix and intent-to-PR-to-CI procedure are in
+[platform acceptance](docs/quality/platform-acceptance.md). Local worktrees and
+uncommitted files are not GitHub App sync inputs. Link the migration PR to its
+intent branch and publish real results there before reviewing the merge. After
+merge, verify both main's gate and the GitHub App processing/drift state.
+
+The first baseline increment adds read-only snapshot/comparison tools and their
+regressions. It does not import calendar/calls or claim their Tiden coverage.
+Keep existing messaging check/test identities and links. Add module reports and
+reviewed specs when their implementation enters this repository; a successful
+messaging run must never be presented as verification of an unrun module.
+
 ## Native and adapter proofs
 
 The host CI supplies its disposable PostgreSQL service to the native backup
