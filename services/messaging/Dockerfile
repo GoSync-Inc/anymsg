@@ -33,6 +33,8 @@ USER probe
 
 FROM python-dependencies AS runtime
 COPY services/messaging/messaging_service ./messaging_service
+# Existing Telegram owner extension uses the collector's session and governor.
+COPY services/calls/telegram_broker.py services/calls/telegram_session_owner.py ./
 EXPOSE 8080
 CMD ["python", "-m", "messaging_service", "serve"]
 

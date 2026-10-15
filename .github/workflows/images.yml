@@ -1,0 +1,26 @@
+name: Container verification
+on:
+  workflow_call:
+    inputs:
+      source_ref:
+        type: string
+        default: ''
+permissions:
+  contents: read
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    strategy:
+      fail-fast: false
+      matrix:
+        target: [runtime, indexer, enricher-local, whatsapp-native, gateway, calendar, calls]
+    steps:
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
+        with:
+          persist-credentials: false
+          ref: ${{ inputs.source_ref }}
+      - name: Build and smoke-test the production target without providers
+        env:
+          TARGET: ${{ matrix.target }}
+        run: python3 scripts/production.py check-image --target "$TARGET"
