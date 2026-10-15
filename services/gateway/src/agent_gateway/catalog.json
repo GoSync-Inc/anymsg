@@ -3032,7 +3032,8 @@
               "default": "gemini_live",
               "enum": [
                 "gemini_live",
-                "gemini_live_flows"
+                "gemini_live_flows",
+                "grok_realtime"
               ],
               "title": "Dialog Engine",
               "type": "string"
@@ -3053,6 +3054,18 @@
               "minimum": 30,
               "title": "Max Duration Secs",
               "type": "integer"
+            },
+            "grok_voice": {
+              "default": "rex",
+              "enum": [
+                "eve",
+                "ara",
+                "rex",
+                "sal",
+                "leo"
+              ],
+              "title": "Grok Voice",
+              "type": "string"
             }
           },
           "required": [
@@ -3204,7 +3217,8 @@
               "default": "gemini_live",
               "enum": [
                 "gemini_live",
-                "gemini_live_flows"
+                "gemini_live_flows",
+                "grok_realtime"
               ],
               "title": "Dialog Engine",
               "type": "string"
@@ -3240,6 +3254,18 @@
               "maxLength": 300,
               "minLength": 1,
               "title": "Destination",
+              "type": "string"
+            },
+            "grok_voice": {
+              "default": "rex",
+              "enum": [
+                "eve",
+                "ara",
+                "rex",
+                "sal",
+                "leo"
+              ],
+              "title": "Grok Voice",
               "type": "string"
             }
           },

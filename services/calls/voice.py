@@ -17,6 +17,7 @@ from pipecat.workers.runner import WorkerRunner
 
 from core import TOOL_MODELS
 from audio_health import RuntimeAudioHealth
+from call_errors import record_model_error
 
 
 class AudioDeliveryProbe(FrameProcessor):
@@ -129,6 +130,9 @@ class AuditedGemini(GeminiLiveLLMService):
 
 
 def create_model(brief,key,recorder=None):
+    if brief.get('dialog_engine')=='grok_realtime':
+        from grok_voice import AuditedGrok
+        return AuditedGrok(brief,key,recorder)
     return AuditedGemini(api_key=key,recorder=recorder,external_tts=bool(brief.get('custom_voice_id')),
         live_flows=brief.get('dialog_engine')=='gemini_live_flows',settings=GeminiLiveLLMService.Settings(
         model=brief['model'],system_instruction=brief['prompt'],voice=brief['voice']),
@@ -148,10 +152,8 @@ async def send_owner_update(worker,decision):
     await worker.queue_frames([frame])
 
 
-async def report_error(state,rtvi):
-    state['end_reason']='model_error'
-    await rtvi.send_server_message({'kind':'error','message':
-        'Модель или соединение недоступны. Проверь ключ, доступ к модели и Billing.'})
+async def report_error(state,rtvi,frame=None):
+    await rtvi.send_server_message(record_model_error(state,frame))
 
 
 async def run_voice(connection,brief,key,state):
@@ -234,12 +236,13 @@ async def run_transport(transport,brief,key,state,browser=False):
     @worker.event_handler('on_pipeline_error')
     async def pipeline_error(worker,frame):
         # Provider payloads may contain secrets. Never relay frame.error to the UI.
-        await report_error(state,worker.rtvi)
+        await report_error(state,worker.rtvi,frame)
 
     async def begin():
         service.connected(identity)
         await worker.rtvi.send_server_message({'kind':'session','call_id':identity,'model':brief['model'],
-            'voice':brief.get('custom_voice_id') or brief['voice'],'voice_style':brief.get('voice_style','neutral'),
+            'voice':brief['grok_voice'] if brief.get('dialog_engine')=='grok_realtime' else brief.get('custom_voice_id') or brief['voice'],
+            'voice_style':brief.get('voice_style','neutral'),
             'dialog_engine':brief.get('dialog_engine','gemini_live')})
         if live_flows:
             await flow.initialize(flow.nodes['discussion'])

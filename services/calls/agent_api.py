@@ -180,10 +180,11 @@ class AgentRegistry:
 
 
 class AgentAPI:
-    def __init__(self, service, registry, start, stop, outbound, archive_factory=None):
+    def __init__(self, service, registry, start, stop, outbound, archive_factory=None, readiness=None):
         self.service, self.registry = service, registry
         self.start, self.stop, self.outbound = start, stop, outbound
         self.archive_factory = archive_factory or self.archive
+        self.readiness = readiness
 
     @staticmethod
     def archive(principal):
@@ -240,6 +241,7 @@ class AgentAPI:
                 "shared_learning": False,
                 "owner_decision_write": False,
                 "live_call_verification": "not_claimed",
+                **({'calling_readiness':self.readiness(principal)} if self.readiness else {}),
             }
         if name in {"prepare_call", "prepare_external_call"}:
             selected = args.brief
