@@ -22,7 +22,7 @@ REPOSITORY = "GoSync-Inc/deedkit"
 REQUIRED_JOBS = {"checks / verify", "native / synthetic", "CI gate"}
 MIN_FREE_BYTES = 15 * 1024**3
 BUILDS = {
-    "runtime": (".", "services/messaging/Dockerfile", "runtime", "import messaging_service"),
+    "runtime": (".", "services/messaging/Dockerfile", "runtime", "import messaging_service, telegram_broker, telegram_session_owner"),
     "indexer": (".", "services/messaging/Dockerfile", "indexer", "import messaging_service.file_index"),
     "enricher-local": (".", "services/messaging/Dockerfile", "enricher-local", "import messaging_service.enrichment"),
     "whatsapp-native": (".", "services/messaging/Dockerfile", "whatsapp-native", "import messaging_service.whatsapp_collector"),
