@@ -6,7 +6,7 @@ export function cachedDialogs({limit,ownerIds}) {
   }
   const own=new Set(ownerIds.map(personalId).filter(Boolean));
   return window.require('WAWebCollections').Chat.getModelsArray()
-    .filter(c=>/^[a-zA-Z0-9_.:-]{1,140}@(c.us|g.us|lid)$/.test(c.id?._serialized || ''))
+    .filter(c=>/^[a-zA-Z0-9_.:-]{1,140}@(c\.us|g\.us|lid)$/.test(c.id?._serialized || ''))
     .slice(0,limit).map(c=>{
       const peer=personalId(c.id._serialized);
       const self=c.id.server==='g.us'?false:peer && own.size?own.has(peer)?true:

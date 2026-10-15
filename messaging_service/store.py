@@ -70,6 +70,8 @@ def serial(rows):
 
 class Store:
     def __init__(self, dsn: str, files: Path, public_url: str):
+        from .security_logging import redact_library_logs
+        redact_library_logs()
         self._status_cache=OrderedDict()
         self._status_cache_lock=threading.Lock()
         self.files = files.resolve()

@@ -40,7 +40,11 @@ telemetry = ["tiden-telemetry==0.1.0"]
 anymsg = "anymsg.cli:main"
 
 [dependency-groups]
-dev = ["pytest==9.1.1", "tiden-telemetry==0.1.0"]
+dev = [
+    "pytest==9.1.1",
+    "pyyaml==6.0.3",
+    "tiden-telemetry==0.1.0",
+]
 
 [tool.hatch.build.targets.wheel]
 packages = ["anymsg", "messaging_service"]

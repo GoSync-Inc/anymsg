@@ -123,7 +123,9 @@ class Boundary:
             nonlocal response_started
             if message['type']=='http.response.start':
                 response_started = True
-                message['headers'] = list(message.get('headers',[]))+[(k.lower().encode(),v.encode()) for k,v in SECURITY_HEADERS.items()]
+                protected={k.lower().encode():v.encode() for k,v in SECURITY_HEADERS.items()}
+                message['headers'] = [(k,v) for k,v in message.get('headers',[])
+                    if k.lower() not in protected]+list(protected.items())
             await send(message)
         try:
             if request.headers.get('host','') not in self.hosts:
@@ -192,6 +194,10 @@ class Boundary:
             headers['X-Request-ID']=detail['request_id']
             await JSONResponse(detail,status_code=error.status,headers=headers)(scope,receive,send)
         except Exception as error:
+            # Starlette re-raises errors after its server-error handler sends
+            # the response. That handler has already recorded this exception.
+            if scope.get('state',{}).get('_handled_request_error'):
+                return
             # No exception strings, query values, tokens or filenames in remote responses/logs.
             capture_error(error, 'request_failed')
             log.error('request_failed type=%s',type(error).__name__)
@@ -685,6 +691,19 @@ def create_app(store: Store, allowed_hosts: list[str]):
         return JSONResponse(detail,status_code=error.status,
             headers={**SECURITY_HEADERS,'X-Request-ID':detail['request_id']})
     app.add_exception_handler(APIError,api_error)
+    async def unexpected_error(request,error):
+        # Handle this before Starlette starts its default plain-text 500.
+        # Its middleware re-raises afterwards; the outer boundary must neither
+        # emit a second response nor duplicate the error event.
+        request.state._handled_request_error=True
+        capture_error(error,'request_failed')
+        detail=payload(error,getattr(error,'operation',''))
+        await request.state._audit_denial(detail['error'])
+        log.error('request_failed request_id=%s code=%s type=%s',
+            detail['request_id'],detail['error'],type(error).__name__)
+        return JSONResponse(detail,status_code=503,
+            headers={**SECURITY_HEADERS,'X-Request-ID':detail['request_id']})
+    app.add_exception_handler(Exception,unexpected_error)
     # Preserve the SDK lifespan; no separate MCP protocol implementation.
     app.routes.extend([Route('/v1/{operation}',rest,methods=['POST']),
                        Route('/v1/download/{grant}',download,methods=['GET'])])

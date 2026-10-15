@@ -62,6 +62,12 @@ export async function* download(metadata,maxBytes) {
   const request=https.get(url,{headers:{Origin:'https://web.whatsapp.com'},timeout:60000});
   let response;
   request.on('timeout',()=>request.destroy(new Error('media_timeout')));
+  // Socket timeout alone is an idle limit. A trickling response must not keep
+  // this account's background transfer occupied indefinitely.
+  const deadline=setTimeout(()=>{
+    const error=new Error('media_timeout');
+    response?.destroy(error);request.destroy(error);
+  },60000);
   try {
     response=await new Promise((resolve,reject)=>{request.once('response',resolve);request.once('error',reject);});
     if(response.statusCode===404 || response.statusCode===410)throw new Error('media_unavailable');
@@ -73,5 +79,5 @@ export async function* download(metadata,maxBytes) {
     const safe=new Set(['media_timeout','media_network_error','media_unavailable','media_size_limit',
       'media_hash_mismatch','media_size_mismatch','media_metadata_unavailable','invalid_media_path','unsupported_media_type']);
     throw new Error(safe.has(error.message)?error.message:'media_network_error');
-  } finally {response?.destroy();request.destroy();}
+  } finally {clearTimeout(deadline);response?.destroy();request.destroy();}
 }

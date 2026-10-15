@@ -16,7 +16,7 @@ export function asId(id) {
 export function chatId(message) {
   const remote=message.id?.remote || message._data?.id?.remote;
   const value=remote ? asId(remote) : asId(message.fromMe ? message.to : message.from);
-  if (!/^[a-zA-Z0-9_.:-]{1,140}@(c.us|g.us|lid)$/.test(value)) throw new Error('unsupported_chat');
+  if (!/^[a-zA-Z0-9_.:-]{1,140}@(c\.us|g\.us|lid)$/.test(value)) throw new Error('unsupported_chat');
   return value;
 }
 function personalId(value) {
@@ -84,7 +84,7 @@ export function allows(policy,chat) {
   return !policy.exclude_chats.includes(chat) && (policy.discover_chats || policy.include_chats.includes(chat));
 }
 export function readPolicy(directory,now=Date.now()) {
-  const fd=fs.openSync(path.join(directory,'.policy'),fs.constants.O_RDONLY|fs.constants.O_NOFOLLOW);
+  const fd=fs.openSync(path.join(directory,'.policy'),fs.constants.O_RDONLY|fs.constants.O_NOFOLLOW|fs.constants.O_NONBLOCK);
   try {
     const info=fs.fstatSync(fd);
     if(!info.isFile() || info.size>1024*1024 || (info.mode&0o077))throw new Error('invalid_policy');
@@ -100,7 +100,9 @@ export class DiskCapture {
   constructor(directory,{maxBytes=256*1024**2,maxEntries=10000,reserveBytes=1024**3}={}) {
     this.directory=directory; this.maxBytes=maxBytes; this.maxEntries=maxEntries; this.reserveBytes=reserveBytes;
     fs.mkdirSync(directory,{recursive:true,mode:0o700});
-    if (fs.lstatSync(directory).isSymbolicLink()) throw new Error('spool_symlink');
+    const info=fs.lstatSync(directory);
+    if (info.isSymbolicLink()) throw new Error('spool_symlink');
+    if (!info.isDirectory() || (info.mode&0o077)) throw new Error('private_spool_required');
     this.sequence=0n;
   }
   put(value) {

@@ -7,6 +7,7 @@ import os
 from pathlib import Path
 import secrets
 import shutil
+import stat
 import time
 
 from .envelope import canonical, validate
@@ -22,6 +23,9 @@ class DurableSpool:
     def __init__(self,path,*,max_bytes=256*1024**2,max_entries=10000,reserve_bytes=1024**3,validator=validate):
         self.path=Path(path); self.path.mkdir(mode=0o700,parents=True,exist_ok=True)
         if self.path.is_symlink(): raise ValueError('spool_symlink')
+        info=self.path.lstat()
+        if not stat.S_ISDIR(info.st_mode) or stat.S_IMODE(info.st_mode)&0o077:
+            raise ValueError('private_spool_required')
         self.max_bytes,self.max_entries,self.reserve_bytes=max_bytes,max_entries,reserve_bytes
         self.validator=validator
 

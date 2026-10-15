@@ -36,7 +36,12 @@ __pycache__/
 .pytest_cache/
 .git
 .git/**
-.github
+.github/*
+!.github/workflows
+.github/workflows/*
+!.github/workflows/*.yml
+!.github/workflows/*.yaml
+deploy/private/
 **/.venv
 **/__pycache__
 **/.pytest_cache

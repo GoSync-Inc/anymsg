@@ -75,3 +75,18 @@ production infrastructure health. Keep those limits visible.
 The original synthetic reports can contain failure diagnostics. Keep artifact
 access and retention appropriate for the repository; never test against live
 messenger sessions or personal archives.
+
+## Native and adapter proofs
+
+The host CI supplies its disposable PostgreSQL service to the native backup
+drill and installs `age`. The drill uses real `pg_dump`, encryption, the local
+receiver, decryption, `pg_restore` and quarantine checks. Missing prerequisites
+fail CI; a local test container without them explicitly skips these checks.
+This proves local recovery behavior, not remote SSH delivery or off-site quota.
+
+Provider tests use synthetic Telegram clients and an offline loader around the
+actual WhatsApp entrypoint. They verify capture, identity checks, command lanes
+and recovery states without opening an account. Local model tests verify adapter
+arguments and result handling; they do not measure transcription accuracy.
+Review broad contracts against the combined criterion set from their adapters,
+database roles and public interfaces, rather than a single child test.

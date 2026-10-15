@@ -158,6 +158,8 @@ def configure(component):
     if os.environ.get('ANYMSG_TIDEN_ENABLED') != '1':
         return False
     try:
+        from .security_logging import redact_library_logs
+        redact_library_logs()
         from tiden_telemetry import Client
         dsn = Path(os.environ['ANYMSG_TIDEN_DSN_FILE']).read_text().strip()
         from urllib.parse import urlsplit

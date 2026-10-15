@@ -1,15 +1,28 @@
 """Stream snapshot bundles through pinned age; encryption keys remain operator-only."""
 import os
 import hashlib
+from contextlib import contextmanager
 from pathlib import Path
 import re
 import shutil
+import stat
 import subprocess
 import tarfile
 import tempfile
 import threading
 
 from .spool import fsync_dir
+
+
+@contextmanager
+def regular_source(path):
+    # Verify the opened descriptor, not a pathname checked before open. A
+    # replaced FIFO must fail immediately rather than stall the encoder.
+    fd=os.open(path,os.O_RDONLY|os.O_NOFOLLOW|os.O_NONBLOCK)
+    with os.fdopen(fd,'rb') as source:
+        if not stat.S_ISREG(os.fstat(source.fileno()).st_mode):
+            raise ValueError('invalid_backup_file')
+        yield source
 
 
 def stream_members(directory,blob_root,manifest,manifest_sha=None):
@@ -48,7 +61,7 @@ def encrypt_snapshot_stream(directory,output,recipient,*,blob_root,age='age',exp
     """
     from .backup import verify_bundle
     manifest=verify_bundle(directory,blob_root=blob_root)
-    with (Path(directory)/'manifest.json').open('rb') as f:manifest_sha=hashlib.file_digest(f,'sha256').hexdigest()
+    with regular_source(Path(directory)/'manifest.json') as f:manifest_sha=hashlib.file_digest(f,'sha256').hexdigest()
     if expected_manifest_sha256 is not None and expected_manifest_sha256!=manifest_sha:
         raise RuntimeError('backup_source_changed')
     errors=[];process=None;thread=None
@@ -67,9 +80,7 @@ def encrypt_snapshot_stream(directory,output,recipient,*,blob_root,age='age',exp
                     with tarfile.open(fileobj=process.stdin,mode='w|',format=tarfile.USTAR_FORMAT) as archive:
                         for name,path,digest in stream_members(directory,blob_root,manifest,manifest_sha):
                             if not valid_member(name) or path.is_symlink():raise ValueError('invalid_backup_file')
-                            fd=os.open(path,os.O_RDONLY|os.O_NOFOLLOW)
-                            with os.fdopen(fd,'rb') as source:
-                                import stat
+                            with regular_source(path) as source:
                                 info=os.fstat(source.fileno())
                                 if not stat.S_ISREG(info.st_mode):raise ValueError('invalid_backup_file')
                                 member=tarfile.TarInfo(name);member.size=info.st_size;member.mode=0o600
@@ -127,7 +138,11 @@ def encrypt_snapshot(directory,output,recipient,age='age',*,consume_staged_blobs
                         relative=path.relative_to(directory).as_posix()
                         if not valid_member(relative):
                             raise ValueError('invalid_backup_file')
-                        archive.add(path,arcname=relative,recursive=False)
+                        with regular_source(path) as source:
+                            member=tarfile.TarInfo(relative)
+                            member.size=os.fstat(source.fileno()).st_size
+                            member.mode=0o600
+                            archive.addfile(member,source)
                         if consume_staged_blobs and relative.startswith('files/'):
                             # archive.add has read all bytes; bounded pipe/tar
                             # buffers let ciphertext reuse this staged space.
