@@ -52,6 +52,20 @@ def ical_time(value, zone):
     raise CalendarError("coverage_incomplete")
 
 
+def provider_text(value, limit):
+    # PostgreSQL text/jsonb rejects NUL and unpaired surrogates.
+    return str(value).encode("utf-8", "replace").decode().replace("\x00", "")[:limit]
+
+
+def ends_before_start(event, start, zone):
+    # recurring_ical_events silently swaps a reversed DTEND or negative DURATION.
+    if "DTEND" not in event:
+        return "DURATION" in event and event.decoded("DURATION") < timedelta(0)
+    finish = event.decoded("DTEND")
+    floating = isinstance(finish, datetime) and finish.tzinfo is None
+    return not floating and ical_time(finish, zone) < start
+
+
 def expansion_budget():
     """Shared by all resources of one calendar window."""
     return {"occurrences": EVENT_LIMIT, "rule_instances": CALENDAR_RULE_INSTANCE_LIMIT}
@@ -110,8 +124,8 @@ def normalize_icloud(calendar_ref, resource, start, end, zone, budget=None):
         resource_ref = source_ref("res", calendar_ref, resource["href"])
         # Refuse unspecified floating time rather than assume server/user timezone.
         for e in original:
-            if "DTSTART" in e:
-                ical_time(e.decoded("DTSTART"), zone)
+            if "DTSTART" in e and ends_before_start(e, ical_time(e.decoded("DTSTART"), zone), zone):
+                raise CalendarError("invalid_provider_event_time")
         # Dense (MINUTELY/SECONDLY) or long-running rules are incomplete, never expanded.
         instances = sum(rule_instances(e, end, zone) for e in original if "RRULE" in e)
         budget["rule_instances"] -= instances
@@ -127,7 +141,10 @@ def normalize_icloud(calendar_ref, resource, start, end, zone, budget=None):
                 else e.decoded("DTSTART") + e.decoded("DURATION", timedelta(days=1))
             )
             b = ical_time(finish, zone)
-            if b <= start or a >= end:
+            if b < a:
+                raise CalendarError("invalid_provider_event_time")
+            # A zero-length event (e.g. DTSTART without DTEND) is a non-blocking instant.
+            if a >= end or (b <= start if b > a else a < start):
                 continue
             identity = (e.get("RECURRENCE-ID") or e["DTSTART"]).to_ical().decode() if recurring else "master"
             occurrences.append(
@@ -135,14 +152,15 @@ def normalize_icloud(calendar_ref, resource, start, end, zone, budget=None):
                     "ref": source_ref("event", resource_ref, str(e["UID"]), identity),
                     "start": a,
                     "end": b,
-                    "busy": str(e.get("TRANSP", "OPAQUE")).upper() != "TRANSPARENT",
+                    "busy": b > a and str(e.get("TRANSP", "OPAQUE")).upper() != "TRANSPARENT",
                     "details": {
-                        "title": str(e.get("SUMMARY", ""))[:256],
-                        "location": str(e.get("LOCATION", ""))[:512],
-                        "description": str(e.get("DESCRIPTION", ""))[:4000],
+                        "title": provider_text(e.get("SUMMARY", ""), 256),
+                        "location": provider_text(e.get("LOCATION", ""), 512),
+                        "description": provider_text(e.get("DESCRIPTION", ""), 4000),
                         "recurring": recurring,
                         "guests": "ATTENDEE" in e or "ORGANIZER" in e,
                         "all_day": not isinstance(e.decoded("DTSTART"), datetime),
+                        "instant": a == b,
                     },
                 }
             )
@@ -175,21 +193,25 @@ def normalize_google(calendar_ref, e, zone):
             )
 
         a, b = point(e["start"]), point(e["end"])
+        if b < a:
+            raise CalendarError("invalid_provider_event_time")
         identity = e.get("originalStartTime", "master")
         rows.append(
             {
                 "ref": source_ref("event", resource_ref, identity),
                 "start": a,
                 "end": b,
-                "busy": e.get("transparency") != "transparent",
+                # A zero-length event is a non-blocking instant.
+                "busy": b > a and e.get("transparency") != "transparent",
                 "details": {
-                    "title": e.get("summary", "")[:256],
-                    "location": e.get("location", "")[:512],
-                    "description": e.get("description", "")[:4000],
+                    "title": provider_text(e.get("summary", ""), 256),
+                    "location": provider_text(e.get("location", ""), 512),
+                    "description": provider_text(e.get("description", ""), 4000),
                     "recurring": bool(e.get("recurringEventId") or e.get("recurrence")),
                     "guests": bool(e.get("attendees")),
                     "special": e.get("eventType", "default") != "default",
                     "all_day": "date" in e["start"],
+                    "instant": a == b,
                 },
             }
         )

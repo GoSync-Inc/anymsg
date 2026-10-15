@@ -278,3 +278,75 @@ def test_calendar_window_budget_is_shared_by_resources(expansions):
     with pytest.raises(CalendarError, match="coverage_incomplete"):
         asyncio.run(providers.read_window(cal, *OCTOBER))
     assert len(expansions) == EVENT_LIMIT + 1
+
+
+def _event(times):
+    return (
+        "BEGIN:VCALENDAR\r\nVERSION:2.0\r\nBEGIN:VEVENT\r\nUID:point\r\n"
+        + times
+        + "SUMMARY:Reminder\r\nEND:VEVENT\r\nEND:VCALENDAR\r\n"
+    ).encode()
+
+
+DAY = (datetime(2026, 10, 19, tzinfo=timezone.utc), datetime(2026, 10, 20, tzinfo=timezone.utc))
+
+
+@pytest.mark.parametrize(
+    "times",
+    [
+        "DTSTART:20261019T080000Z\r\n",
+        "DTSTART:20261019T080000Z\r\nDTEND:20261019T080000Z\r\nTRANSP:OPAQUE\r\n",
+        "DTSTART:20261019T080000Z\r\nDURATION:PT0S\r\n",
+    ],
+)
+def test_icloud_zero_length_event_is_a_non_blocking_instant(times):
+    from family_calendar.service.providers import normalize_icloud
+
+    [row] = normalize_icloud("cal", _resource(_event(times)), *DAY, "Asia/Makassar")["occurrences"]
+    assert row["start"] == row["end"] == datetime(2026, 10, 19, 8, tzinfo=timezone.utc)
+    assert row["busy"] is False
+    assert row["details"]["instant"] is True
+
+
+def test_instant_belongs_to_the_half_open_window_that_contains_it():
+    from family_calendar.service.providers import normalize_icloud
+
+    def rows(times):
+        return normalize_icloud("cal", _resource(_event(times)), *DAY, "UTC")["occurrences"]
+
+    assert len(rows("DTSTART:20261019T000000Z\r\n")) == 1
+    assert rows("DTSTART:20261020T000000Z\r\n") == []
+    assert rows("DTSTART:20261018T235959Z\r\n") == []
+
+
+@pytest.mark.parametrize(
+    "times",
+    [
+        "DTSTART:20261019T090000Z\r\nDTEND:20261019T080000Z\r\n",
+        "DTSTART:20261019T090000Z\r\nDURATION:-PT1H\r\n",
+        "DTSTART:20261019T090000Z\r\nDTEND:20261019T080000Z\r\nRRULE:FREQ=DAILY;COUNT=3\r\n",
+    ],
+)
+def test_icloud_reversed_event_is_reported_as_provider_data(times):
+    from family_calendar.service.providers import normalize_icloud
+
+    with pytest.raises(CalendarError, match="invalid_provider_event_time"):
+        normalize_icloud("cal", _resource(_event(times)), *DAY, "Asia/Makassar")
+
+
+def test_google_zero_length_and_reversed_events():
+    from family_calendar.service.providers import normalize_google
+
+    event = {
+        "id": "point",
+        "etag": '"v1"',
+        "summary": "Pay\x00ment \ud800due",
+        "start": {"dateTime": "2026-10-19T08:00:00Z"},
+        "end": {"dateTime": "2026-10-19T16:00:00+08:00"},
+    }
+    [row] = normalize_google("cal", event, "Asia/Makassar")["occurrences"]
+    assert row["start"] == row["end"] and row["busy"] is False and row["details"]["instant"] is True
+    assert row["details"]["title"] == "Payment ?due"
+    event["end"] = {"dateTime": "2026-10-19T07:59:00Z"}
+    with pytest.raises(CalendarError, match="invalid_provider_event_time"):
+        normalize_google("cal", event, "Asia/Makassar")
