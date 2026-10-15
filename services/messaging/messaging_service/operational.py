@@ -62,15 +62,16 @@ def operations(row, history, files, now=None):
                 **describe(code,job_state=state)} for state,number in sorted(states.items()))
         else:diagnostics.append({'reason_code':code,'count':count,**describe(code)})
     storage_paused=error_states.get('paused_storage',{}).get('queued',errors.get('paused_storage',0))
+    storage_unavailable=error_states.get('storage_unavailable',{}).get('queued',errors.get('storage_unavailable',0))
     retry_queued=sum(states.get('queued',0) for code,states in error_states.items()
-        if code not in ('paused_storage','retry_exhausted'))
+        if code not in ('paused_storage','storage_unavailable','retry_exhausted'))
     phases['media']={'state':'processing' if counts['leased'] else
-        'storage_unavailable' if errors.get('storage_unavailable') else
+        'storage_unavailable' if storage_unavailable else
         'paused_storage' if errors.get('paused_storage') else 'needs_attention' if counts['failed'] else
         'queued' if counts['queued'] else 'idle',
         'counts':counts,'errors':errors,'diagnostics':diagnostics,'independent_of_connection':True,
         'storage_paused_jobs':storage_paused,'storage_paused':bool(storage_paused),
-        'storage_unavailable_jobs':errors.get('storage_unavailable',0),
+        'storage_unavailable_jobs':storage_unavailable,
         'terminal_failed_jobs':counts['failed'],'needs_attention':bool(counts['failed']),
         'retry_queued_jobs':retry_queued}
     return phases

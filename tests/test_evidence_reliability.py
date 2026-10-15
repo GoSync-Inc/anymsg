@@ -82,6 +82,12 @@ def test_media_storage_pause_and_terminal_failures_remain_independent(wa):
     network = [d for d in media['diagnostics'] if d['reason_code'] == 'network_error']
     assert {(d['job_state'], d['retry_scheduled'], d['count']) for d in network} == {
         ('queued', True, 1), ('failed', False, 1)}
+    with s.pool.connection() as c:
+        c.execute("UPDATE media_jobs SET error_code='storage_unavailable' WHERE id=%s", (jobs[0]['id'],))
+    unavailable = source(w, s)['operations']['media']
+    assert unavailable['state'] == 'storage_unavailable'
+    assert unavailable['storage_unavailable_jobs'] == unavailable['terminal_failed_jobs'] == 1
+    assert unavailable['storage_paused_jobs'] == 0 and unavailable['retry_queued_jobs'] == 1
 
 
 def test_attachment_and_text_coverage_agree_and_stale_derivatives_are_excluded(archive):
