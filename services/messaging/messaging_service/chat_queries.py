@@ -65,8 +65,22 @@ def peer_name_sql(chat='c'):
           AND peer_source.direction='incoming' ORDER BY peer.source_sent_at DESC,peer.id LIMIT 1)"""
 
 
+SELF_CHAT_TITLE = 'Saved messages'
+
+
+def self_chat_sql(chat='c'):
+    # The provider marks the owner's own chat on the chat observation or on its
+    # recent messages (a WhatsApp LID self chat is only known per message).
+    return f"""(EXISTS(SELECT 1 FROM chat_read_observations self_ro WHERE self_ro.account={chat}.account
+          AND self_ro.chat={chat}.id AND self_ro.is_self_chat) OR EXISTS(SELECT 1 FROM (SELECT recent.id,recent.revision
+          FROM messages recent WHERE recent.account={chat}.account AND recent.chat={chat}.id
+          ORDER BY recent.sent_at DESC LIMIT 20) recent JOIN message_metadata self_md ON self_md.message=recent.id
+          AND self_md.revision=recent.revision WHERE self_md.metadata->'is_self_chat'='true'::jsonb))"""
+
+
 def title_sql(chat='c'):
-    return f"CASE WHEN {raw_title_sql(chat)} THEN coalesce({peer_name_sql(chat)},{chat}.title) ELSE {chat}.title END"
+    return f"""CASE WHEN {raw_title_sql(chat)} THEN coalesce(CASE WHEN {self_chat_sql(chat)}
+        THEN '{SELF_CHAT_TITLE}' END,{peer_name_sql(chat)},{chat}.title) ELSE {chat}.title END"""
 
 
 def list_chats(store,c,p,after='',limit=100,*,accounts=None,query='',chat_types=None,
@@ -297,10 +311,12 @@ def list_chats(store,c,p,after='',limit=100,*,accounts=None,query='',chat_types=
                 row['awaiting_reply_confidence']=state['basis']['code']
     raw=[row['id'] for row in items if row.pop('_raw_title')]
     if raw:
-        names={r['id']:r['name'] for r in c.execute('SELECT c.id,'+peer_name_sql()+
-            ' AS name FROM chats c WHERE c.id=ANY(%s)',(raw,)) if r['name']}
+        labels={r['id']:r for r in c.execute('SELECT c.id,'+peer_name_sql()+' AS name,'+self_chat_sql()+
+            ' AS self FROM chats c WHERE c.id=ANY(%s)',(raw,))}
         for row in items:
-            if row['id'] in names:row.update(title=names[row['id']],title_basis='latest_incoming_sender_name')
+            label=labels.get(row['id'])
+            if label and label['self']:row.update(title=SELF_CHAT_TITLE,title_basis='self_chat')
+            elif label and label['name']:row.update(title=label['name'],title_basis='latest_incoming_sender_name')
     targets(p,[r['id'] for r in items])
     if include_coverage:
         from .chat_evidence import chat_statuses

@@ -42,3 +42,22 @@ def test_named_chat_keeps_provider_title(seeded):
     with s.pool.connection() as c:c.execute("UPDATE chats SET title='Synthetic provider title' WHERE account='title-wa'")
     row=s.list_chats(key,include_coverage=False)['items'][0]
     assert row['title']=='Synthetic provider title' and 'title_basis' not in row
+
+
+def test_self_chat_titled_by_its_lid_is_labelled_saved_messages(seeded):
+    s,_,_=seeded
+    ar=Archive(s);ar.register('title-self','whatsapp','Synthetic self',discover=True)
+    key=s.issue_key('title-self-agent',['title-self'])
+    own='48000000000002@lid'
+    at=(datetime.now(timezone.utc)-timedelta(hours=1)).isoformat()
+    # The owner's own LID chat: only its messages carry the self-chat marker,
+    # and an own-device copy must not rename it after the owner.
+    for n,direction in ((1,'outgoing'),(2,'incoming')):
+        ar.ingest(event(account='title-self',platform='whatsapp',chat=own,chat_title=own,
+            provider_id=('true_' if direction=='outgoing' else 'false_')+own+'_SELF'+str(n),sender=own,
+            body='Synthetic note '+str(n),sent_at=at,updated_at=at,direction=direction,
+            sender_profile={'display_name':'Synthetic Owner','username':''},
+            metadata={'chat_type':'private','is_self_chat':True}))
+    row=s.list_chats(key,include_coverage=False)['items'][0]
+    assert row['title']=='Saved messages' and row['title_basis']=='self_chat'
+    assert {m['chat_title'] for m in s.get_messages(key,row['id'])['items']}=={'Saved messages'}
