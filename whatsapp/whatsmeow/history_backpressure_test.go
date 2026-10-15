@@ -168,12 +168,11 @@ func TestHistoryWorkerDefersLocalCapacityWithoutFailingProvider(t *testing.T) {
 		cancel()
 		<-done
 	}()
-	var attempts int
-	var state, reason string
-	var next int64
+	// The status file is written after the job row, so wait for it.
 	for deadline := time.Now().Add(15 * time.Second); ; {
-		p.Capture.db.QueryRow("SELECT state,attempts,error,next_attempt_ms FROM history_jobs WHERE stanza='disk-control'").Scan(&state, &attempts, &reason, &next)
-		if reason != "" {
+		raw, _ := readPrivate(filepath.Join(p.Config.EventsDirectory, ".history-status"), 4096)
+		var status map[string]any
+		if json.Unmarshal(raw, &status) == nil && status["state"] != "downloading" {
 			break
 		}
 		if time.Now().After(deadline) {
@@ -181,6 +180,10 @@ func TestHistoryWorkerDefersLocalCapacityWithoutFailingProvider(t *testing.T) {
 		}
 		time.Sleep(50 * time.Millisecond)
 	}
+	var attempts int
+	var state, reason string
+	var next int64
+	p.Capture.db.QueryRow("SELECT state,attempts,error,next_attempt_ms FROM history_jobs WHERE stanza='disk-control'").Scan(&state, &attempts, &reason, &next)
 	if state != "attempted" || attempts != 0 || reason != "history_download_failed" || next < started.Add(historyBackpressureDelay).UnixMilli() {
 		t.Fatal("local capacity consumed an attempt or skipped backoff", state, attempts, reason, next)
 	}
