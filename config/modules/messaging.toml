@@ -1,0 +1,21 @@
+version = 1
+id = "messaging"
+requires = []
+project = "anymsg"
+compose = "deploy/compose.yaml"
+services = ["db", "api"]
+required_files = ["deploy/private/postgres.env", "deploy/private/app.dsn"]
+
+[connectors.telegram]
+module = "messaging"
+requires = []
+services = ["telegram"]
+compose = ["deploy/compose.collectors.yaml"]
+required_files = ["deploy/private/telegram.json", "deploy/private/telegram.credentials.json", "deploy/private/telegram.permit.json", "deploy/private/collector.dsn"]
+
+[connectors.whatsapp]
+module = "messaging"
+requires = []
+services = ["whatsapp1", "whatsapp2"]
+compose = ["deploy/compose.whatsapp.yaml"]
+required_files = ["deploy/private/collector.dsn"]

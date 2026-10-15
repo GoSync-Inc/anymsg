@@ -1,0 +1,9 @@
+version = 1
+id = "existing-readers"
+revision = 1
+[deployment]
+modules = ["messaging", "calendar"]
+connectors = []
+external = ["messaging", "calendar"]
+[exposure]
+tools = ["platform_capabilities", "messages_capabilities", "messages_search", "messages_get_context", "messages_get_attachment", "messages_get_updates", "messages_ack_updates", "calendar_capabilities", "calendar_calendars", "calendar_agenda", "calendar_slots"]

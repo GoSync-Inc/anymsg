@@ -110,7 +110,7 @@ def test_dedicated_matcher_role_matches_without_credentials_or_provider_mutation
     store, _, _ = seeded
     token, definition, event = _subscription(store, 'synthetic-role-subscriber')
     role = 'test_subscription_matcher_' + uuid4().hex
-    ddl = Path(__file__).resolve().parents[1].joinpath('messaging_service/subscription_role.sql').read_text()
+    ddl = Path(__file__).resolve().parents[1].joinpath('services/messaging/messaging_service/subscription_role.sql').read_text()
     ddl = ddl.replace('messaging_subscriptions', role)
     created = False
 

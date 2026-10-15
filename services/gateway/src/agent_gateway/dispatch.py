@@ -1,0 +1,162 @@
+from datetime import datetime, timezone
+import asyncio
+from platform_contracts import Capability, safe_error
+from .adapters.calls import receipt_reference
+
+from .catalog import arguments, CATALOG
+from .policy import Denied, key_from_file
+
+
+class Dispatch:
+    def __init__(self, policy, clients, tickets=None):
+        self.policy, self.clients, self.tickets = policy, clients, tickets
+
+    async def backend_capabilities(self, snapshot, agent, module):
+        target = snapshot["deployment"]["backends"].get(module)
+        if target != self.clients.deployment["backends"].get(module):
+            raise Denied("backend_configuration_requires_restart", 503)
+        binding = agent["credentials"][module]
+        credential = key_from_file(binding["key_file"], binding["key_sha256"])
+        try:
+            async with asyncio.timeout(2):
+                result = await self.clients.call(module, "capabilities", credential, {})
+        except TimeoutError:
+            raise Denied("backend_unavailable", 503) from None
+        permissions = result.get("permissions")
+        if not isinstance(permissions, list) or not all(isinstance(p, str) for p in permissions):
+            raise Denied("backend_capability_contract_unavailable", 503)
+        return result
+
+    async def discover(self, key):
+        snapshot, agent = self.policy.authenticate(key)
+        visible = self.policy.visible(snapshot, agent)
+        modules = sorted({CATALOG[name]["module"] for name in visible} - {"gateway"})
+
+        async def one(module):
+            try:
+                caps = await self.backend_capabilities(snapshot, agent, module)
+                return module, caps["permissions"], "ready"
+            except Denied:
+                return module, [], "unavailable"
+
+        results = await asyncio.gather(*(one(module) for module in modules))
+        scopes = {module: set(permissions) for module, permissions, _ in results}
+        states = {module: state for module, _, state in results}
+        # Recheck current local policy after discovery; a slow backend does not
+        # let the old policy snapshot survive a revocation.
+        current, principal = self.policy.authenticate(key)
+        if current["revision"] != snapshot["revision"]:
+            raise Denied("policy_changed", 409)
+        visible = [n for n in visible if n in self.policy.visible(current, principal)]
+        visible = [
+            n
+            for n in visible
+            if CATALOG[n]["module"] == "gateway"
+            or (
+                states.get(CATALOG[n]["module"]) == "ready"
+                and set(CATALOG[n]["scopes"]) <= scopes[CATALOG[n]["module"]]
+                and (
+                    not CATALOG[n].get("action_group")
+                    or bool(self.policy.actions(current, principal, scopes["messaging"]))
+                )
+            )
+        ]
+        return current, principal, visible, {"states": states, "scopes": scopes}
+
+    async def call(self, key, name, values):
+        snapshot, agent, tool = self.policy.authorize(key, name)
+        try:
+            args = arguments(tool, values)
+        except ValueError:
+            raise Denied("invalid_arguments", 422) from None
+        if tool["module"] == "gateway":
+            snapshot, agent, visible, states = await self.discover(key)
+            return {
+                "service": "deedkit",
+                "version": "0.1.0",
+                "principal": agent["id"],
+                "policy_revision": snapshot["revision"],
+                "tools": visible,
+                "modules": sorted({CATALOG[n]["module"] for n in visible} - {"gateway"}),
+                "backend_states": states["states"],
+                "coverage": "query selected module capabilities; unavailable/stale sources remain unknown",
+                "subscriptions": "existing backend identity; passive events do not ACK",
+                "provider_mutations": any(
+                    not CATALOG[n].get("annotations", {}).get("readOnlyHint", False) for n in visible
+                ),
+                "owner_authorization_verified": False,
+                "capability": Capability("gateway", "capabilities", snapshot["revision"]).to_dict(),
+            }
+        module = tool["module"]
+        target = snapshot["deployment"]["backends"].get(module)
+        if target != self.clients.deployment["backends"].get(module):
+            raise Denied("backend_configuration_requires_restart", 503)
+        binding = agent["credentials"][module]
+        credential = key_from_file(binding["key_file"], binding["key_sha256"])
+        caps = await self.backend_capabilities(snapshot, agent, module)
+        if not set(tool["scopes"]) <= set(caps["permissions"]):
+            raise Denied()
+        allowed_actions = (
+            self.policy.actions(snapshot, agent, caps["permissions"]) if module == "messaging" else []
+        )
+        if tool.get("action_group"):
+            if not allowed_actions or ("operation" in args and args["operation"] not in allowed_actions):
+                raise Denied()
+        started = datetime.now(timezone.utc).timestamp()
+        # Admission is rechecked after all local work; a cached MCP session is
+        # never authority. ACK is not retried if its network outcome is unknown.
+        current, principal, _ = self.policy.authorize(key, name)
+        if current["revision"] != snapshot["revision"] or principal["id"] != agent["id"]:
+            raise Denied("policy_changed", 409)
+        try:
+            result = (
+                caps
+                if tool["operation"] == "capabilities"
+                else await self.clients.call(module, tool["operation"], credential, args)
+            )
+        except Denied as error:
+            if error.code in {"backend_unavailable", "backend_response_too_large"} and not tool.get(
+                "annotations", {}
+            ).get("readOnlyHint", False):
+                error.detail = safe_error("mutation_outcome_unknown", unknown_outcome=True)
+            raise
+        if module == "calls":
+            receipt_reference(tool["operation"], result)
+        if tool.get("action_group"):
+            if tool["operation"] == "list_messenger_operations":
+                result = {
+                    **result,
+                    "items": [
+                        row for row in result.get("items", []) if row.get("operation") in allowed_actions
+                    ],
+                }
+            elif result.get("operation") not in allowed_actions:
+                raise Denied()
+        if tool["operation"] == "get_attachment" and result.get("download_url"):
+            result = self.tickets.issue(
+                result, key, agent, snapshot, credential, args["attachment_id"], started
+            )
+        if tool["operation"] == "capabilities":
+            # Preserve scoped coverage/account data, while avoiding the upstream
+            # catalog advertising methods unavailable through this connection.
+            visible = [
+                n
+                for n in self.policy.visible(snapshot, agent)
+                if CATALOG[n]["module"] == module
+                and set(CATALOG[n]["scopes"]) <= set(caps["permissions"])
+                and (not CATALOG[n].get("action_group") or bool(allowed_actions))
+            ]
+            result = dict(result)
+            for field in (
+                "tool_manifest",
+                "messenger_operations",
+                "available",
+                "features",
+                "key_permission_ceiling",
+                "permissions",
+            ):
+                result.pop(field, None)
+            result["gateway_tools"] = visible
+            result["gateway_actions"] = allowed_actions
+            result["gateway_policy_revision"] = snapshot["revision"]
+        return result

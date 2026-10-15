@@ -1,0 +1,116 @@
+ARG PYTHON_IMAGE=python:3.13-slim-bookworm@sha256:a1165e272e578941b84abc79e4ab38a0305cd12803a5c4247979ac7655f4d641
+ARG NODE_IMAGE=node:24-bookworm-slim@sha256:51b1100cc2a83d370c6a60952e3f2989c8a43159d0e38586e090f3b3326efefd
+ARG POSTGRES_IMAGE=postgres:18-bookworm@sha256:afc7e2d441324c0388fa80c3d24f733b4194a4eb7f47dd8ee2b08eb1a24a647c
+FROM ${NODE_IMAGE} AS node-runtime
+FROM node-runtime AS whatsapp-dependencies
+WORKDIR /whatsapp
+ENV PUPPETEER_SKIP_DOWNLOAD=true
+COPY whatsapp/package*.json ./
+RUN npm ci --omit=dev --ignore-scripts --no-audit --no-fund
+FROM ${PYTHON_IMAGE} AS python-dependencies
+ENV PYTHONDONTWRITEBYTECODE=1 PYTHONUNBUFFERED=1
+WORKDIR /app
+COPY services/messaging/requirements.lock ./requirements.lock
+COPY LICENSE THIRD_PARTY_NOTICES.md /app/
+RUN pip install --no-cache-dir --require-hashes -r requirements.lock
+COPY services/messaging/requirements-telemetry.lock ./requirements-telemetry.lock
+ARG ANYMSG_INSTALL_TELEMETRY=0
+RUN if [ "$ANYMSG_INSTALL_TELEMETRY" = "1" ]; then pip install --no-cache-dir --require-hashes -r requirements-telemetry.lock; fi
+RUN groupadd -g 10001 probe && useradd -u 10001 -g probe -M probe \
+    && mkdir -p /data/files && chown -R probe:probe /data
+USER probe
+
+FROM python-dependencies AS runtime
+COPY services/messaging/messaging_service ./messaging_service
+EXPOSE 8080
+CMD ["python", "-m", "messaging_service", "serve"]
+
+FROM python-dependencies AS indexer
+USER root
+RUN apt-get update && apt-get install -y --no-install-recommends poppler-utils tesseract-ocr tesseract-ocr-eng tesseract-ocr-rus \
+    && dpkg-query -W > /app/indexer-system-packages.txt && rm -rf /var/lib/apt/lists/*
+COPY services/messaging/messaging_service ./messaging_service
+USER probe
+CMD ["python", "-m", "messaging_service.file_index"]
+
+FROM indexer AS test
+USER root
+# Contract tests inspect the same public deployment and workflow templates
+# distributed in the source checkout. No private files or Docker socket.
+COPY services/messaging/Dockerfile ./services/messaging/Dockerfile
+COPY deploy ./deploy
+COPY .github/workflows ./.github/workflows
+COPY scripts ./scripts
+COPY config ./config
+COPY services/messaging ./services/messaging
+COPY services/messaging/anymsg ./anymsg
+COPY pyproject.toml README.md LICENSE ./
+COPY services/messaging/pyproject.toml ./services/messaging/pyproject.toml
+COPY --from=node-runtime /usr/local/bin/node /usr/local/bin/node
+COPY whatsapp ./whatsapp
+COPY services/messaging/requirements-test.lock ./requirements-test.lock
+RUN pip install --no-cache-dir --require-hashes -r requirements-test.lock
+COPY tests ./tests
+COPY media_benchmark.py ./media_benchmark.py
+USER probe
+CMD ["python", "-m", "pytest", "-q", "-p", "no:cacheprovider", "--tb=short", "tests"]
+
+# Optional enrichment image. Neither native audio tools nor speech dependencies
+# are installed in the gateway, collector, indexer or regular test stages.
+FROM python-dependencies AS enricher
+USER root
+RUN apt-get update && apt-get install -y --no-install-recommends ffmpeg ca-certificates libgomp1 \
+    && dpkg-query -W > /app/enricher-system-packages.txt && rm -rf /var/lib/apt/lists/*
+COPY services/messaging/messaging_service ./messaging_service
+ENV HF_HUB_OFFLINE=1 HF_HUB_DISABLE_TELEMETRY=1 TOKENIZERS_PARALLELISM=false \
+    OMP_NUM_THREADS=2 OPENBLAS_NUM_THREADS=2
+USER probe
+CMD ["python", "-m", "messaging_service.enrichment", "--config", "/run/secrets/enrichment_config"]
+
+# CPU inference only; model weights are installed separately and mounted read-only.
+FROM enricher AS enricher-local
+USER root
+COPY services/messaging/requirements-enrichment.lock ./requirements-enrichment.lock
+RUN pip install --no-cache-dir --only-binary=:all: --require-hashes -r requirements-enrichment.lock \
+    && pip check
+USER probe
+
+# Isolated smoke target. No database, credentials, model downloads or external
+# API calls are needed for native WAV/OGG and mocked provider tests.
+FROM enricher-local AS enricher-test
+USER root
+COPY services/messaging/requirements-test.lock ./requirements-test.lock
+RUN pip install --no-cache-dir --require-hashes -r requirements-test.lock
+COPY tests ./tests
+ENV REQUIRE_NATIVE_AUDIO=1
+USER probe
+CMD ["python", "-m", "pytest", "-q", "-p", "no:cacheprovider", "--tb=short", "tests/test_audio_native.py"]
+
+FROM python-dependencies AS whatsapp
+USER root
+ARG CHROMIUM_VERSION=154.0.8037.92-1~deb12u1
+RUN apt-get update && apt-get install -y --no-install-recommends chromium=${CHROMIUM_VERSION} ca-certificates \
+    && dpkg-query -W > /app/system-packages.txt && rm -rf /var/lib/apt/lists/*
+COPY --from=node-runtime /usr/local/bin/node /usr/local/bin/node
+COPY --from=whatsapp-dependencies /whatsapp/node_modules ./whatsapp/node_modules
+COPY whatsapp ./whatsapp
+COPY services/messaging/messaging_service ./messaging_service
+ENV HOME=/tmp PUPPETEER_SKIP_DOWNLOAD=true
+USER probe
+CMD ["python", "-m", "messaging_service.whatsapp_collector", "--config", "/run/secrets/whatsapp_config"]
+
+# Operator-only image. Never receives Docker socket, SSH key or age private key.
+FROM ${POSTGRES_IMAGE} AS backup
+USER root
+RUN apt-get update && apt-get install -y --no-install-recommends ca-certificates \
+    libsqlite3-0 libbz2-1.0 libffi8 liblzma5 libexpat1 libreadline8 libncursesw6 libgdbm6 \
+    && rm -rf /var/lib/apt/lists/*
+COPY --from=python-dependencies /usr/local /usr/local
+WORKDIR /app
+ENV PYTHONDONTWRITEBYTECODE=1 PYTHONUNBUFFERED=1
+RUN python -c "import hashlib,io,tarfile,urllib.request; b=urllib.request.urlopen('https://github.com/FiloSottile/age/releases/download/v1.3.2/age-v1.3.2-linux-amd64.tar.gz').read(); assert hashlib.sha256(b).hexdigest()=='cbe24006683f8eb669266162894b9a522a1af52f2665fbc63a4bb032ed26ac10'; t=tarfile.open(fileobj=io.BytesIO(b)); m=t.getmember('age/age'); assert m.isfile(); f=open('/usr/local/bin/age','xb'); f.write(t.extractfile(m).read()); f.close()" \
+    && chmod 0755 /usr/local/bin/age && age --version && pg_dump --version
+COPY services/messaging/messaging_service ./messaging_service
+COPY licenses/age-LICENSE /usr/share/doc/age/LICENSE
+ENTRYPOINT []
+CMD ["python", "-m", "messaging_service.backup_worker", "--config", "/run/secrets/backup_config"]

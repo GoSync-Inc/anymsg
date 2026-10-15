@@ -1,0 +1,1 @@
+Все события вымышлены, UID используют family.invalid. Weekly fixture содержит DST, EXDATE/RDATE, moved/cancelled exceptions, VALARM и Unicode X-property. Фиксированные DTSTAMP; никаких пользовательских экспортов.

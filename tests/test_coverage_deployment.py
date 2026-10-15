@@ -54,9 +54,10 @@ def volumes(unit):
 def test_application_units_enforce_sandbox_resource_and_log_bounds():
     applications = units()
     assert set(applications) == {'api', 'db', 'telegram', 'whatsapp1', 'whatsapp2',
-        'indexer', 'enricher', 'enricher-local', 'operator', 'subscriptions'}
+        'indexer', 'enricher', 'enricher-local', 'operator', 'subscriptions',
+        'calendar-db', 'calendar-api', 'calendar-worker', 'gateway', 'calls'}
     for name, unit in applications.items():
-        if name == 'db':
+        if name in {'db', 'calendar-db'}:
             continue
         assert unit['read_only'] is True, name
         assert unit['user'] == '10001:10001', name
@@ -140,7 +141,7 @@ def test_gateway_proxy_and_owner_pairing_exposure_is_explicit():
 
 def docker_stages():
     # Parse Dockerfile instructions after folding continuations; do not execute builds.
-    lines = (ROOT / 'Dockerfile').read_text().replace('\\\n', ' ').splitlines()
+    lines = (ROOT / 'services/messaging/Dockerfile').read_text().replace('\\\n', ' ').splitlines()
     stages, defaults, current = {}, {}, None
     for line in lines:
         line = line.strip()
@@ -194,7 +195,7 @@ def test_images_pin_supply_chain_inputs_and_keep_heavy_tools_out_of_gateway():
                and re.search(r"=='[0-9a-f]{64}'", value) for _, value in backup)
     assert not any('/var/run/docker.sock' in value or 'id_ed25519' in value or 'agekey' in value for _, value in backup)
     copies = [shlex.split(value) for command, value in stages['test']['instructions'] if command == 'COPY']
-    assert ['Dockerfile', './Dockerfile'] in copies
+    assert ['services/messaging/Dockerfile', './services/messaging/Dockerfile'] in copies
     assert ['deploy', './deploy'] in copies
     assert ['.github/workflows', './.github/workflows'] in copies
 

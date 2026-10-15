@@ -1,5 +1,6 @@
 """Owned synthetic network drill against a separate disposable PostgreSQL DB."""
 import argparse
+from importlib.resources import files
 import json
 import os
 from pathlib import Path
@@ -40,7 +41,7 @@ def main():
             store.seed()
             token=store.issue_key('smoke-agent',['telegram-demo','whatsapp-demo-1'])
             with psycopg.connect(owner,autocommit=True) as c:
-                c.execute((source/'messaging_service/gateway_role.sql').read_text())
+                c.execute(files('messaging_service').joinpath('gateway_role.sql').read_text())
                 c.execute("CREATE ROLE anymsg_smoke_api LOGIN NOSUPERUSER NOCREATEDB NOCREATEROLE NOREPLICATION NOBYPASSRLS PASSWORD 'synthetic-smoke-password'")
                 role=True
                 c.execute('GRANT messaging_gateway TO anymsg_smoke_api')

@@ -74,8 +74,11 @@ def test_built_wheel_includes_immutable_sql_and_node_sources():
     with zipfile.ZipFile(wheel) as archive:
         names=set(archive.namelist())
         assert 'anymsg/__main__.py' in names and 'anymsg/client.py' in names
-        for path in (source/'messaging_service').rglob('*.sql'):
-            key=path.relative_to(source).as_posix()
+        service = source/'services/messaging'
+        sql_files = list((service/'messaging_service').rglob('*.sql'))
+        assert sql_files
+        for path in sql_files:
+            key=path.relative_to(service).as_posix()
             assert key in names and archive.read(key)==path.read_bytes()
         for name in ASSET_NAMES:
             key='messaging_service/whatsapp_assets/'+name

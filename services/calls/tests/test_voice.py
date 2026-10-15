@@ -1,0 +1,84 @@
+import importlib
+from types import SimpleNamespace
+
+import pytest
+
+from core import BriefInput, VoiceService, TOOL_MODELS
+
+
+def test_native_gemini_uses_saved_prompt_voice_and_model(tmp_path):
+    voice=importlib.import_module('voice')
+    store=VoiceService(tmp_path)
+    brief=store.prepare(BriefInput(goal='Узнать время',counterparty='Поставщик',success_fields=['time'],voice='Kore'),[])
+    model=voice.create_model(brief,'fixture-not-a-key')
+    assert model._settings.model == brief['model']
+    assert model._settings.voice == 'Kore'
+    assert model._settings.system_instruction == brief['prompt']
+    store.close()
+
+
+@pytest.mark.parametrize('language,code',[('ru','ru-RU'),('en','en-US'),('id','id-ID')])
+async def test_flows_transcription_language_reaches_actual_google_setup(tmp_path,monkeypatch,language,code):
+    from google.genai import _common, _live_converters, types
+    from pipecat.services.google.gemini_live.llm import GeminiLiveLLMService
+    from voice import create_model
+    sent=[]
+    async def connect(self,config):
+        sent.append(_common.convert_to_dict(_live_converters._LiveConnectParameters_to_mldev(
+            api_client=self._client._api_client,from_object=types.LiveConnectParameters(
+                model=self._settings.model,config=config).model_dump(exclude_none=True))))
+    monkeypatch.setattr(GeminiLiveLLMService,'_connection_task_handler',connect)
+    store=VoiceService(tmp_path)
+    brief=store.prepare(BriefInput(goal='Delivery',counterparty='Browser',language=language,
+        success_fields=['window'],dialog_engine='gemini_live_flows'),[])
+    model=create_model(brief,'fixture-not-a-key')
+    config=types.LiveConnectConfig(response_modalities=['AUDIO'],
+        input_audio_transcription=types.AudioTranscriptionConfig(),
+        output_audio_transcription=types.AudioTranscriptionConfig())
+    await model._connection_task_handler(config)
+    for direction in ['inputAudioTranscription','outputAudioTranscription']:
+        assert sent[0]['setup'][direction].get('language_codes')==[code]
+    store.close()
+
+
+async def test_each_schema_handler_calls_its_own_scoped_tool_and_returns_result():
+    voice=importlib.import_module('voice')
+    seen=[]
+    async def handler(name,params):
+        seen.append((name,params.arguments))
+        await params.result_callback({'tool':name})
+    schemas=voice.tool_schemas(handler).standard_tools
+    assert {s.name for s in schemas} == set(TOOL_MODELS)
+    for schema in schemas:
+        returned=[]
+        async def result(value):
+            returned.append(value)
+        params=SimpleNamespace(arguments={'fixture':schema.name},result_callback=result)
+        await schema.handler(params)
+        assert returned == [{'tool':schema.name}]
+    assert [name for name,args in seen] == list(TOOL_MODELS)
+
+
+async def test_owner_update_sends_realtime_text_not_only_local_context():
+    voice=importlib.import_module('voice')
+    frames=[]
+    class Worker:
+        async def queue_frames(self,values):
+            frames.extend(values)
+    decision={'id':'decision-1','question':'Extra fee?','answer':'Нет'}
+    await voice.send_owner_update(Worker(),decision)
+    from pipecat.frames.frames import InputTextRawFrame
+    assert len(frames)==1 and isinstance(frames[0],InputTextRawFrame)
+    assert 'OWNER DECISION FROM LOCAL INTERFACE' in frames[0].text and 'Нет' in frames[0].text
+    assert frames[0].append_to_context is False, 'Owner control text must not become an assistant transcript'
+
+
+async def test_pipeline_error_marks_failure_without_leaking_provider_error_payload():
+    voice=importlib.import_module('voice')
+    state={};messages=[]
+    class RTVI:
+        async def send_server_message(self,value):
+            messages.append(value)
+    await voice.report_error(state,RTVI())
+    assert state['end_reason']=='model_error'
+    assert messages[0]['kind']=='error' and 'Billing' in messages[0]['message']

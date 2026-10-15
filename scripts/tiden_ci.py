@@ -18,6 +18,13 @@ import xml.etree.ElementTree as ET
 
 CHECKS = ("build", "release", "python", "collector", "npm", "smoke", "distributions")
 REPORTS = {"python": "python.xml", "collector": "collector.xml", "npm": "npm.xml"}
+MODULE_REPORTS = {
+    "load": ("load.xml", "python", ""),
+    "gateway": ("gateway.xml", "python", "services/gateway"),
+    "calendar": ("calendar.xml", "python", "services/calendar"),
+    "calls": ("calls.xml", "python", "services/calls"),
+    "calls_frontend": ("calls-frontend.xml", "node", "services/calls/frontend"),
+}
 MAX_BYTES = 20 * 1024 * 1024
 
 
@@ -32,7 +39,7 @@ def source_path(value: str, root: Path) -> str:
     return value
 
 
-def normalize_junit(path: Path, root: Path, framework: str) -> tuple[bytes, Counter]:
+def normalize_junit(path: Path, root: Path, framework: str, source_prefix: str = "") -> tuple[bytes, Counter]:
     data = path.read_bytes()
     if len(data) > MAX_BYTES or b"<!DOCTYPE" in data.upper() or b"<!ENTITY" in data.upper():
         raise ValueError("unsafe or oversized JUnit report")
@@ -54,8 +61,12 @@ def normalize_junit(path: Path, root: Path, framework: str) -> tuple[bytes, Coun
                 file = candidate
         if not file:
             raise ValueError("test source path is missing")
+        if source_prefix and not Path(file).is_absolute() and not file.startswith(source_prefix + "/"):
+            file = source_prefix + "/" + file
         file = source_path(file, root)
         case.set("file", file)
+        if source_prefix and framework == "python":
+            case.set("classname", source_prefix.replace("/", ".") + "." + case.get("classname", ""))
         if framework != "python":
             # Node's built-in reporter uses classname='test' for every file.
             # File qualification prevents unrelated equal titles from colliding.
@@ -69,18 +80,25 @@ def normalize_junit(path: Path, root: Path, framework: str) -> tuple[bytes, Coun
 def prepare(root: Path, directory: Path, metadata: dict) -> dict:
     if not re.fullmatch(r"[a-f0-9]{40}", metadata.get("sha", "")):
         raise ValueError("actual tested commit SHA is required")
-    checks = metadata["checks"]
+    checks = dict(metadata["checks"])
+    module_checks = metadata.get("module_checks")
+    if module_checks is not None:
+        if set(module_checks) != set(MODULE_REPORTS):
+            raise ValueError("explicit outcomes for every platform module are required")
+        checks.update(module_checks)
+    check_names = CHECKS + (tuple(MODULE_REPORTS) if module_checks is not None else ())
     rows = []
     reports = []
     counts = Counter()
-    for check in CHECKS:
+    for check in check_names:
         outcome = checks.get(check, "skipped")
         if outcome not in {"success", "failure", "skipped", "cancelled"}:
             raise ValueError("unknown CI step outcome")
         reason = ""
-        if check in REPORTS:
+        if check in REPORTS or check in MODULE_REPORTS:
             try:
-                normalized, totals = normalize_junit(directory / REPORTS[check], root, check)
+                filename, framework, prefix = MODULE_REPORTS.get(check, (REPORTS.get(check), check, ""))
+                normalized, totals = normalize_junit(directory / filename, root, framework, prefix)
                 filename = f"normalized-{check}.xml"
                 (directory / filename).write_bytes(normalized)
                 reports.append(filename)
@@ -94,7 +112,7 @@ def prepare(root: Path, directory: Path, metadata: dict) -> dict:
         status = "passed" if outcome == "success" else "failed" if outcome == "failure" else "blocked"
         rows.append({
             "id": str(uuid.uuid5(uuid.NAMESPACE_URL, metadata["ci_url"] + "/" + check)),
-            "title": f"CI verification: {check}", "signature": "anymsg-ci::" + check,
+            "title": f"CI verification: {check}", "signature": ("anymsg-ci::" if check in CHECKS else "deedkit-ci::") + check,
             "execution": {"status": status, "duration": 0},
             "suitePath": [{"title": "CI verifications"}],
             "fields": {"file_path": ".github/workflows/checks.yml"},
@@ -168,7 +186,8 @@ def publish(directory: Path, manifest: dict, branch: str, product: str, cli: str
             raise RuntimeError("Run recorded, but Tiden did not associate test evidence with the expected branch")
         if result.get("status") not in {"passed", "failed"}:
             raise RuntimeError("Tiden run has no terminal test verdict")
-        expected_attempts = sum(manifest["test_counts"].values()) + len(CHECKS)
+        check_count = len(CHECKS) + (len(MODULE_REPORTS) if "module_checks" in manifest else 0)
+        expected_attempts = sum(manifest["test_counts"].values()) + check_count
         if int(result["stats"]["attempts"]) != expected_attempts:
             raise RuntimeError("Tiden result count differs from the authentic CI evidence")
         expected_failure = (manifest["test_counts"].get("failed", 0)

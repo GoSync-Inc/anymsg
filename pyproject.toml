@@ -1,95 +1,15 @@
-[build-system]
-requires = ["hatchling>=1.27,<2"]
-build-backend = "hatchling.build"
-
+# Development facade only. Runtime packages retain independent environments.
 [project]
-name = "anymsg"
-version = "0.9.18"
-description = "A self-hosted messaging archive and MCP interface for agents"
-readme = "README.md"
+name = "deedkit-workspace"
+version = "0.1.0"
 requires-python = ">=3.13,<3.14"
-license = "MIT"
-license-files = ["LICENSE"]
-authors = [{name = "GoSync"}]
-keywords = ["mcp", "telegram", "whatsapp", "messaging", "archive"]
-classifiers = [
-  "Development Status :: 4 - Beta",
-  "Programming Language :: Python :: 3.13",
-  "Operating System :: POSIX",
-  "Topic :: Communications :: Chat",
-]
-dependencies = [
-  "mcp==2.3.0",
-  "psycopg[binary,pool]==3.3.6",
-  "uvicorn==0.54.0",
-  "starlette==1.7.0",
-  "httpx==0.28.1",
-  "telethon==1.45.0",
-  "markdown-it-py==4.2.0",
-]
-
-[project.urls]
-Homepage = "https://github.com/GoSync-Inc/anymsg"
-Repository = "https://github.com/GoSync-Inc/anymsg"
-Issues = "https://github.com/GoSync-Inc/anymsg/issues"
-
-[project.optional-dependencies]
-telemetry = ["tiden-telemetry==0.1.0"]
-
-[project.scripts]
-anymsg = "anymsg.cli:main"
-
+dependencies = ["anymsg"]
 [dependency-groups]
-dev = [
-    "pytest==9.1.1",
-    "pyyaml==6.0.3",
-    "tiden-telemetry==0.1.0",
-]
-
-[tool.hatch.build.targets.wheel]
-packages = ["anymsg", "messaging_service"]
-exclude = [
-  "**/node_modules/**", "**/__pycache__/**", "**/*.pyc", "**/.venv/**",
-  "**/.local/**", "**/private/**", "**/sessions/**", "**/outputs/**",
-  "**/*.dsn", "**/*.token", "**/auth.json", "**/credentials*.json", "**/*.session", "**/.env",
-]
-
-[tool.hatch.build.targets.wheel.force-include]
-"whatsapp/bounds.mjs" = "messaging_service/whatsapp_assets/bounds.mjs"
-"whatsapp/capture.mjs" = "messaging_service/whatsapp_assets/capture.mjs"
-"whatsapp/history.mjs" = "messaging_service/whatsapp_assets/history.mjs"
-"whatsapp/identity.mjs" = "messaging_service/whatsapp_assets/identity.mjs"
-"whatsapp/ipc.mjs" = "messaging_service/whatsapp_assets/ipc.mjs"
-"whatsapp/media.mjs" = "messaging_service/whatsapp_assets/media.mjs"
-"whatsapp/navigation.mjs" = "messaging_service/whatsapp_assets/navigation.mjs"
-"whatsapp/pair.mjs" = "messaging_service/whatsapp_assets/pair.mjs"
-"whatsapp/pairing.mjs" = "messaging_service/whatsapp_assets/pairing.mjs"
-"whatsapp/provider.mjs" = "messaging_service/whatsapp_assets/provider.mjs"
-"whatsapp/sender.mjs" = "messaging_service/whatsapp_assets/sender.mjs"
-"whatsapp/outgoing.mjs" = "messaging_service/whatsapp_assets/outgoing.mjs"
-"whatsapp/read-state.mjs" = "messaging_service/whatsapp_assets/read-state.mjs"
-"whatsapp/receipts.mjs" = "messaging_service/whatsapp_assets/receipts.mjs"
-"whatsapp/operations.mjs" = "messaging_service/whatsapp_assets/operations.mjs"
-"whatsapp/transport-state.mjs" = "messaging_service/whatsapp_assets/transport-state.mjs"
-"whatsapp/package.json" = "messaging_service/whatsapp_assets/package.json"
-"whatsapp/package-lock.json" = "messaging_service/whatsapp_assets/package-lock.json"
-
-[tool.hatch.build.targets.sdist]
-include = [
-  "/anymsg", "/messaging_service", "/whatsapp", "/tests", "/deploy",
-  "/pyproject.toml", "/README.md", "/LICENSE", "/*.md", "/Dockerfile",
-  "/licenses", "/media_benchmark.py", "/client_check.py", "/.dockerignore",
-  "/uv.lock", "/scripts", "/requirements*.lock", "/requirements*.in", "/enrichment.*.example.json",
-]
-exclude = [
-  "**/node_modules/**", "**/__pycache__/**", "**/*.pyc", "**/.venv/**",
-  "**/.local/**", "**/private/**", "**/sessions/**", "**/outputs/**",
-  "**/*.dsn", "**/*.token", "**/auth.json", "**/credentials*.json", "**/*.session", "**/.env",
-]
-
+dev = ["pytest==9.1.1", "pyyaml==6.0.3", "tiden-telemetry==0.1.0"]
+[tool.uv]
+package = false
+[tool.uv.sources]
+anymsg = { path = "services/messaging", editable = true }
 [tool.pytest.ini_options]
 testpaths = ["tests"]
 addopts = "-q -p no:cacheprovider"
-
-[tool.uv]
-package = true

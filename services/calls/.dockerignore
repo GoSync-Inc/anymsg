@@ -1,0 +1,10 @@
+*
+!*.py
+!pyproject.toml
+!uv.lock
+!Dockerfile
+!frontend/
+!frontend/**
+frontend/node_modules
+frontend/dist
+frontend/.env*

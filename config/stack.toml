@@ -1,0 +1,25 @@
+version = 1
+python = "==3.13.*"
+node_runtime = 24
+
+[common]
+mcp = "2.3.0"
+httpx = "0.28.1"
+httpx2 = "2.13.1"
+starlette = "1.8.0"
+uvicorn = "0.54.0"
+
+[optional_common]
+fastapi = "0.143.0"
+
+[modules.messaging]
+path = "services/messaging"
+[modules.calendar]
+path = "services/calendar"
+[modules.calls]
+path = "services/calls"
+[modules.gateway]
+path = "services/gateway"
+
+# Domain libraries remain local to each module. Exceptions must be explicit,
+# scoped, dated and reviewed; there are currently no common-stack exceptions.

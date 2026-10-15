@@ -1,0 +1,16 @@
+{
+  "version": 1,
+  "seed": 20261015,
+  "samples": 1000,
+  "repeats": 3,
+  "concurrency": 8,
+  "warmup": 40,
+  "max_errors": 0,
+  "gateway_p95_ms": 150,
+  "gateway_vs_direct_ratio": 8,
+  "gateway_vs_direct_slack_ms": 25,
+  "contention_ratio": 3,
+  "contention_slack_ms": 20,
+  "gateway_rss_mb": 256,
+  "gateway_fd_limit": 160
+}

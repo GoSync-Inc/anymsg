@@ -1,0 +1,8 @@
+version = 1
+id = "calendar"
+requires = []
+project = "deedkit-calendar"
+compose = "deploy/compose.calendar.yaml"
+services = ["calendar-db", "calendar-api", "calendar-worker"]
+required_files = ["deploy/private/calendar.env"]
+env_file = "deploy/private/calendar.env"

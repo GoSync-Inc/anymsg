@@ -1,0 +1,25 @@
+version = 1
+id = "calls"
+requires = []
+project = "deedkit-calls"
+compose = "deploy/compose.calls.yaml"
+services = ["calls"]
+required_files = ["deploy/private/calls.env", "deploy/private/calls-agents.json"]
+env_file = "deploy/private/calls.env"
+
+[connectors.calls-phone]
+module = "calls"
+requires = []
+services = []
+
+[connectors.calls-telegram]
+module = "calls"
+requires = ["messaging"]
+services = []
+compose = ["deploy/compose.calls-telegram.yaml"]
+required_files = ["deploy/private/calls-telegram-broker.token"]
+
+[connectors.calls-archive]
+module = "calls"
+requires = ["messaging"]
+services = []

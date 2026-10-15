@@ -1,0 +1,14 @@
+.venv/
+.local/
+outputs/
+__pycache__/
+.pytest_cache/
+.ruff_cache/
+*.pyc
+*.key
+*.token
+*.sqlite*
+.env*
+dist/
+*.egg-info/
+.DS_Store
