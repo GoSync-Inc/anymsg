@@ -199,19 +199,31 @@ class Tickets:
                 )
             if response.headers.get("content-length") not in (None, str(row["bytes"])):
                 raise Denied("backend_file_integrity_error", 503)
+            if row["bytes"] == 0 and not hmac.compare_digest(hashlib.sha256().hexdigest(), row["sha256"]):
+                # No byte could be held back below; refuse before the headers.
+                raise Denied("backend_file_integrity_error", 503)
             self.check(row)
 
             async def chunks():
-                digest, length = hashlib.sha256(), 0
+                # Hold back the latest chunk until the next one arrives or the
+                # whole file is verified, so a length or SHA-256 mismatch leaves
+                # the response short of Content-Length instead of complete.
+                digest, length, held = hashlib.sha256(), 0, b""
                 async for chunk in response.aiter_raw(65536):
                     self.check(row)
+                    if not chunk:
+                        continue
                     length += len(chunk)
                     if length > row["bytes"]:
                         raise RuntimeError("backend_file_integrity_error")
                     digest.update(chunk)
-                    yield chunk
+                    if held:
+                        yield held
+                    held = chunk
                 if length != row["bytes"] or not hmac.compare_digest(digest.hexdigest(), row["sha256"]):
                     raise RuntimeError("backend_file_integrity_error")
+                if held:
+                    yield held
 
             return FileResponse(
                 chunks(),

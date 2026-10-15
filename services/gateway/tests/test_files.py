@@ -26,6 +26,7 @@ def setup(
     download_origin="https://archive.example.test",
     body=None,
     head=None,
+    original=None,
 ):
     path = tmp_path / "policy.json"
     key = tmp_path / "backend.key"
@@ -48,7 +49,7 @@ def setup(
     }
     path.write_text(json.dumps(value))
     path.chmod(0o600)
-    data = b"synthetic original\x00" * 10000
+    data = b"synthetic original\x00" * 10000 if original is None else original
     requests = []
 
     def handler(request):
@@ -86,6 +87,21 @@ class Slow(httpx.AsyncByteStream):
     async def __aiter__(self):
         async for chunk in self.chunks:
             yield chunk
+
+
+class Recorded:
+    """Keep wire frames, so a truncated body is visible behind TestClient."""
+
+    def __init__(self, app):
+        self.app, self.frames = app, []
+
+    async def __call__(self, scope, receive, send):
+        async def record(message):
+            if scope["type"] == "http":
+                self.frames.append(message)
+            await send(message)
+
+        await self.app(scope, receive, record)
 
 
 def issue(client):
@@ -283,3 +299,37 @@ def test_backend_check_separates_denials_from_unavailability():
         403: 404,
         404: 404,
     }
+
+
+@pytest.mark.parametrize("position", [0, -1])
+def test_digest_mismatch_truncates_the_response_instead_of_completing_it(tmp_path, position):
+    async def body(data):
+        # Right length, one corrupted byte; the backend stream ends normally.
+        corrupted = bytearray(data)
+        corrupted[position] ^= 1
+        for start in range(0, len(corrupted), 65536):
+            yield bytes(corrupted[start : start + 65536])
+
+    app, _, data, _ = setup(tmp_path, body=body)
+    wire = Recorded(app)
+    with TestClient(wire, raise_server_exceptions=False) as client:
+        url = issue(client).json()["download_url"]
+        wire.frames.clear()
+        response = client.get(url)
+    sent = [frame for frame in wire.frames if frame["type"] == "http.response.body"]
+    assert response.status_code == 200 and response.headers["content-length"] == str(len(data))
+    # Everything but the held-back final chunk; the response never completes.
+    assert sum(len(frame.get("body", b"")) for frame in sent) == len(data) - len(data) % 65536
+    assert all(frame.get("more_body") for frame in sent)
+
+
+def test_verified_file_is_completed_and_empty_file_digest_checked_before_headers(tmp_path):
+    app, _, data, _ = setup(tmp_path, original=b"")
+    with TestClient(app) as client:
+        url = issue(client).json()["download_url"]
+        response = client.get(url)
+        assert response.status_code == 200 and response.content == b""
+        for row in app.state.tickets.entries.values():
+            row["sha256"] = "0" * 64
+        response = client.get(url)
+        assert response.status_code == 503 and response.json() == {"error": "backend_file_integrity_error"}

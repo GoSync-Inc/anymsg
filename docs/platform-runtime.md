@@ -69,7 +69,8 @@ the gateway does not resend it or invent a new request ID.
 
 Original files use bounded, short-lived gateway bearer links. Their expiry bounds
 when a download may start, not how long a started transfer may run. SHA/length are
-checked while streaming. Gateway revocation is rechecked every chunk and by a 250 ms
+checked while streaming, and the final chunk is withheld until both match, so a
+mismatch truncates the response rather than completing a 200. Gateway revocation is rechecked every chunk and by a 250 ms
 watcher; backend access is revalidated with the authenticated backend grant's HEAD
 route at one-second intervals with a two-second timeout. A 401/403/404, redirect or
 other unexpected status aborts at once. Rate limiting (429), 5xx, timeouts and

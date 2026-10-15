@@ -65,12 +65,14 @@ when a download may start; a started transfer may outlive it. Throughout the tra
 the gateway rechecks current local policy and credential binding, and polls the
 backend's existing HEAD download grant check. A denial or unexpected answer ends the
 transfer at once; 429, 5xx, timeouts and connection errors end it only after 10
-seconds without a confirmation. For a transfer it is serving, the
-messaging backend answers that HEAD from the current key, scope and file instead of
-the grant's 120-second expiry; upgrade it first, or long transfers still end there.
+seconds without a confirmation. For a transfer it is serving, the messaging backend
+answers that HEAD from the current key, scope and file instead of the grant's
+120-second expiry; upgrade it first, or long transfers still end there.
 Revocation terminates an active response; a partial file is never converted to a
-successful error JSON. Clients should verify the advertised
-length and SHA-256. Do not share or log these bearer URLs. Access logging is disabled.
+successful error JSON. The final chunk is withheld until length and SHA-256 match, so
+a corrupted original ends short of its Content-Length instead of completing. Clients
+should still verify the advertised length and SHA-256. Do not share or log these
+bearer URLs. Access logging is disabled.
 
 Deployment profiles in `config/profiles/` select managed or external backends. Run
 `python scripts/deedkit.py resolve --profile config/profiles/existing-readers.toml --json`
