@@ -26,6 +26,8 @@ jobs:
     secrets: inherit
   native:
     uses: ./.github/workflows/whatsmeow.yml
+    with:
+      source_ref: ${{ inputs.source_ref || '' }}
   images:
     uses: ./.github/workflows/images.yml
     with:

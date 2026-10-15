@@ -51,6 +51,14 @@ this tool does not convert browser sessions. Databases and unrelated services
 are never selected. State, mounts, networks, ports and private settings are
 retained from the resolved configuration.
 
+Host-mounted code and import-path overrides are refused, including legacy
+Telegram bridge files mounted outside the image. Move such extensions into the
+reviewed source/image and test them in CI before selecting that service. The
+tool accepts mounts under the established data/config roots (`/data`,
+`/sessions`, `/spool`, `/run/secrets`, `/run/deedkit`, `/models`,
+`/processing-locks`, `/broker`, `/voice-broker`); it refuses executable file
+mounts and other roots. It never silently drops a legacy extension.
+
 The state directory and Docker filesystem each need at least **15 GiB free**
 before preparation. A refusal does not authorize pruning shared Docker objects
 or deleting runtime data. Free capacity through a reviewed, targeted operation

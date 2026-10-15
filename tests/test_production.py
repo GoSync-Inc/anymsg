@@ -147,6 +147,32 @@ def test_main_moving_during_source_fetch_prevents_any_build(tmp_path, monkeypatc
     assert not any(call[:2] == ["docker", "build"] for call in calls)
 
 
+@pytest.mark.parametrize("mount", [
+    {"type": "bind", "source": "/host/telegram_session_owner.py", "target": "/voice-bridge/telegram_session_owner.py"},
+    {"type": "bind", "source": "/host/source", "target": "/app"},
+    {"type": "volume", "source": "unchecked-code", "target": "/usr/local/lib/python3.13/site-packages"},
+    {"type": "bind", "source": "/host/extension.py", "target": "/data/extension.py"},
+    {"type": "bind", "source": "/host/source", "target": "/data/../app"},
+])
+def test_host_mounted_code_prevents_preparation_before_any_build_or_restart(tmp_path, monkeypatch, mount):
+    settings, calls, document = fixture(tmp_path, monkeypatch)
+    document["services"]["api"]["volumes"].append(mount)
+    Path(settings["projects"][0]["files"][0]).write_text(json.dumps(document))
+    with pytest.raises(p.Refused, match="host-mounted code"):
+        p.prepare(settings, SHA)
+    assert not any(call[:2] == ["docker", "build"] or "stop" in call or "up" in call for call in calls)
+
+
+@pytest.mark.parametrize("name", ["PYTHONPATH", "NODE_PATH", "LD_PRELOAD", "LD_LIBRARY_PATH"])
+def test_external_import_path_cannot_bypass_the_verified_image(tmp_path, monkeypatch, name):
+    settings, calls, document = fixture(tmp_path, monkeypatch)
+    document["services"]["api"]["environment"][name] = "/data/unchecked"
+    Path(settings["projects"][0]["files"][0]).write_text(json.dumps(document))
+    with pytest.raises(p.Refused, match="import path"):
+        p.prepare(settings, SHA)
+    assert not any(call[:2] == ["docker", "build"] or "stop" in call or "up" in call for call in calls)
+
+
 def test_ci_becoming_red_after_build_prevents_a_prepared_release(tmp_path, monkeypatch):
     settings, calls, _ = fixture(tmp_path, monkeypatch)
     attempts = []

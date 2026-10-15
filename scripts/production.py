@@ -9,6 +9,7 @@ import hashlib
 import json
 import os
 from pathlib import Path
+import posixpath
 import re
 import shutil
 import subprocess
@@ -161,8 +162,25 @@ def snapshot(project):
                    "--filter", "label=com.docker.compose.service=" + service, "--format", "{{.ID}}"]).split()
         if len(ids) != 1 or service not in document["services"]:
             raise Refused("each selected service must already have exactly one running container")
+        validate_runtime(document["services"][service])
         running[service] = ids[0]
     return document, running
+
+
+def validate_runtime(unit):
+    # Legacy host-mounted extensions would bypass the verified image entirely.
+    # These are the runtime's data/config mount roots, never executable roots.
+    roots = ("/data", "/sessions", "/spool", "/run/secrets", "/run/deedkit",
+             "/models", "/processing-locks", "/broker", "/voice-broker")
+    code_suffixes = (".py", ".pyc", ".so", ".js", ".mjs", ".cjs", ".sh")
+    for mount in unit.get("volumes", []):
+        target = posixpath.normpath(mount["target"])
+        if (not any(target == root or target.startswith(root + "/") for root in roots)
+                or target.endswith(code_suffixes) or str(mount.get("source", "")).endswith(code_suffixes)):
+            raise Refused("host-mounted code or an unknown mount root bypasses verified images; package extensions in main first")
+    environment = unit.get("environment", {})
+    if any(environment.get(name) for name in ("PYTHONPATH", "NODE_PATH", "LD_PRELOAD", "LD_LIBRARY_PATH")):
+        raise Refused("runtime import path overrides bypass verified images")
 
 
 def escaped(value):
