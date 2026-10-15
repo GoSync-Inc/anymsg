@@ -94,7 +94,7 @@ class State:
             policy['discover_chats'] or chat in policy['include_chats'])
 
     def apply(self, item): self.applied.append(item)
-    def capture_progress(self, last, count, pending): self.progress.append((last, count, pending))
+    def capture_progress(self, last, count, pending, **health): self.progress.append((last, count, pending))
     def publish_receipts(self, *, limit): self.publications.append(limit)
 
 

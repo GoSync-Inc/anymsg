@@ -302,20 +302,27 @@ class NodeProvider:
         # OutgoingWorker holds send_gate before claiming a queued job.
         if not self.send_lock.locked():raise RuntimeError('send_gate_required')
         from .outgoing import dispatch_payload
+        report=job.get('_provider_phase')
+        if report is not None:report('waiting')
         payload=dispatch_payload(job,'whatsapp')
         if job.get('_preflight') is not None:await job['_preflight']()
+        # Conservative: from here the adapter may already have the request.
+        if report is not None:report('started')
         return await self._call_unlocked('send_text',{'chat':job['provider_chat'],'text':payload['text'],
             'link_preview':payload['link_preview'],
             **({'send_id':job['id']} if re.fullmatch(r'send_[a-f0-9]{32}',job.get('id','')) else {}),
             'reply_provider_id':job.get('reply_provider_id'),'expires_at':job['expires_at']},sending=True)
     async def execute_operation(self,job):
         if not self.send_lock.locked():raise RuntimeError('send_gate_required')
+        report=job.get('_provider_phase')
+        if report is not None:report('waiting')
         if job.get('_preflight') is not None:await job['_preflight']()
         # Internal callable/DB metadata never enters the subprocess protocol.
         payload={key:value for key,value in job.items() if key in (
             'operation','parameters','provider_chat','provider_message_id','expires_at',
             'source_provider_chat','source_provider_message','registered_file_path','trusted_blob_directory',
             'file_digest','file_bytes','file_mime','file_name')}
+        if report is not None:report('started')
         return await self._call_unlocked('messenger_operation',payload,sending=True)
     async def chunks(self,source,descriptor):
         complete=False
@@ -408,25 +415,36 @@ class WhatsAppCollector(TelegramCollector):
         self.send_receipts=DurableSpool(events_spool.path/'send-receipts',validator=validate_send_receipt,
             max_bytes=4*1024**2,max_entries=1000,reserve_bytes=events_spool.reserve_bytes)
     async def heartbeat(self):
+        from .telegram_collector import database_errors
         while True:
             await asyncio.sleep(self.heartbeat_interval)
-            await asyncio.to_thread(self.archive.renew,self.account,self.owner,self.state.lease[1],self.lease_ttl)
-            self.policy=await asyncio.to_thread(self.state.policy)
+            await self.renew_lease()
+            await self.refresh_policy()
             await self.provider.set_policy(self.policy)
             if isinstance(self.provider,WhatsmeowProvider):
                 status=await asyncio.to_thread(self.provider.history_status)
-                if status is not None:await asyncio.to_thread(self.state.native_history_observation,status)
+                if status is not None:
+                    try:await asyncio.to_thread(self.state.native_history_observation,status)
+                    except database_errors():pass  # Diagnostics only; the next heartbeat reports again.
     async def commit_page_wa(self,page,chat,title,origin):
         if not isinstance(page,dict) or set(page)!={'messages','exhausted','pending'} or not isinstance(page['messages'],list) or len(page['messages'])>self.batch_size:
             raise RuntimeError('invalid_whatsapp_page')
         points=[]
         from datetime import datetime,timezone
         for e in page['messages']:
-            if e.get('chatId')!=chat: raise RuntimeError('provider_chat_mismatch')
+            if not isinstance(e,dict) or e.get('chatId')!=chat: raise RuntimeError('provider_chat_mismatch')
             item={'kind':'whatsapp_event','account':self.account,'event':{**e,'chatName':title},
                   'change':'message','observed_at':datetime.now(timezone.utc).isoformat(),'origin':origin}
-            await asyncio.to_thread(self.spool.put,item)
+            try:name=await asyncio.to_thread(self.spool.put,item)
+            except (ValueError,TypeError,KeyError):
+                # Deterministically unstorable. Keep traversing so one message
+                # cannot stall this chat's history or the account's capture.
+                self.invalid_messages+=1
+                with suppress(ValueError,TypeError,KeyError):points.append(position(e))
+                continue
             await asyncio.to_thread(self.state.apply,item)
+            # Committed directly; draining the same capture again would only repeat the work.
+            await asyncio.to_thread(self.spool.discard,name)
             points.append(position(e))
         return sorted(points)
     async def sync_chat(self,chat,kind,title):
@@ -480,11 +498,17 @@ class WhatsAppCollector(TelegramCollector):
         await asyncio.to_thread(self.state.status,'degraded' if gap or missing or unavailable else 'receiving',code)
         await asyncio.to_thread(self.state.phase,'history','waiting','history_scan_finished')
     async def reconcile_loop(self):
+        from .telegram_collector import database_errors
+        delay=self.database_retry
         while True:
             try:await self.sync_once()
             except (ProviderOperationError,ProviderUnavailable):
                 await asyncio.to_thread(self.state.status,'degraded','provider_temporarily_unavailable')
                 await asyncio.to_thread(self.state.phase,'history','error','provider_temporarily_unavailable')
+            except database_errors():
+                # Checkpoints are committed per chat; retry instead of reconnecting the provider.
+                await asyncio.sleep(delay); delay=min(60,delay*2); continue
+            delay=self.database_retry
             await asyncio.sleep(self.interval)
     async def drain_loop(self):
         import psycopg

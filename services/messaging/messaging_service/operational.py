@@ -22,7 +22,7 @@ PHASE_STATES = {
     'live_capture':{'starting','receiving','backlogged','paused','stopped'},
     'history':{'scanning','waiting','error','stopped'},
 }
-PHASE_REASONS = CONNECTION_ERRORS | {'provider_ready','capture_ready','capture_draining',
+PHASE_REASONS = CONNECTION_ERRORS | {'provider_ready','capture_ready','capture_draining','capture_quarantined',
     'collector_shutdown','history_scan','history_scan_finished','provider_temporarily_unavailable',
     'collector_starting','operator_resumed'}
 

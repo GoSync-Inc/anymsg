@@ -76,8 +76,12 @@ class Store:
         self._status_cache_lock=threading.Lock()
         self.files = files.resolve()
         self.public_url = public_url.rstrip('/')
+        # Keepalives and tcp_user_timeout turn a half-open connection into a
+        # prompt OperationalError instead of a call that outlives the lease.
         self.pool = ConnectionPool(dsn, min_size=1, max_size=6, timeout=5, open=True,
             kwargs={'row_factory': dict_row, 'connect_timeout': 5,
+                    'keepalives': 1, 'keepalives_idle': 30, 'keepalives_interval': 10,
+                    'keepalives_count': 3, 'tcp_user_timeout': 30000,
                     'options': '-c statement_timeout=5000 -c timezone=UTC'})
         self.pool.wait(timeout=10)
 
