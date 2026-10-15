@@ -45,6 +45,14 @@ Refresh MCP discovery after upgrading; the expanded manifest contains 24 tools.
 | `failed` | Locally rejected before invoking send | Inspect safe error code |
 | `unknown` | Timeout, interrupted dispatch or unverified receipt | Check history; never automatically send again |
 
+The 30-second provider timeout starts when the request leaves the collector.
+Waiting for the shared Telegram rate gate (history or media hit a flood wait)
+and the last-moment access check are bounded by the ten-minute expiry instead.
+A send that fails before reaching the provider, or that Telegram refuses with a
+flood wait, ends as `failed` with `send_not_started` (or `expired` with
+`send_expired`): nothing was sent, so a new action with the owner's approval is
+safe. `unknown` remains only for attempts the provider may have received.
+
 The provider payload is limited to 4000 UTF-16 units, with no automatic splitting.
 Plain is the default; Markdown and restricted HTML use the passive
 `preview_message` tool and require its exact `preview_digest` when queued.

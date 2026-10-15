@@ -438,11 +438,11 @@ def test_missing_send_receipt_is_unknown_and_has_no_second_attempt(receipt, monk
             return {'id': 'synthetic-send'}
         def preflight(self, job): return job
         def finish(self, job, status, provider_id=None, code=None): finishes.append((status, code))
-    original = asyncio.wait_for
-    async def observe(task, timeout):
-        timeouts.append(timeout)
-        return await original(task, timeout)
-    monkeypatch.setattr(asyncio, 'wait_for', observe)
+    original = asyncio.timeout
+    def observe(delay):
+        timeouts.append(delay)
+        return original(delay)
+    monkeypatch.setattr(asyncio, 'timeout', observe)
     async def provider(job):
         calls.append('native-send')
         return receipt
