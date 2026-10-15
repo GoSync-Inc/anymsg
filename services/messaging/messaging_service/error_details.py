@@ -14,7 +14,8 @@ def classified(error):
 
 
 EXPECTED={'invalid_utc_date':'ISO 8601 date-time with an offset, for example 2026-10-15T09:00:00Z',
-    'invalid_limit':'integer from 1 to 100; get_context limit and counts from 0/1 to 50'}
+    'invalid_limit':'integer from 1 to 100; get_context limit and counts from 0/1 to 50',
+    'transcript_requires_conversation_view':'view=conversation (the MCP default; REST and SDKs default to view=archive)'}
 
 
 def payload(error,operation='',request_id=None):

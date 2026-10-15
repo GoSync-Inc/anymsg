@@ -194,7 +194,7 @@ def test_mcp_and_rest_expose_queue_filters_and_local_dismissal(inbox):
     with TestClient(create_app(s,['testserver'])) as client:
         r=rpc(client,key,'list_chats',{'awaiting_reply':True,'order':'priority','only_questions':True})
         assert 'error' not in r.json()
-        assert r.json()['result']['structuredContent']['items'][0]['awaiting_reply_message_id']==mid
+        assert r.json()['result']['structuredContent']['items'][0]['awaiting_reply']['message_id']==mid
         r=client.post('/v1/dismiss_reply',headers={'Authorization':'Bearer '+key},
             json={'chat_id':chat,'message_id':mid,'expected_revision':1})
         assert r.status_code==200 and r.json()['dismissed'] is True

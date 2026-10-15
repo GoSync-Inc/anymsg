@@ -145,7 +145,8 @@ def presentation(rows,*,order='asc',include_system=False):
         sender=row.get('sender_name') or row.get('username') or row.get('sender')
         stamp=row.get('sent_at');stamp=stamp.isoformat() if hasattr(stamp,'isoformat') else str(stamp or '')
         scope_label=(f" · аккаунт {row.get('account','')} · чат {row.get('chat_title') or row.get('chat','')} ({row.get('chat','')})" if mixed_scope else '')
-        lines.append(f"{row['position']}. {actor}"+(f' ({sender})' if sender else '')+scope_label+f" · {stamp} · {row['id']}\n{row['display_text']}")
+        text=row['display_text']+(' […]' if row.get('display_text_truncated') else '')
+        lines.append(f"{row['position']}. {actor}"+(f' ({sender})' if sender else '')+scope_label+f" · {stamp} · {row['id']}\n{text}")
     if warnings:lines.extend('⚠ '+warning['message'] for warning in warnings)
     return {'view':'conversation','contract_version':1,'order':order,
         'position_scope':'returned_view','system_filter':'included' if include_system else 'known_system_hidden',

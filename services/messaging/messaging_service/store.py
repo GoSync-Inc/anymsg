@@ -251,6 +251,7 @@ class Store:
                     'update_orders':['event','sent_at_within_delivered_batch'],
                     'updates_exclude_channels':True,'updates_start_from':['beginning','now_creation_only'],'is_backfill':True,
                     'detail_default':'compact','details':['compact','full'],
+                    'message_details':['compact','full','transcript'],
                     'collector_operations':['connection','live_capture','history','media'],
                 'connection_failures':'durable_terminal_gate_and_capped_retry','status_cache_seconds':10,'status_refresh':True,
                     'people_candidates':['transliteration','same_sender_grouping'],
