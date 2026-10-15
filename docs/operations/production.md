@@ -146,6 +146,12 @@ operator changed a runtime or config after preparation, prepare a fresh reviewed
 candidate. The selected services stop before their replacements start; `up` uses
 `--no-build --pull never --no-deps --wait`. Databases and other Compose projects
 are not restarted. Routine promotion may briefly interrupt selected services.
+The messaging API, gateway and calendar API define Compose liveness healthchecks
+(their unauthenticated health routes, with an allowed Host, on loopback), so
+`--wait` also requires them to report healthy; the first probe runs about 30
+seconds after start. Collectors, workers, indexer and enrichment expose no
+container-local health signal and are verified only as running. Docker does not
+restart an unhealthy container; monitor `docker ps`/`health_status` events.
 
 `current.json` is written only after every selected replacement runs its prepared
 image. It records image/start verification; it is not a claim that every upstream

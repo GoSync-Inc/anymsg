@@ -244,6 +244,102 @@ def test_operator_backup_worker_has_narrow_privilege_exception_and_private_mount
     assert not any(flag in command for flag in ('-p', '--publish', '--privileged', '--pid', '--ipc'))
 
 
+HEALTHCHECKS = {'api': 'deploy/compose.yaml', 'gateway': 'deploy/compose.gateway.yaml',
+                'calendar-api': 'deploy/compose.calendar.yaml'}
+
+
+def healthcheck(name):
+    check = document(HEALTHCHECKS[name])['services'][name]['healthcheck']
+    # Exec form, image Python only: no shell, curl or writes on the read-only rootfs.
+    assert check['test'][:3] == ['CMD', 'python', '-c']
+    assert check['interval'] == '30s' and check['timeout'] == '10s' and check['retries'] == 3
+    assert check['start_period'] == '40s'
+    return check['test'][3], check['test'][4:]
+
+
+def probe(code, *arguments, **environment):
+    # A proxy in the environment must be ignored: probes stay on loopback.
+    env = {'PATH': '/usr/bin:/bin', 'HTTP_PROXY': 'http://127.0.0.1:9', 'http_proxy': 'http://127.0.0.1:9',
+           **environment}
+    result = subprocess.run([sys.executable, '-I', '-c', code, *arguments], env=env, capture_output=True, timeout=30)
+    assert result.stdout == b'' and result.stderr == b''
+    return result.returncode
+
+
+class HostBoundServer:
+    """Synthetic loopback server with the service's Host rule and health path."""
+    def __init__(self, path, allowed):
+        from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+        class Handler(BaseHTTPRequestHandler):
+            def do_GET(self):
+                ok = self.path == path and self.headers.get('Host') in allowed and 'Origin' not in self.headers
+                self.send_response(200 if ok else 403)
+                self.send_header('Content-Length', '2'); self.end_headers(); self.wfile.write(b'{}')
+            def log_message(self, *args):
+                pass
+        self.server = ThreadingHTTPServer(('127.0.0.1', 0), Handler)
+        self.port = self.server.server_address[1]
+        self.thread = threading.Thread(target=self.server.serve_forever, daemon=True)
+    def __enter__(self):
+        self.thread.start(); return self
+    def __exit__(self, *_):
+        self.server.shutdown(); self.server.server_close(); self.thread.join(timeout=5)
+
+
+def test_api_healthcheck_passes_the_real_host_boundary_and_fails_closed(seeded):
+    import socket
+    import uvicorn
+    from messaging_service.app import create_app
+    code, arguments = healthcheck('api')
+    assert arguments == []
+    store, *_ = seeded
+    listener = socket.socket(); listener.bind(('127.0.0.1', 0)); listener.listen()
+    port = listener.getsockname()[1]
+    server = uvicorn.Server(uvicorn.Config(create_app(store, ['anymsg.example.invalid', f'127.0.0.1:{port}']),
+                                           log_level='warning', access_log=False))
+    thread = threading.Thread(target=server.run, kwargs={'sockets': [listener]}, daemon=True); thread.start()
+    try:
+        for _ in range(100):
+            if server.started:
+                break
+            threading.Event().wait(.05)
+        settings = {'PROBE_BIND': '0.0.0.0', 'PROBE_PORT': str(port)}
+        assert probe(code, PROBE_ALLOWED_HOSTS='anymsg.example.invalid,other.invalid', **settings) == 0
+        # A Host the boundary does not allow is a failed probe, never a pass.
+        assert probe(code, PROBE_ALLOWED_HOSTS='other.invalid,anymsg.example.invalid', **settings) == 1
+    finally:
+        server.should_exit = True; thread.join(timeout=10); listener.close()
+    assert probe(code, PROBE_ALLOWED_HOSTS='anymsg.example.invalid', **settings) == 1
+
+
+def test_gateway_healthcheck_uses_the_public_host_and_configured_port():
+    code, arguments = healthcheck('gateway')
+    command = document('deploy/compose.gateway.yaml')['services']['gateway']['command']
+    assert arguments == [command[command.index('--public-url') + 1], command[command.index('--port') + 1]]
+    with HostBoundServer('/healthz', {'gateway.example.invalid'}) as server:
+        assert probe(code, 'https://gateway.example.invalid/deedkit', str(server.port)) == 0
+        assert probe(code, 'https://other.example.invalid', str(server.port)) == 1
+    assert probe(code, 'https://gateway.example.invalid', str(server.port)) == 1
+
+
+@pytest.mark.parametrize('configured', [True, False])
+def test_calendar_healthcheck_uses_the_service_port_bind_and_allowed_hosts(tmp_path, configured):
+    code, arguments = healthcheck('calendar-api')
+    assert arguments == []
+    allowed = set()
+    with HostBoundServer('/health', allowed) as server:
+        # Without allowed_hosts the service accepts localhost/127.0.0.1 with its port.
+        allowed.add('calendar-api:13232' if configured else f'127.0.0.1:{server.port}')
+        settings = {'dsn': 'postgresql://synthetic-secret.invalid/calendar', 'port': server.port, 'bind': '0.0.0.0',
+                    **({'allowed_hosts': ['calendar-api:13232', 'localhost:13232']} if configured else {})}
+        (tmp_path / 'service').mkdir(mode=0o700)
+        (tmp_path / 'service/gateway.json').write_text(json.dumps(settings))
+        assert probe(code, FCS_DATA_DIR=str(tmp_path)) == 0
+        allowed.clear()
+        assert probe(code, FCS_DATA_DIR=str(tmp_path)) == 1
+    assert probe(code, FCS_DATA_DIR=str(tmp_path / 'missing')) == 1
+
+
 def test_publish_workflow_guards_version_ref_and_uses_verified_artifact_oidc():
     checks = document('.github/workflows/checks.yml')
     verify = checks['jobs']['verify']
