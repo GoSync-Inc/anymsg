@@ -340,7 +340,39 @@ def test_calendar_healthcheck_uses_the_service_port_bind_and_allowed_hosts(tmp_p
     assert probe(code, FCS_DATA_DIR=str(tmp_path / 'missing')) == 1
 
 
-def test_publish_workflow_guards_version_ref_and_uses_verified_artifact_oidc():
+def synthetic_release_clone(tmp_path):
+    """A local clone: v1.2.3 is on origin/main, v1.2.5 only on an unmerged branch."""
+    clone = tmp_path / 'clone'
+    env = {'PATH': '/usr/bin:/bin', 'HOME': str(tmp_path), 'GIT_CONFIG_NOSYSTEM': '1',
+           'GIT_AUTHOR_NAME': 'Synthetic', 'GIT_AUTHOR_EMAIL': 'synthetic@example.invalid',
+           'GIT_COMMITTER_NAME': 'Synthetic', 'GIT_COMMITTER_EMAIL': 'synthetic@example.invalid'}
+    def git(*args):
+        return subprocess.run(['git', '-C', str(clone), *args], env=env, check=True, capture_output=True,
+                              text=True, timeout=30).stdout.strip()
+    clone.mkdir()
+    git('init', '--quiet', '--initial-branch=main')
+    commits = {}
+    for name in ('released', 'main-head'):
+        git('commit', '--quiet', '--allow-empty', '-m', name); commits[name] = git('rev-parse', 'HEAD')
+    git('update-ref', 'refs/remotes/origin/main', commits['main-head'])
+    git('tag', 'v1.2.3', commits['released'])
+    git('checkout', '--quiet', '-b', 'unmerged', commits['released'])
+    git('commit', '--quiet', '--allow-empty', '-m', 'unmerged'); commits['unmerged'] = git('rev-parse', 'HEAD')
+    git('tag', 'v1.2.5', commits['unmerged'])
+    return clone, commits
+
+
+def run_release_guard(guard, ref, version, release, sha=None):
+    clone, commits = release
+    # github.sha of a tag dispatch is the tag's commit; default to that.
+    tagged = {'1.2.3': commits['released'], '1.2.5': commits['unmerged']}.get(version, commits['main-head'])
+    env = {'PATH': '/usr/bin:/bin', 'HOME': str(clone.parent), 'GIT_CONFIG_NOSYSTEM': '1',
+           'VERSION': version, 'REF': ref, 'SHA': sha or tagged}
+    return subprocess.run(['bash', '-e', '-c', guard], cwd=clone, env=env, capture_output=True, timeout=30)
+
+
+def test_publish_workflow_guards_version_ref_and_uses_verified_artifact_oidc(tmp_path):
+    release_clone = synthetic_release_clone(tmp_path)
     checks = document('.github/workflows/checks.yml')
     verify = checks['jobs']['verify']
     steps = verify['steps']
@@ -385,11 +417,13 @@ def test_publish_workflow_guards_version_ref_and_uses_verified_artifact_oidc():
         assert any(step.get('with', {}).get('name') == artifact for step in publish['steps'])
         assert not any('checkout' in step.get('uses', '') for step in publish['steps'])
         assert not any('secrets.' in json.dumps(step) or 'NODE_AUTH_TOKEN' in json.dumps(step) for step in publish['steps'])
-        guard = jobs['tag']['steps'][0]['run']
-        allowed = ['refs/tags/v1.2.3'] + (['refs/heads/main'] if kind == 'npm' else [])
+        # Changed assertions (name kept as the Tiden identity): the guard is found by
+        # name, runs like a GitHub step (bash -e) in a synthetic clone whose release
+        # tag is on main, and npm from refs/heads/main is no longer asserted allowed.
+        guard = next(step for step in jobs['tag']['steps'] if step.get('name') == 'Require the version tag')['run']
+        allowed = ['refs/tags/v1.2.3']
         for ref in [*allowed, 'refs/heads/other', 'refs/tags/v1.2.4']:
-            result = subprocess.run(['/bin/sh', '-c', guard], env={'VERSION': '1.2.3', 'REF': ref},
-                                    capture_output=True, timeout=5)
+            result = run_release_guard(guard, ref, '1.2.3', release_clone)
             assert (result.returncode == 0) == (ref in allowed), (kind, ref)
         if kind == 'npm':
             assert jobs['checks']['with']['source_ref'] == 'refs/tags/v${{ inputs.version }}'
