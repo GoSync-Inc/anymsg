@@ -119,8 +119,13 @@ class Tickets:
             "notice": "Temporary bearer link; current access and expiry are checked when downloading. Do not share or log.",
         }
 
-    def check(self, row):
-        if row["expires"] <= time.time():
+    def check(self, row, *, admission=False):
+        """Recheck the ticket's current policy and credential binding.
+
+        The TTL bounds admission only: a transfer that has started may outlive
+        it, but never a revocation of the principal, tool, backend or key.
+        """
+        if admission and row["expires"] <= time.time():
             raise Denied("not_found", 404)
         snapshot, agent, _ = self.policy.authorize_digest(row["key_digest"], "messages_get_attachment")
         if (
@@ -154,7 +159,7 @@ class Tickets:
             if row is None:
                 raise Denied("not_found", 404)
             try:
-                self.check(row)
+                self.check(row, admission=True)
             except Denied:
                 raise Denied("not_found", 404) from None
             if request.headers.get("range") is not None:

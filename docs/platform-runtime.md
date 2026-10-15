@@ -67,11 +67,17 @@ digests, receipts, expected revisions and unknown outcomes pass through unchange
 A transport failure after a mutation dispatch is explicitly reported as unknown;
 the gateway does not resend it or invent a new request ID.
 
-Original files use bounded, short-lived gateway bearer links. SHA/length are checked
-while streaming. Gateway revocation is rechecked every chunk and by a 250 ms watcher;
-backend access is revalidated with the authenticated backend grant's HEAD route at
-one-second intervals with a two-second timeout. Failure aborts the stream, including
-a stalled client. Restart invalidates temporary links. Never log download paths,
+Original files use bounded, short-lived gateway bearer links. Their expiry bounds
+when a download may start, not how long a started transfer may run. SHA/length are
+checked while streaming. Gateway revocation is rechecked every chunk and by a 250 ms
+watcher; backend access is revalidated with the authenticated backend grant's HEAD
+route at one-second intervals with a two-second timeout. Messaging records the
+binding of each grant whose GET it admitted. While that GET is sending, and for ten
+minutes afterwards (relay buffers may still be draining to a slow client), HEAD
+checks the current key, download permission, scope version and file instead of the
+grant's 120-second TTL. A new GET always needs an unexpired grant. This record is
+process-local; a messaging restart ends those transfers anyway. Failure aborts the
+stream, including a stalled client. Restart invalidates temporary links. Never log download paths,
 credentials, source content or private filenames at the reverse proxy.
 
 CI retains the existing messaging checks and adds module JUnit reports with qualified

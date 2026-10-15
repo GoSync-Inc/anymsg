@@ -60,7 +60,7 @@ def test_download_hash_scope_and_revocation(seeded):
     s,a,b=seeded
     item=s.get_attachment(b,'demo-file-1')
     grant=item['download_url'].rsplit('/',1)[-1]
-    metadata,path=s.download(grant)
+    metadata,path,_=s.download(grant)
     assert hashlib.sha256(path.read_bytes()).hexdigest()==item['sha256']
     with pytest.raises(APIError): s.download(item['sha256'])
     s.revoke(b)
@@ -81,6 +81,85 @@ def test_grant_expiry_and_missing_original(seeded):
         path.unlink()
         with pytest.raises(APIError,match='attachment_unavailable'): s.download(grant)
     finally: path.write_bytes(original)
+
+
+def test_started_transfer_outlives_grant_ttl_but_not_revocation(seeded):
+    s,a,b=seeded
+    def admitted(token):
+        grant=s.get_attachment(token,'demo-file-1')['download_url'].rsplit('/',1)[-1]
+        return grant,s.download(grant)[2]
+    grant,binding=admitted(a)
+    other,other_binding=admitted(b)
+    with s.pool.connection() as c:
+        c.execute("UPDATE download_grants SET expires_at=now()-interval '1 second'")
+    s.get_attachment(a,'demo-file-1')  # Its cleanup deletes the expired grant rows.
+    with s.pool.connection() as c:
+        assert c.execute('SELECT 1 FROM download_grants WHERE digest=%s',(digest(grant),)).fetchone() is None
+    with pytest.raises(APIError,match='not_found'): s.download(grant)  # No new transfer.
+    row,path,again=s.download(grant,active=binding)
+    assert row['id']=='demo-file-1' and path.is_file() and again==binding
+    with s.pool.connection() as c:
+        c.execute("UPDATE attachments SET active=false WHERE id='demo-file-1'")
+    with pytest.raises(APIError,match='not_found'): s.download(grant,active=binding)
+    with s.pool.connection() as c:
+        c.execute("UPDATE attachments SET active=true WHERE id='demo-file-1'")
+    assert s.download(grant,active=binding)[1].is_file()
+    # The file stays visible to the narrower scope, but the admitted scope version is stale.
+    s.set_access('agent-a',chats=['telegram-demo-chat'])
+    assert s.get_attachment(a,'demo-file-1')['status']=='ready'
+    with pytest.raises(APIError,match='not_found'): s.download(grant,active=binding)
+    assert s.download(other,active=other_binding)[1].is_file()
+    s.revoke(b)
+    with pytest.raises(APIError,match='not_found'): s.download(other,active=other_binding)
+
+
+def test_head_revalidates_a_started_transfer_after_grant_expiry(seeded, monkeypatch):
+    from messaging_service.app import ActiveDownloads
+    s,a,b=seeded
+    auth={'Authorization':'Bearer '+b}
+    def expire():
+        with s.pool.connection() as c:
+            c.execute("UPDATE download_grants SET expires_at=now()-interval '1 second'")
+    with TestClient(create_app(s,['testserver'])) as client:
+        def link():
+            return client.post('/v1/get_attachment',headers=auth,json={'attachment_id':'demo-file-1'}).json()['download_url']
+        started,unused=link(),link()
+        assert client.get(started).status_code==200
+        expire()
+        # A relay may still be delivering the finished transfer's buffered bytes.
+        assert client.head(started).status_code==200
+        assert client.get(started).status_code==404
+        assert client.head(unused).status_code==404
+        monkeypatch.setattr(ActiveDownloads,'LINGER',0)
+        finished=link()
+        assert client.get(finished).status_code==200
+        expire()
+        assert client.head(finished).status_code==404
+        s.revoke(b)
+        assert client.head(started).status_code==404
+
+
+def test_active_download_bindings_cover_running_and_recent_transfers(monkeypatch):
+    from messaging_service import app as module
+    clock=[1000.0]
+    monkeypatch.setattr(module.time,'monotonic',lambda:clock[0])
+    transfers=module.ActiveDownloads()
+    binding=('key-digest',1,'file')
+    done=transfers.start('g'*43,binding)
+    clock[0]+=86400
+    assert transfers.binding('g'*43)==binding  # Running: no time limit.
+    done()
+    clock[0]+=module.ActiveDownloads.LINGER-1
+    assert transfers.binding('g'*43)==binding
+    clock[0]+=2
+    assert transfers.binding('g'*43) is None and transfers.binding('h'*43) is None
+    monkeypatch.setattr(module.ActiveDownloads,'LIMIT',3)
+    transfers.start('r'*43,binding)
+    for n in range(5):
+        transfers.start(str(n)*43,binding)()
+    assert len(transfers.entries)==3
+    assert transfers.binding('r'*43)==binding and transfers.binding('4'*43)==binding
+    assert transfers.binding('0'*43) is None
 
 
 def test_independent_consumers_replay_and_get_does_not_ack(seeded):

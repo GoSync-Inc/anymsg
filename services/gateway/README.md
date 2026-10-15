@@ -60,10 +60,14 @@ transfers each have a 10-second deadline.
 Read back the upload's next offset after an uncertain response; writes are not retried.
 
 Original files are streamed through bounded, short-lived bearer tickets with separate
-connection pools. URLs cannot select another origin or path. Tickets recheck current
-local policy and credential binding, and poll the backend's existing HEAD download
-grant check during long transfers. Revocation terminates an active response; a partial
-file is never converted to a successful error JSON. Clients should verify the advertised
+connection pools. URLs cannot select another origin or path. A ticket's expiry limits
+when a download may start; a started transfer may outlive it. Throughout the transfer
+the gateway rechecks current local policy and credential binding, and polls the
+backend's existing HEAD download grant check. For a transfer it is serving, the
+messaging backend answers that HEAD from the current key, scope and file instead of
+the grant's 120-second expiry; upgrade it first, or long transfers still end there.
+Revocation terminates an active response; a partial file is never converted to a
+successful error JSON. Clients should verify the advertised
 length and SHA-256. Do not share or log these bearer URLs. Access logging is disabled.
 
 Deployment profiles in `config/profiles/` select managed or external backends. Run

@@ -50,7 +50,7 @@ def test_unexpected_http_failures_have_one_safe_response_and_one_capture(channel
             calls.append('download')
             if channel == 'download_stat':
                 # Exercise the real FileResponse stat failure before headers.
-                return {'filename': PRIVATE, 'digest': 'a' * 64}, tmp_path / 'missing-original'
+                return {'filename': PRIVATE, 'digest': 'a' * 64}, tmp_path / 'missing-original', ()
             raise failure
 
     monkeypatch.setattr(gateway, 'capture_error', lambda error, code: captures.append((error, code)))

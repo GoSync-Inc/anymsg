@@ -91,6 +91,55 @@ def bearer(headers):
     return token
 
 
+class ActiveDownloads:
+    """Download grants with an admitted GET, used only by HEAD revalidation.
+
+    A running transfer may outlive its grant's TTL. A relaying gateway keeps
+    checking access with HEAD, which then validates the binding admitted with
+    the GET instead of the TTL (Store.download). An entry lasts while a GET is
+    sending and LINGER seconds after, because a slow client can still be
+    receiving bytes buffered in the relay once this server has finished. A new
+    GET always needs an unexpired grant. Process-local: a restart ends these
+    transfers anyway.
+    """
+    LINGER=600
+    LIMIT=4096
+
+    def __init__(self):
+        self.entries={}
+
+    def binding(self, grant):
+        entry=self.entries.get(digest(grant))
+        if entry and (entry['streams'] or time.monotonic()<entry['until']):return entry['binding']
+        return None
+
+    def start(self, grant, binding):
+        now=time.monotonic()
+        for k in [k for k,v in self.entries.items() if not v['streams'] and v['until']<=now]:
+            del self.entries[k]
+        # Oldest finished transfers go first; running ones are never dropped.
+        idle=[k for k,v in self.entries.items() if not v['streams']]
+        for k in idle[:max(0,len(self.entries)+1-self.LIMIT)]:
+            del self.entries[k]
+        entry=self.entries.setdefault(digest(grant),{'binding':binding,'streams':0,'until':now})
+        entry['streams']+=1
+        def done():
+            entry['streams']-=1
+            entry['until']=time.monotonic()+self.LINGER
+        return done
+
+
+class TrackedFileResponse(FileResponse):
+    """Report the end of a transfer however it ends."""
+    def __init__(self, path, done, **kwargs):
+        super().__init__(path,**kwargs)
+        self.done=done
+
+    async def __call__(self, scope, receive, send):
+        try:await super().__call__(scope,receive,send)
+        finally:self.done()
+
+
 class Boundary:
     """One HTTP boundary; secrets and temporary file URLs never enter access logs."""
     def __init__(self, app, store, allowed_hosts, models=None):
@@ -755,10 +804,17 @@ def create_app(store: Store, allowed_hosts: list[str]):
             raise
         return JSONResponse(result)
 
+    transfers=ActiveDownloads()
     async def download(request):
-        row,path=await run_in_threadpool(store.download,request.path_params['grant'])
-        return FileResponse(path,media_type='application/octet-stream',filename=row['filename'],
-                            content_disposition_type='attachment',headers={'X-Content-SHA256':row['digest']})
+        grant=request.path_params['grant']
+        if request.method=='HEAD':
+            # A relaying gateway revalidates its running transfer this way.
+            row,path,_=await run_in_threadpool(store.download,grant,active=transfers.binding(grant))
+            return FileResponse(path,media_type='application/octet-stream',filename=row['filename'],
+                                content_disposition_type='attachment',headers={'X-Content-SHA256':row['digest']})
+        row,path,binding=await run_in_threadpool(store.download,grant)
+        return TrackedFileResponse(path,transfers.start(grant,binding),media_type='application/octet-stream',
+            filename=row['filename'],content_disposition_type='attachment',headers={'X-Content-SHA256':row['digest']})
 
     models={name:tool.fn_metadata.arg_model for name,tool in mcp._tool_manager._tools.items()}
     for tool in mcp._tool_manager._tools.values():tool.parameters['additionalProperties']=False

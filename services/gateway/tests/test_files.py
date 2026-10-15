@@ -1,3 +1,4 @@
+import asyncio
 import hashlib
 import json
 import time
@@ -18,6 +19,8 @@ def setup(
     redirect=False,
     public="http://testserver",
     download_origin="https://archive.example.test",
+    body=None,
+    head=None,
 ):
     path = tmp_path / "policy.json"
     key = tmp_path / "backend.key"
@@ -61,14 +64,23 @@ def setup(
             )
         assert request.url.host == "messaging-api"
         assert request.url.path == "/v1/download/" + "a" * 43
-        return (
-            httpx.Response(302, headers={"location": "https://foreign.invalid"})
-            if redirect
-            else httpx.Response(200, stream=httpx.ByteStream(data))
-        )
+        if redirect:
+            return httpx.Response(302, headers={"location": "https://foreign.invalid"})
+        if request.method == "HEAD":
+            return httpx.Response(head() if head else 200)
+        return httpx.Response(200, stream=Slow(body(data)) if body else httpx.ByteStream(data))
 
     app = create_app(path, public, transports={"messaging": httpx.MockTransport(handler)})
     return app, path, data, requests
+
+
+class Slow(httpx.AsyncByteStream):
+    def __init__(self, chunks):
+        self.chunks = chunks
+
+    async def __aiter__(self):
+        async for chunk in self.chunks:
+            yield chunk
 
 
 def issue(client):
@@ -146,3 +158,45 @@ def test_explicit_proxy_prefixes_preserve_public_ticket_and_canonical_upstream(t
         assert response.content == data
         assert seen[-1].url.path == "/v1/download/" + "a" * 43
         assert client.get("/healthz", headers={"Origin": "http://testserver/deedkit"}).status_code == 403
+
+
+def test_ticket_ttl_bounds_admission_not_a_started_transfer(tmp_path):
+    tickets = []
+
+    async def body(data):
+        yield data[:65536]
+        for row in tickets[0].entries.values():
+            row["expires"] = time.time() - 1  # The TTL passes while bytes are flowing.
+        await asyncio.sleep(1.4)  # Several watcher ticks and one backend HEAD.
+        yield data[65536:]
+
+    app, _, data, requests = setup(tmp_path, body=body)
+    tickets.append(app.state.tickets)
+    with TestClient(app) as client:
+        url = issue(client).json()["download_url"]
+        assert client.get(url).content == data
+        assert client.get(url).status_code == 404  # An expired ticket starts nothing new.
+    assert [r.method for r in requests].count("GET") == 1
+    assert "HEAD" in [r.method for r in requests]
+
+
+def test_started_transfer_still_stops_on_policy_revocation(tmp_path):
+    policies = []
+
+    async def body(data):
+        yield data[:65536]
+        value = json.loads(policies[0].read_text())
+        value["revision"] += 1
+        value["principals"][0]["enabled"] = False
+        policies[0].write_text(json.dumps(value))
+        await asyncio.sleep(5)
+        yield data[65536:]
+
+    app, path, data, _ = setup(tmp_path, body=body)
+    policies.append(path)
+    with TestClient(app, raise_server_exceptions=False) as client:
+        url = issue(client).json()["download_url"]
+        started = time.monotonic()
+        response = client.get(url)
+        assert time.monotonic() - started < 2
+        assert response.status_code == 200 and len(response.content) < len(data)
