@@ -1,0 +1,12 @@
+# Optional connection to an existing reverse proxy and existing HTTP backends.
+# The proxy must strip only the configured public prefix and retain Host.
+services:
+  gateway:
+    networks:
+      integration: {}
+      existing-ingress:
+        aliases: [deedkit-gateway]
+networks:
+  existing-ingress:
+    external: true
+    name: ${DEEDKIT_INGRESS_NETWORK:?Set an existing trusted proxy network}

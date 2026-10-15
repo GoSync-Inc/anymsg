@@ -14,6 +14,14 @@ projects and services. Stop never removes volumes. Mark an existing backend as
 provider session. The phone-only profile does not require messaging. Telegram calls
 use the existing session owner's broker through the optional calls-telegram overlay.
 
+For an existing reverse proxy, select the `existing-ingress` connector and set
+`DEEDKIT_INGRESS_NETWORK` in the private gateway environment. The configured public
+URL may include a fixed path prefix such as `/deedkit`; the proxy strips that
+prefix, preserves Host and disables access logging of temporary file URLs.
+The private messaging `download_origin` can likewise include its existing prefix.
+Only that exact prefix is removed from verified download grants; arbitrary paths
+or redirects are never forwarded.
+
 The launcher plan is deployment selection. The private gateway policy is the
 authority for exposure: its exact profile tool names, principal grants and backend
 permissions must all allow an operation. An empty profile stays empty. A disabled
