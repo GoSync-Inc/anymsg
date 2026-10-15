@@ -59,6 +59,11 @@ unchanged as `after`. Editing the anchor can invalidate it. `fuzzy: true` is
 an explicit fallback for a single word of 3–64 characters, used only when the
 scoped primary query has no matches, with at most 200 ranked candidates.
 `match_type` distinguishes morphology, literal and approximate matches.
+For `all` and `phrase` message queries, relevance ranks three tiers: the typed
+query as a case-insensitive substring, then its words adjacent and in order in
+any word form, then other matches; cover density orders each tier. Stemming can
+merge different words (договор/договориться), so an exact phrase stays above
+scattered morphology-only matches. `web` and file search ranking are unchanged.
 
 `compact: true` omits full message bodies while retaining snippets and identity.
 `body_chars` bounds returned bodies; `include_coverage: false` suppresses the

@@ -107,7 +107,7 @@ def search(store,c,p,query='',account='',chat='',sender='',from_time='',to_time=
         has_primary=c.execute('WITH '+plan.cte+' SELECT 1 FROM messages m '+extra_join+' CROSS JOIN search_query q WHERE '+
             ' AND '.join(clauses)+' AND '+plan.predicate('m')+' LIMIT 1',[*plan.params,*args]).fetchone()
         fuzzy_used=not bool(has_primary)
-    score=plan.rank('m');match_type=plan.match_type('m')
+    score=plan.rank('m','m.body');match_type=plan.match_type('m')
     if fuzzy_used:
         # Fixed threshold, server-side candidate cap and statement timeout.
         # No silent union of approximate and exact results.
