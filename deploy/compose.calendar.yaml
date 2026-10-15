@@ -30,6 +30,8 @@ services:
     ports: ["127.0.0.1:13232:13232"]
     restart: unless-stopped
     read_only: true
+    user: "10001:10001"
+    cpu_shares: 512
     cap_drop: [ALL]
     security_opt: [no-new-privileges:true]
     tmpfs: ["/tmp:size=32m,noexec,nosuid"]
@@ -51,6 +53,8 @@ services:
     networks: [calendar-backend, provider-egress]
     restart: unless-stopped
     read_only: true
+    user: "10001:10001"
+    cpu_shares: 512
     cap_drop: [ALL]
     security_opt: [no-new-privileges:true]
     tmpfs: ["/tmp:size=32m,noexec,nosuid"]

@@ -13,6 +13,8 @@ services:
     networks: [integration]
     restart: unless-stopped
     read_only: true
+    user: "10001:10001"
+    cpu_shares: 512
     cap_drop: [ALL]
     security_opt: [no-new-privileges:true]
     tmpfs: ["/tmp:size=16m,noexec,nosuid"]

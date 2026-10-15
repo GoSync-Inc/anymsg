@@ -5,7 +5,7 @@ import pytest
 
 ROOT = Path(__file__).resolve().parents[2]
 spec = importlib.util.spec_from_file_location(
-    "deedkit_launcher", ROOT / "scripts/platform.py"
+    "deedkit_launcher", ROOT / "scripts/deedkit.py"
 )
 launcher = importlib.util.module_from_spec(spec)
 spec.loader.exec_module(launcher)

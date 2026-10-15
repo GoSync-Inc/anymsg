@@ -36,7 +36,7 @@ file is never converted to a successful error JSON. Clients should verify the ad
 length and SHA-256. Do not share or log these bearer URLs. Access logging is disabled.
 
 Deployment profiles in `config/profiles/` select managed or external backends. Run
-`python scripts/platform.py resolve --profile config/profiles/existing-readers.toml --json`
+`python scripts/deedkit.py resolve --profile config/profiles/existing-readers.toml --json`
 from the repository root to inspect a plan without starting a process. Resolution is
 not a health check or proof that the private policy grants the listed profile tools.
 
