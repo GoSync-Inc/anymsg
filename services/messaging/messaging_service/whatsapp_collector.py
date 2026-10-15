@@ -20,7 +20,7 @@ from .collector_state import CaptureSpool,CollectorState,session_lock,validate_c
 from .store import Store
 from .telegram_collector import TelegramCollector,ProviderUnavailable,private_json
 from .operational import CONNECTION_ERRORS,MEDIA_ERRORS
-from .storage_admission import MEDIA_RESERVE_BYTES
+from .media_policy import MEDIA_POLICY_FIELDS,configure_media_policy
 
 
 class ProviderOperationError(RuntimeError): pass
@@ -47,8 +47,8 @@ def configuration(path):
     cfg=private_json(path)
     fields={'enabled','account','expected_wid','permit_file','session_directory','events_directory',
         'pages_directory','chromium_executable','node_executable','batch_size','scan_interval_seconds',
-        'max_media_bytes','disk_reserve_bytes','media_disk_reserve_bytes','max_dialogs',
-        'provider','native_executable'}
+        'max_media_bytes','disk_reserve_bytes','max_dialogs',
+        'provider','native_executable'}|MEDIA_POLICY_FIELDS
     if not isinstance(cfg,dict) or set(cfg)-fields: raise ValueError('invalid_collector_config')
     if cfg.get('enabled') is not True: raise RuntimeError('collector_disabled')
     if not re.fullmatch(r'[a-zA-Z0-9_.-]{1,64}',cfg.get('account','')): raise ValueError('invalid_account')
@@ -67,9 +67,7 @@ def configuration(path):
             ('max_dialogs',2000,1,10000)]:
         value=cfg.setdefault(name,default)
         if type(value) is not int or not lo<=value<=hi: raise ValueError('invalid_'+name)
-    value=cfg.setdefault('media_disk_reserve_bytes',max(MEDIA_RESERVE_BYTES,cfg['disk_reserve_bytes']))
-    if type(value) is not int or not cfg['disk_reserve_bytes']<=value<=100*1024**3:
-        raise ValueError('invalid_media_disk_reserve_bytes')
+    configure_media_policy(cfg)
     permit=private_json(cfg['permit_file'])
     if not isinstance(permit,dict) or permit.get('account')!=cfg['account'] or permit.get('expected_wid')!=cfg['expected_wid'] or permit.get('prior_clients_stopped') is not True:
         raise RuntimeError('session_handover_not_confirmed')
@@ -521,11 +519,16 @@ async def run_config(path):
             with store.pool.connection() as c:
                 row=c.execute('SELECT platform,synthetic FROM accounts WHERE id=%s',(cfg['account'],)).fetchone()
                 if not row or row['platform']!='whatsapp' or row['synthetic']:raise RuntimeError('live_account_required')
+            live_writer=(BlobWriter(store.files,max_bytes=cfg['media_live_max_bytes'],
+                reserve_bytes=cfg['media_live_disk_reserve_bytes'])
+                if cfg['media_live_disk_reserve_bytes'] is not None else None)
             worker=WhatsAppCollector(Archive(store),cfg['account'],provider_for_config(cfg,path,lock_fd),
                 CaptureSpool(cfg['pages_directory'],reserve_bytes=cfg['disk_reserve_bytes']),
                 events_spool=CaptureSpool(cfg['events_directory'],reserve_bytes=cfg['disk_reserve_bytes']),
                 batch_size=cfg['batch_size'],interval=cfg['scan_interval_seconds'],max_dialogs=cfg['max_dialogs'],
                 owner='whatsapp-'+secrets.token_hex(12),
+                media_prefetch_days=cfg['media_prefetch_days'],live_writer=live_writer,
+                live_window_seconds=cfg['media_live_window_seconds'],
                 writer=BlobWriter(store.files,max_bytes=cfg['max_media_bytes'],reserve_bytes=cfg['media_disk_reserve_bytes']))
             loop=asyncio.get_running_loop()
             for sig in [signal.SIGTERM,signal.SIGINT]: loop.add_signal_handler(sig,worker.stopping.set)

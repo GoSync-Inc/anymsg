@@ -10,7 +10,7 @@ const UPLOAD_MAX_BYTES = 32 * 1024 * 1024;
 const METHODS = Object.freeze([
   'capabilities', 'list_chats', 'search', 'search_people', 'search_files',
   'get_messages', 'get_context', 'get_sync_status', 'resolve_reference',
-  'get_attachment', 'get_file_text', 'get_file_segments', 'get_file_occurrences',
+  'get_attachment', 'request_file_download', 'get_file_text', 'get_file_segments', 'get_file_occurrences',
   'get_updates', 'dismiss_reply', 'ack_updates', 'get_reviews', 'record_review',
   'preview_message','send_message','get_send_status',
   'list_messenger_operations','preview_messenger_operation','execute_messenger_operation','get_messenger_operation',
@@ -38,6 +38,7 @@ const SAFE_ERRORS = new Set([
   'subscription_access_changed','invalid_subscription_state',
   'invalid_upload','invalid_upload_chunk','upload_limit','upload_capacity',
   'upload_expired','upload_offset_conflict','upload_hash_mismatch',
+  'media_request_limit',
 ]);
 
 const UPLOAD_FIELDS = Object.freeze({
@@ -309,6 +310,10 @@ export class AnyMsgClient {
     if (Object.hasOwn(MESSENGER_FIELDS,method)) messengerArguments(method,arguments_);
     if (Object.hasOwn(SUBSCRIPTION_FIELDS,method)) subscriptionArguments(method,arguments_);
     if (Object.hasOwn(UPLOAD_FIELDS,method)) uploadArguments(method,arguments_);
+    if (method==='request_file_download' && (!plainObject(arguments_) || !operationJson(arguments_) ||
+        Reflect.ownKeys(arguments_).length!==1 || !Object.hasOwn(arguments_,'attachment_id') ||
+        typeof arguments_.attachment_id!=='string' || [...arguments_.attachment_id].length<1 ||
+        [...arguments_.attachment_id].length>256)) throw new TypeError('Invalid download request arguments');
     let body;
     try { body = JSON.stringify(arguments_); } catch { throw new TypeError('Arguments must be JSON serializable'); }
     const requestMaximum=method==='upload_file_chunk'?UPLOAD_BODY_BYTES:16384;
@@ -406,6 +411,7 @@ export class AnyMsgClient {
   getSyncStatus(args = {}) { return this.call('get_sync_status', args); }
   resolveReference(args) { return this.call('resolve_reference', args); }
   getAttachment(args) { return this.call('get_attachment', args); }
+  requestFileDownload(args) { return this.call('request_file_download', args); }
   getFileText(args) { return this.call('get_file_text', args); }
   getFileSegments(args) { return this.call('get_file_segments', args); }
   getFileOccurrences(args) { return this.call('get_file_occurrences', args); }

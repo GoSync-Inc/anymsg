@@ -92,14 +92,37 @@ def people_join():
 def resolve_alias(c,p,account,provider_chat_id):
     """Return one visible original chat; never derive/replace an opaque message ID."""
     identity=personal_id(provider_chat_id)
-    if not identity:return None
-    cte,args=visible_cte(p);where,chat_args=scope_filter(p,'c',chat_column='id')
-    rows=c.execute('WITH '+cte+''' SELECT DISTINCT c.id,c.account,c.title,c.provider_chat,a.platform
+    if not identity or account not in p['accounts']:return None
+    source_where,source_args=scope_filter(p,'m')
+    where,chat_args=scope_filter(p,'c',chat_column='id')
+    # A common owner pair can have thousands of source observations across
+    # groups. Deduplicate exact account/identity candidates before proving one
+    # visible source and checking account-wide conflicts. Materialize normalized
+    # target chats once, rather than per chat × evidence join combination.
+    rows=c.execute('''WITH candidate_pairs AS MATERIALIZED (
+        SELECT DISTINCT pn,lid FROM whatsapp_identity_observations
+        WHERE account=%s AND (pn=%s OR lid=%s)
+        ), verified_pairs AS MATERIALIZED (
+        SELECT pair.pn,pair.lid FROM candidate_pairs pair
+        WHERE NOT EXISTS(SELECT 1 FROM whatsapp_identity_observations other
+            WHERE other.account=%s AND other.pn=pair.pn AND other.lid<>pair.lid)
+          AND NOT EXISTS(SELECT 1 FROM whatsapp_identity_observations other
+            WHERE other.account=%s AND other.lid=pair.lid AND other.pn<>pair.pn)
+          AND EXISTS(SELECT 1 FROM whatsapp_identity_observations wi
+            JOIN messages m ON m.id=wi.source_message
+            JOIN chats ic ON ic.id=m.chat JOIN accounts ia ON ia.id=m.account
+            WHERE wi.account=%s AND wi.pn=pair.pn AND wi.lid=pair.lid
+              AND wi.account=m.account AND ia.platform='whatsapp' AND NOT m.deleted
+              AND (wi.identity_id=m.sender OR wi.identity_id=ic.provider_chat) AND '''+source_where+''')
+        ), visible_chats AS MATERIALIZED (
+        SELECT c.id,c.account,c.title,c.provider_chat,a.platform,
+            messenger_whatsapp_personal_id(c.provider_chat) AS normalized_id
         FROM chats c JOIN accounts a ON a.id=c.account
-        JOIN visible_whatsapp_identity v ON v.account=c.account AND v.verified
-          AND %s IN (v.pn,v.lid) AND messenger_whatsapp_personal_id(c.provider_chat) IN (v.pn,v.lid)
-        WHERE c.account=%s AND a.platform='whatsapp' AND '''+where+' ORDER BY c.id LIMIT 2',
-        [*args,identity,account,*chat_args]).fetchall()
+        WHERE c.account=%s AND a.platform='whatsapp' AND '''+where+''')
+        SELECT DISTINCT c.id,c.account,c.title,c.provider_chat,c.platform
+        FROM visible_chats c JOIN verified_pairs pair ON c.normalized_id IN (pair.pn,pair.lid)
+        ORDER BY c.id LIMIT 2''',
+        [account,identity,identity,account,account,account,*source_args,account,*chat_args]).fetchall()
     if len(rows)>1:
         from .store import APIError
         raise APIError('ambiguous_reference',409)

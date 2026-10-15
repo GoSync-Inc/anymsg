@@ -28,6 +28,14 @@ and argument schema. There is no generic arbitrary backend executor. Unknown wri
 are not retried. Capability discovery intersects profile, local grants and current
 backend permissions. An unavailable module leaves platform introspection available.
 
+`messages_request_file_download` explicitly schedules bounded retrieval of one
+existing archive attachment. Select it in the profile and grant `download` locally
+and upstream; the backend must advertise `request_file_download` in its manifest.
+It does not send messages or mark them read, and returns without waiting for bytes.
+Inspect its request/download status and poll `messages_get_attachment` passively.
+Repeated requests coalesce; source availability, storage limits and provider backoff
+remain in force. Existing profiles do not automatically gain this tool.
+
 Messenger-operation enums also intersect the backend's explicit supported names
 for each permitted account. A mixed Telegram/WhatsApp key sees their union; each
 preview/execute rechecks the exact account before dispatch. Unsupported operations

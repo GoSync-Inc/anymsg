@@ -14,7 +14,7 @@ const methods = {
 };
 const options = {baseUrl:'https://archive.example/base',token:'synthetic-token'};
 
-test('all operation SDK methods preserve exact payload and expose 30 tools',async()=>{
+test('all operation SDK methods preserve exact payload and expose the current manifest',async()=>{
   const captured=[];
   const client=new AnyMsgClient({...options,fetch:async(url,request)=>{
     captured.push([String(url),JSON.parse(request.body)]);
@@ -24,7 +24,7 @@ test('all operation SDK methods preserve exact payload and expose 30 tools',asyn
     assert.equal((await client[name](args)).status,'submitted');
     assert.ok(tools.includes(method));
   }
-  assert.equal(tools.length,33);
+  assert.equal(tools.length,34);
   assert.deepEqual(captured,Object.values(methods).map(([method,args])=>[
     `https://archive.example/base/v1/${method}`,args]));
 });
