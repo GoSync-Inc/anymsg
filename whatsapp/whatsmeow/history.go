@@ -18,6 +18,10 @@ import (
 )
 
 const maxHistoryAttempts = 3
+
+// Archive backpressure is retried after this delay without consuming one of
+// the bounded download attempts; it resolves when the consumer drains.
+const historyBackpressureDelay = 5 * time.Minute
 const maxCompressedHistory = 32 << 20
 const maxDecodedHistory = 64 << 20
 
@@ -118,6 +122,23 @@ func (s *CaptureStore) historyFailure(job *historyJob, reason string) error {
 		status = "failed"
 	}
 	return s.historyStatus(status, reason, job.Attempt, next)
+}
+
+// historyBackpressure reports local capacity limits, not a failed download:
+// a full export spool, the disk reserve or the bounded unconsumed journal.
+func historyBackpressure(err error) bool {
+	return err != nil && (err.Error() == "spool_full" || err.Error() == "disk_reserve" || err.Error() == "capture_overload")
+}
+
+// historyDeferred returns the attempt reserved by claimHistory and schedules
+// the job after a backoff. The persisted status keeps the attempt number that
+// ran, which is always within the reported 1..max_attempts range.
+func (s *CaptureStore) historyDeferred(job *historyJob, reason string, now time.Time) error {
+	next := now.Add(historyBackpressureDelay).UnixMilli()
+	if _, err := s.db.Exec("UPDATE history_jobs SET state='attempted',attempts=?,error=?,next_attempt_ms=? WHERE stanza=?", job.Attempt-1, reason, next, job.Stanza); err != nil {
+		return err
+	}
+	return s.historyStatus("retrying", reason, job.Attempt, next)
 }
 
 func (s *CaptureStore) EnqueueHistory(e *events.Message) error {
@@ -320,20 +341,31 @@ func (p *Provider) historyWorker(ctx context.Context) {
 		data, err := p.downloadHistory(fetch, notif)
 		done()
 		if err != nil {
-			if err = p.Capture.historyFailure(job, "history_download_failed"); err != nil {
+			if historyBackpressure(err) {
+				err = p.Capture.historyDeferred(job, "history_download_failed", time.Now())
+			} else {
+				err = p.Capture.historyFailure(job, "history_download_failed")
+			}
+			if err != nil {
 				p.fail("durable_capture_failed")
 				return
 			}
 			continue
 		}
 		if err = p.captureHistory(data); err != nil {
-			_ = p.Capture.historyFailure(job, "history_capture_failed")
+			if !historyBackpressure(err) {
+				_ = p.Capture.historyFailure(job, "history_capture_failed")
+			} else if e := p.Capture.historyDeferred(job, "history_capture_failed", time.Now()); e != nil {
+				p.fail("durable_capture_failed")
+				return
+			}
+			// Rows already journaled stay pending for the replay worker and are
+			// skipped on retry. A full spool keeps readiness; local disk or
+			// journal limits still surface as a provider failure.
+			p.captureFailure(err)
 			if spoolBackpressure(err) {
-				// The replay worker can export the durable prefix once the
-				// archive consumer drains; keep readiness and bounded retry.
 				continue
 			}
-			p.captureFailure(err)
 			return
 		}
 		if _, err = p.Capture.db.Exec("UPDATE history_jobs SET state='captured',error='',next_attempt_ms=0 WHERE stanza=?", job.Stanza); err != nil {

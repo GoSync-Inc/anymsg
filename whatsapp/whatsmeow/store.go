@@ -263,9 +263,13 @@ func (s *CaptureStore) Put(e *events.Message, origin string) error {
 		id = envelope["ids"].([]string)[0]
 		raw = nil
 	}
-	return s.append(LegacyChatID(e.Info.Chat), id, e.Info.Timestamp.Unix(), raw, envelope)
+	return s.append(LegacyChatID(e.Info.Chat), id, e.Info.Timestamp.Unix(), raw, envelope, origin == "history")
 }
-func (s *CaptureStore) append(chat, id string, stamp int64, raw []byte, envelope map[string]any) error {
+
+// deferExport (history backfill): a durably journaled row that cannot be
+// exported now is left to the replay worker instead of failing the batch. A
+// retried batch therefore skips rows it already stored and keeps going.
+func (s *CaptureStore) append(chat, id string, stamp int64, raw []byte, envelope map[string]any, deferExport bool) error {
 	if raw == nil {
 		raw = []byte{}
 	}
@@ -310,7 +314,7 @@ func (s *CaptureStore) append(chat, id string, stamp int64, raw []byte, envelope
 	var storedData []byte
 	err = s.db.QueryRow("SELECT published,envelope FROM capture WHERE digest=?", digest).Scan(&published, &storedData)
 	if err == nil {
-		if published == 1 {
+		if published == 1 || deferExport {
 			return nil
 		}
 		return s.publish(digest, storedData)
@@ -378,7 +382,11 @@ func (s *CaptureStore) append(chat, id string, stamp int64, raw []byte, envelope
 			return err
 		}
 	}
-	return s.publish(digest, data)
+	err = s.publish(digest, data)
+	if deferExport && spoolBackpressure(err) {
+		return nil
+	}
+	return err
 }
 func (s *CaptureStore) checkDisk(extra int64) error {
 	var stat syscall.Statfs_t
@@ -691,7 +699,7 @@ func (s *CaptureStore) StoreReceipt(e *events.Receipt) error {
 			continue
 		}
 		value := map[string]any{"kind": "message_receipt", "account": s.Config.Account, "platform": "whatsapp", "chat": chat, "provider_id": found, "max_id": nil, "state": state, "basis": "whatsapp_message_ack", "audience": audience, "observed_at": time.Now().UTC().Format(time.RFC3339Nano), "provider_at": nil}
-		if err = s.append(chat, fmt.Sprintf("receipt:%s:%s", found, state), e.Timestamp.Unix(), nil, value); err != nil {
+		if err = s.append(chat, fmt.Sprintf("receipt:%s:%s", found, state), e.Timestamp.Unix(), nil, value, false); err != nil {
 			return err
 		}
 	}
