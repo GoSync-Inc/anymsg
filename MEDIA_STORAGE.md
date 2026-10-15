@@ -67,7 +67,10 @@ If there is insufficient capacity, the job stays `queued` with
 provider attempts. A transfer interrupted by the local disk reserve returns to
 the same state and rolls back its claimed attempt. Per-account/per-chat sync
 diagnostics expose the reason; account media operations also expose
-`storage_paused_jobs`. Other smaller eligible jobs can proceed on later passes.
+`storage_paused_jobs`. Terminal failures and queued retries have independent
+counts and state-specific diagnostics: a terminal network failure never promises
+another automatic retry. `needs_attention` remains true when other jobs are
+simultaneously paused for storage. Other smaller eligible jobs can proceed on later passes.
 Normal capture and metadata/text search remain independent of this pause.
 
 Media reservation expiry follows the media lease and is renewed with it.

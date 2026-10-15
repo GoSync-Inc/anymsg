@@ -52,10 +52,22 @@ def operations(row, history, files, now=None):
         full_history_verified=False, collector_running=running)
     phases['history']=phase
     counts=files['download'];errors=files.get('download_errors',{})
+    diagnostics=[]
+    error_states=files.get('download_error_states',{})
+    for code,count in sorted(errors.items()):
+        states=error_states.get(code)
+        if states:
+            diagnostics.extend({'reason_code':code,'count':number,'job_state':state,
+                **describe(code,job_state=state)} for state,number in sorted(states.items()))
+        else:diagnostics.append({'reason_code':code,'count':count,**describe(code)})
+    storage_paused=error_states.get('paused_storage',{}).get('queued',errors.get('paused_storage',0))
+    retry_queued=sum(states.get('queued',0) for code,states in error_states.items()
+        if code not in ('paused_storage','retry_exhausted'))
     phases['media']={'state':'processing' if counts['leased'] else
         'paused_storage' if errors.get('paused_storage') else 'needs_attention' if counts['failed'] else
         'queued' if counts['queued'] else 'idle',
-        'counts':counts,'errors':errors,'diagnostics':[{'reason_code':code,'count':count,**describe(code)}
-            for code,count in sorted(errors.items())],'independent_of_connection':True,
-        'storage_paused_jobs':errors.get('paused_storage',0)}
+        'counts':counts,'errors':errors,'diagnostics':diagnostics,'independent_of_connection':True,
+        'storage_paused_jobs':storage_paused,'storage_paused':bool(storage_paused),
+        'terminal_failed_jobs':counts['failed'],'needs_attention':bool(counts['failed']),
+        'retry_queued_jobs':retry_queued}
     return phases

@@ -28,6 +28,37 @@ and argument schema. There is no generic arbitrary backend executor. Unknown wri
 are not retried. Capability discovery intersects profile, local grants and current
 backend permissions. An unavailable module leaves platform introspection available.
 
+`platform_capabilities.tools` and a fresh MCP `tools/list` use the same effective
+catalog. Both expose `discovery` metadata (under `_meta["deedkit.discovery"]` for
+`tools/list`): selected tool count, a SHA-256 of the effective public schemas,
+policy revision, and explicit `notifications_supported: false`. Action-enum changes
+also change the hash. A host can cache its registered tools; after an authorized
+profile expansion, compare a fresh list with the host registration and reconnect
+when they differ. Cached tool visibility never bypasses current call authorization.
+This diagnostic does not claim that a particular host has refreshed its registration.
+
+Module capabilities preserve the backend `principal` and add `backend_principal`
+and `gateway_principal`; platform `principal` remains the gateway identity.
+Subscription ownership and receipts continue to use the existing backend credential.
+A missing backend principal is reported as null rather than inferred from a gateway
+label. Safe `backend_tool_manifest` summaries preserve the version, catalog count
+and hash, and the reviewed discovery hint without advertising unselected backend
+methods or a backend-specific REST URL. Platform introspection returns these as
+`backend_tool_manifests` keyed by module.
+
+`gateway_actions` always refers to the `messenger_operations` action group;
+`gateway_actions_scope` makes this explicit. Inspect `gateway_tools` for calendar
+and calls methods. An empty messenger action list and `owner_decision_write: false`
+do not deny a selected calls preparation method. Calls channel, destination, scope
+and owned-brief checks remain the backend's authority; these labels grant no access.
+
+Backend HTTP failures retain only their numeric `backend_status`, a reviewed
+`backend_error` classification (including `query_timeout`), and a UUID-shaped
+`request_id` when supplied. Error bodies, exception text and transport details are
+not forwarded as diagnostics. MCP and REST return the same safe error. A failure
+after a mutation is dispatched still reports `mutation_outcome_unknown` and forbids
+automatic retries, even when a backend error classification is available.
+
 `messages_request_file_download` explicitly schedules bounded retrieval of one
 existing archive attachment. Select it in the profile and grant `download` locally
 and upstream; the backend must advertise `request_file_download` in its manifest.
@@ -58,6 +89,24 @@ exact 360448-byte HTTP/MCP envelope cap. Every other gateway request keeps the
 with 8 chunks per second per backend credential. Body reads and upstream chunk
 transfers each have a 10-second deadline.
 Read back the upload's next offset after an uncertain response; writes are not retried.
+
+Subscription consumption and private feedback are separately selected tools.
+`messages_fetch_subscription_events` and `messages_wait_for_subscription_events`
+return owned pages; only the explicit `messages_ack_subscription_events` with
+`subscription-ack` can acknowledge an issued receipt. Delivery configuration and
+synthetic receiver probes require `read` plus `subscription-write`; they accept an
+opaque operator-registered receiver ID. A hint reaching a receiver does not prove
+an agent ran a turn and does not acknowledge any event. Feedback submission requires
+`read` plus `feedback-write`, stays private to the exact backend credential and
+never publishes an external issue or message. Each new tool also requires an exact
+backend manifest entry. Existing profiles gain none of these names automatically.
+
+Long subscription waits and sends with positive `wait_s` use a separate pool with
+2 active and 4 waiting requests; ordinary messaging reads retain their own pool.
+Both waits are bounded to 25 seconds. Cancellation releases waiting capacity.
+`messages_get_updates(start_from="now")` requires `cursor-write` both locally and
+upstream, initializes only a new consumer, and cannot reset an existing consumer's
+ACK state. The legacy default remains `start_from="beginning"`.
 
 Original files are streamed through bounded, short-lived bearer tickets with separate
 connection pools. URLs cannot select another origin or path. Tickets recheck current

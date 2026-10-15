@@ -123,3 +123,25 @@ CalDAV create: `If-None-Match`, update/delete: `If-Match`. Google update/delete:
 `family-calendar-local status/start/stop` управляет только собственными macOS launch agents; PostgreSQL остаётся отдельным persistent container. Docker daemon должен работать. В argv/env не передаются ключи/пароли; логи приватны. На других ОС запускать вручную либо под своим supervisor.
 
 Credentials и raw source cache зашифрованы, но event details, plans и journal содержат приватные данные в DB. Volume этим сервисом не шифруется. Backup должен включать PostgreSQL, Vault/key, приватные DB профили и ключи агентов. Автоматический backup и restore ещё не установлены/не проверены. Это локальный MVP, не публичный multi-tenant deployment.
+
+## Границы доступности и предпросмотра
+
+`slots` перечисляет `checked_member_sources` и `availability_scope=configured_bindings`.
+Binding определяет проверенный источник, но не подтверждает, что перечислены все
+календари человека. Поэтому общая `availability` остаётся `unknown`,
+`member_sources_complete=unknown`, а `required_sources_complete=false`. При свежем
+покрытии всех настроенных источников `configured_bindings_availability=verified`,
+`configured_sources_complete=true`, и `candidate_slots` содержит свободные интервалы
+только внутри этих источников. `verified_slots` остаётся пустым. Подключение аккаунта
+само по себе не создаёт binding и не расширяет grants.
+
+Предпросмотр `plan` возвращает изменения полей `diff` и `overlap_check`: полуоткрытые
+интервалы занятости в доступных для чтения календарях, включая busy-only без названий
+и идентификаторов событий. Переносимые/удаляемые ресурсы исключаются из старого
+расписания; пересечения между предложенными шагами показываются отдельно. Отсутствие
+или просроченность покрытия помечает проверку `incomplete`. Это снимок кэша, не блокировка
+времени и не гарантия отсутствия параллельных правок при выполнении.
+
+Календари сохраняют отдельную идентичность ресурса провайдера (`identity_basis`).
+`primary` и `duplicate_of` равны null до явного определения владельцем: одинаковое
+название или другой часовой пояс не доказывают, что это дубли.

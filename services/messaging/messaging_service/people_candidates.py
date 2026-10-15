@@ -1,4 +1,6 @@
 """Optional transliteration candidates and account-local provider grouping."""
+import re
+
 from .policy import scope_filter,targets
 from .search_query import cursor_binding,decode_cursor,encode_cursor,filter_values,valid_text
 from .name_variants import patterns
@@ -22,39 +24,85 @@ def search_people(store,c,p,query='',*,accounts=None,chats=None,after='',limit=2
         condition=match
         if transliterate:condition+=' OR messenger_transliterate(sp.search_text) LIKE ANY(q.variants)'
         clauses.append('('+condition+')')
+    # Rank independently of the provider/account and archive-generated profile
+    # ID. A whole transliterated name token is more useful than an incidental
+    # substring, while every result remains an observation rather than identity
+    # proof. Tokens use the same bounded spelling expansions as matching.
+    variants=patterns(query)
+    terms=[re.sub(r'\\(.)',r'\1',value[1:-1]) for value in variants]
+    literal_fields="ARRAY[lower(sp.sender),lower(sp.username),lower(sp.display_name)]"
+    tokens="regexp_split_to_array(lower(sp.display_name||' '||sp.username),'[^[:alnum:]]+')"
+    translit_tokens="regexp_split_to_array(messenger_transliterate(sp.display_name||' '||sp.username),'[^[:alnum:]]+')"
+    rank="0" if not query else """CASE
+        WHEN q.literal=ANY("""+literal_fields+""") OR q.literal=ANY(string_to_array(coalesce(identity.search_text,''),' ')) THEN 0
+        WHEN q.transliterate AND EXISTS(SELECT 1 FROM unnest("""+literal_fields+""") field
+          WHERE messenger_transliterate(field)=ANY(q.terms)) THEN 1
+        WHEN q.literal=ANY("""+tokens+""") THEN 2
+        WHEN q.transliterate AND """+translit_tokens+""" && q.terms THEN 3
+        WHEN EXISTS(SELECT 1 FROM unnest("""+tokens+""") token WHERE token LIKE q.prefix) THEN 4
+        WHEN q.transliterate AND EXISTS(SELECT 1 FROM unnest("""+translit_tokens+""") token
+          WHERE token LIKE ANY(q.prefixes)) THEN 5
+        WHEN """+match+""" THEN 6 ELSE 7 END"""
     identity_cte,identity_args=visible_cte(p)
-    cte='WITH '+identity_cte+''', q AS (SELECT %s::text AS pattern,%s::text[] AS variants), observed AS MATERIALIZED (
+    cte='WITH '+identity_cte+''', q AS (SELECT %s::text AS pattern,%s::text[] AS variants,%s::text AS literal,
+        %s::text[] AS terms,%s::text AS prefix,%s::text[] AS prefixes,%s::boolean AS transliterate), observed AS MATERIALIZED (
         SELECT sp.id,sp.account,sp.chat,sp.sender AS sender_id,sp.display_name,sp.username,
             sp.source_message,sp.source_sent_at,sp.observed_at,identity.metadata AS identity,
-            CASE WHEN '''+match+''' THEN 'literal' ELSE 'transliteration_candidate' END AS match_type
+            CASE WHEN '''+match+''' THEN 'literal' ELSE 'transliteration_candidate' END AS match_type,
+            '''+rank+''' AS match_rank
         FROM sender_profiles sp JOIN messages m ON m.id=sp.source_message '''+people_join()+''' CROSS JOIN q
         WHERE '''+' AND '.join(clauses)+') '
     binding=cursor_binding(p,'people',{'query':query,'accounts':accounts,'chats':chats,
-        'transliterate':transliterate,'group_by_sender':group_by_sender,'spelling_candidates':1})
+        'transliterate':transliterate,'group_by_sender':group_by_sender,'spelling_candidates':2})
+    query_args=[*identity_args,pattern,variants,query,terms,pattern[1:],
+        [value[1:] for value in variants],transliterate,*args]
     cursor_args=[];cursor_clause=''
     if group_by_sender:
+        cte+=", grouped AS (SELECT account,sender_id,jsonb_agg(to_jsonb(observed) ORDER BY chat,id) AS observations,"+\
+            " CASE WHEN bool_or(match_type='literal') THEN 'literal' ELSE 'transliteration_candidate' END AS match_type,"+\
+            " min(match_rank) AS match_rank FROM observed GROUP BY account,sender_id) "
         if after:
             pos=decode_cursor(after,binding)
-            if set(pos)!= {'account','sender'}:raise APIError('invalid_cursor')
+            if set(pos)!= {'rank','account','sender'} or type(pos['rank']) is not int or not 0<=pos['rank']<=7:
+                raise APIError('invalid_cursor')
             valid_text(pos['account'],empty=False);valid_text(pos['sender'],empty=False)
-            cursor_clause='WHERE (account,sender_id)>(%s,%s)';cursor_args=[pos['account'],pos['sender']]
-        sql='''SELECT account,sender_id,jsonb_agg(to_jsonb(observed) ORDER BY chat,id) AS observations,
-            CASE WHEN bool_or(match_type='literal') THEN 'literal' ELSE 'transliteration_candidate' END AS match_type
-            FROM observed '''+cursor_clause+' GROUP BY account,sender_id ORDER BY account,sender_id LIMIT %s'
+            anchor=c.execute(cte+'SELECT match_rank FROM grouped WHERE account=%s AND sender_id=%s',
+                [*query_args,pos['account'],pos['sender']]).fetchone()
+            if not anchor:raise APIError('not_found',404)
+            if anchor['match_rank']!=pos['rank']:raise APIError('cursor_changed',409)
+            cursor_clause='WHERE (match_rank,account,sender_id)>(%s,%s,%s)'
+            cursor_args=[pos['rank'],pos['account'],pos['sender']]
+        sql='SELECT * FROM grouped '+cursor_clause+' ORDER BY match_rank,account,sender_id LIMIT %s'
     else:
         if after:
-            valid_text(after)
-            if not c.execute(cte+'SELECT 1 FROM observed WHERE id=%s',[*identity_args,pattern,patterns(query),*args,after]).fetchone():
-                raise APIError('not_found',404)
-            cursor_clause='WHERE id>%s';cursor_args=[after]
-        sql='SELECT * FROM observed '+cursor_clause+' ORDER BY id LIMIT %s'
-    rows=c.execute(cte+sql,[*identity_args,pattern,patterns(query),*args,*cursor_args,limit+1]).fetchall();items=rows[:limit]
+            if query:
+                pos=decode_cursor(after,binding)
+                if set(pos)!= {'rank','id'} or type(pos['rank']) is not int or not 0<=pos['rank']<=7:
+                    raise APIError('invalid_cursor')
+                valid_text(pos['id'],empty=False)
+                anchor=c.execute(cte+'SELECT match_rank FROM observed WHERE id=%s',[*query_args,pos['id']]).fetchone()
+                if not anchor:raise APIError('not_found',404)
+                if anchor['match_rank']!=pos['rank']:raise APIError('cursor_changed',409)
+                cursor_clause='WHERE (match_rank,id)>(%s,%s)';cursor_args=[pos['rank'],pos['id']]
+            else:
+                # Empty directory traversal retains its historical ID cursor.
+                if not c.execute(cte+'SELECT 1 FROM observed WHERE id=%s',[*query_args,after]).fetchone():
+                    raise APIError('not_found',404)
+                cursor_clause='WHERE id>%s';cursor_args=[after]
+        sql='SELECT * FROM observed '+cursor_clause+' ORDER BY match_rank,id LIMIT %s'
+    rows=c.execute(cte+sql,[*query_args,*cursor_args,limit+1]).fetchall();items=rows[:limit]
     for row in items:
         for item in row['observations'] if group_by_sender else [row]:
             if item['identity'] is None:del item['identity']
     cursor=None
     if len(rows)>limit:
-        last=items[-1];cursor=encode_cursor(binding,{'account':last['account'],'sender':last['sender_id']}) if group_by_sender else last['id']
+        last=items[-1]
+        cursor=encode_cursor(binding,{'rank':last['match_rank'],'account':last['account'],'sender':last['sender_id']}) if group_by_sender else (
+            encode_cursor(binding,{'rank':last['match_rank'],'id':last['id']}) if query else last['id'])
+    for row in items:
+        row.pop('match_rank',None)
+        if group_by_sender:
+            for observation in row['observations']:observation.pop('match_rank',None)
     refs=[r['source_message'] for row in items for r in (row['observations'] if group_by_sender else [row])]
     targets(p,refs)
     return serial({'items':items,'next_cursor':cursor,'identity_model':'provider_sender_per_account_and_chat',

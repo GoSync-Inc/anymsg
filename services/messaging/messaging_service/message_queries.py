@@ -50,15 +50,18 @@ def enrich(c, rows):
 
 
 def filters(p, *, account='',chat='',sender='',accounts=None,chats=None,senders=None,
-            from_time='',to_time='',direction=''):
+            from_time='',to_time='',direction='',exclude_channels=False):
     from .store import APIError,date_bound
-    if not isinstance(direction,str) or direction not in ('','incoming','outgoing'):
+    if not isinstance(direction,str) or direction not in ('','incoming','outgoing') or type(exclude_channels) is not bool:
         raise APIError('invalid_filter')
     lower,upper=date_bound(from_time),date_bound(to_time)
     if lower and upper and lower>=upper:
         raise APIError('invalid_date_range')
     scope,args=scope_filter(p,'m'); clauses=[scope,'NOT m.deleted']
     normalized={'direction':direction,'from_time':lower,'to_time':upper}
+    if exclude_channels:
+        normalized['exclude_channels']=True
+        clauses.append("EXISTS(SELECT 1 FROM chats ch WHERE ch.id=m.chat AND ch.account=m.account AND ch.chat_type IS DISTINCT FROM 'channel')")
     for column,value in [('account',account),('chat',chat),('sender',sender)]:
         valid_text(value)
         normalized[column]=value
@@ -75,7 +78,8 @@ def filters(p, *, account='',chat='',sender='',accounts=None,chats=None,senders=
 
 def search(store,c,p,query='',account='',chat='',sender='',from_time='',to_time='',after='',limit=20,
            *,accounts=None,chats=None,senders=None,query_mode='all',order='asc',before='',direction='',
-           search_language='auto',fuzzy=False,compact=False,body_chars=None,include_coverage=True,view='archive',include_system=False):
+           search_language='auto',fuzzy=False,compact=False,body_chars=None,include_coverage=True,view='archive',include_system=False,
+           exclude_channels=False):
     from .store import APIError,bounded,date_bound,serial
     import re
     from .conversation import options,numeric_order_sql,visible_sql,decorate_messages,presentation
@@ -91,7 +95,7 @@ def search(store,c,p,query='',account='',chat='',sender='',from_time='',to_time=
     if fuzzy and (query_mode!='all' or not re.fullmatch(r'\w{3,64}',query,flags=re.UNICODE)):
         raise APIError('invalid_fuzzy_query')
     clauses,args,normalized=filters(p,account=account,chat=chat,sender=sender,accounts=accounts,
-        chats=chats,senders=senders,from_time=from_time,to_time=to_time,direction=direction)
+        chats=chats,senders=senders,from_time=from_time,to_time=to_time,direction=direction,exclude_channels=exclude_channels)
     binding=cursor_binding(p,'messages',{**normalized,'query':query,'query_mode':query_mode,
         'language':search_language,'order':order,'fuzzy':fuzzy,
         **({'view':view,'include_system':include_system,'conversation_version':1} if conversation else {})})
@@ -162,7 +166,7 @@ def search(store,c,p,query='',account='',chat='',sender='',from_time='',to_time=
                     cursor_clause='WHERE (sent_at,id)'+('<' if order=='desc' else '>')+'(%s,%s)'
                     cursor_args=[at,mid]
         else:
-            if order=='relevance' or conversation:raise APIError('invalid_cursor')
+            if order=='relevance' or conversation or exclude_channels:raise APIError('invalid_cursor')
             anchor=store.message(c,p,cursor)
             cursor_clause='WHERE (sent_at,id)'+('<' if before or order=='desc' else '>')+'(%s,%s)'
             cursor_args=[anchor['sent_at'],anchor['id']]
@@ -191,7 +195,7 @@ def search(store,c,p,query='',account='',chat='',sender='',from_time='',to_time=
             next_cursor=encode_cursor(binding,{'id':last['id'],'at':last['sent_at'],'score':last['score'],
                 'revision':last['revision'],'fuzzy':fuzzy_used,'source_order':last['source_order'],'snapshot':snapshot})
         else:next_cursor=encode_cursor(binding,{'id':last['id'],'at':last['sent_at'],'score':last['score'],
-            'revision':last['revision'],'fuzzy':fuzzy_used}) if order=='relevance' or fuzzy else last['id']
+            'revision':last['revision'],'fuzzy':fuzzy_used}) if order=='relevance' or fuzzy or exclude_channels else last['id']
     shape_messages(items,compact=False if conversation else compact)
     from .result_evidence import decorate
     from .chat_evidence import query_evidence

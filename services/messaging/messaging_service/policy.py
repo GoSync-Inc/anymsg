@@ -7,7 +7,7 @@ LEGACY_PERMISSIONS = frozenset((*DEFAULT_PERMISSIONS, 'review-write', 'send'))
 MESSENGER_PERMISSIONS = frozenset(('read-live', 'contacts-read', 'profile-read', 'groups-read',
     'message-edit', 'message-delete', 'message-react', 'message-pin', 'read-state',
     'chat-manage', 'contacts-manage', 'groups-manage', 'profile-manage'))
-SUBSCRIPTION_PERMISSIONS = frozenset(('subscription-write',))
+SUBSCRIPTION_PERMISSIONS = frozenset(('subscription-write', 'subscription-ack', 'feedback-write'))
 UPLOAD_PERMISSIONS = frozenset(('upload',))
 PERMISSIONS = LEGACY_PERMISSIONS | MESSENGER_PERMISSIONS | SUBSCRIPTION_PERMISSIONS | UPLOAD_PERMISSIONS
 
@@ -32,6 +32,9 @@ OPERATION_PERMISSIONS = {
     'create_subscription':'subscription-write', 'list_subscriptions':'read',
     'get_subscription':'read', 'update_subscription':'subscription-write',
     'get_subscription_events':'read',
+    'fetch_subscription_events':'read','ack_subscription_events':'subscription-ack',
+    'wait_for_subscription_events':'read','configure_subscription_delivery':'subscription-write',
+    'test_subscription':'subscription-write','submit_feedback':'feedback-write','list_feedback':'read',
     'prepare_file_upload':'upload','upload_file_chunk':'upload','get_file_upload':'upload',
 }
 AUDIT_OPERATIONS = frozenset(OPERATION_PERMISSIONS) | {
@@ -58,7 +61,8 @@ AUDIT_CODES = frozenset({
     'subscription_access_changed','invalid_subscription_state',
     'invalid_upload','invalid_upload_chunk','upload_limit','upload_capacity','upload_expired',
     'upload_offset_conflict','upload_hash_mismatch',
-    'media_request_limit',
+    'subscription_wait_timeout','consumer_already_initialized','media_request_limit','subscription_receipt_limit','invalid_feedback','feedback_limit',
+    'invalid_receiver','delivery_not_configured',
 })
 UNSET = object()
 

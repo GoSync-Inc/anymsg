@@ -13,7 +13,7 @@ from .search_query import coverage,filter_values,output_options,shape_messages
 def get_updates(store,c,p,consumer,limit=20,*,accounts=None,chats=None,senders=None,
                 origins=None,kinds=None,direction='',from_time='',to_time='',compact=False,
                 body_chars=None,include_coverage=True,exclude_channels=False,order='event',
-                reset_filters=False,expected_ack_version=None):
+                reset_filters=False,expected_ack_version=None,start_from='beginning'):
     from .store import APIError,bounded,date_bound,digest,serial
     from .message_queries import enrich
     bounded(limit);cap=output_options(compact,body_chars,include_coverage)
@@ -23,6 +23,10 @@ def get_updates(store,c,p,consumer,limit=20,*,accounts=None,chats=None,senders=N
         raise APIError('invalid_filter')
     if type(exclude_channels) is not bool or type(reset_filters) is not bool or order not in ('event','sent_at'):
         raise APIError('invalid_filter')
+    if not isinstance(start_from,str) or start_from not in ('beginning','now'):
+        raise APIError('invalid_filter')
+    if start_from=='now' and 'cursor-write' not in p['permissions']:raise APIError('forbidden',403)
+    if start_from=='now' and reset_filters:raise APIError('invalid_filter')
     if reset_filters:
         if 'cursor-write' not in p['permissions']:raise APIError('forbidden',403)
         if type(expected_ack_version) is not int or expected_ack_version<0:raise APIError('invalid_version')
@@ -43,9 +47,13 @@ def get_updates(store,c,p,consumer,limit=20,*,accounts=None,chats=None,senders=N
     c.execute('SELECT pg_advisory_xact_lock(hashtextextended(%s,0))',('consumers:'+p['id'],))
     total=c.execute('SELECT count(DISTINCT name) AS n FROM consumers WHERE principal=%s',(p['id'],)).fetchone()['n']
     existing=c.execute('SELECT 1 FROM consumers WHERE principal=%s AND name=%s',(p['id'],consumer)).fetchone()
+    if existing and start_from=='now':raise APIError('consumer_already_initialized',409)
     if not existing and total>=64:raise APIError('consumer_limit',429)
-    c.execute('INSERT INTO consumers(principal,name,scope_version,filter_spec) VALUES(%s,%s,%s,%s) ON CONFLICT DO NOTHING',
-        (p['id'],consumer,p['scope_version'],Jsonb(filters)))
+    # The transactional sequencer's visible value is the committed event head.
+    # Do not lock it: an in-flight ingestion must remain after this boundary.
+    head=c.execute('SELECT value FROM feed_counter WHERE id=1').fetchone()['value']
+    c.execute('INSERT INTO consumers(principal,name,scope_version,filter_spec,position) VALUES(%s,%s,%s,%s,%s) ON CONFLICT DO NOTHING',
+        (p['id'],consumer,p['scope_version'],Jsonb(filters),head if start_from=='now' else 0))
     state=c.execute('SELECT * FROM consumers WHERE principal=%s AND name=%s AND scope_version=%s FOR UPDATE',
         (p['id'],consumer,p['scope_version'])).fetchone()
     if reset_filters:
@@ -59,7 +67,6 @@ def get_updates(store,c,p,consumer,limit=20,*,accounts=None,chats=None,senders=N
         # Even with position zero an outstanding receipt may already bind the
         # previous selection. A new name is the explicit way to start a view.
         raise APIError('consumer_filter_mismatch',409)
-    head=c.execute('SELECT value FROM feed_counter WHERE id=1').fetchone()['value']
     where,args=scope_filter(p,'m');clauses=[where,'m.account=e.account']
     for key,column in [('accounts','m.account'),('chats','m.chat'),('senders','m.sender'),
                        ('origins','e.origin'),('kinds','e.kind')]:

@@ -1,6 +1,6 @@
 """Bounded key-owned subscriptions over the committed archive journal.
 
-This module does not dispatch hints, ACK events, poll providers or run agents.
+This matcher atomically enqueues registered opaque hints; it never runs agents.
 Definitions and exact journal references are durable; the independent matcher
 advances each checkpoint in the same transaction as its matching references.
 """
@@ -99,11 +99,21 @@ def _view(c, row):
         'missing_revision_evidence_events': row['missing_evidence'],
         'last_matched_at': row['last_matched_at'], 'scope_masked': False,
         'freshness_basis': 'committed_archive_journal_not_provider_freshness',
-        'delivery': {'passive_read': True, 'ack': False, 'push': False, 'host_wakeup': False}})
+        'delivery': _delivery_view(c, row)})
+
+
+
+def _delivery_view(c, row):
+    binding = c.execute('SELECT receiver FROM subscription_delivery WHERE subscription=%s', (row['id'],)).fetchone()
+    counts = c.execute('''SELECT state,count(*) AS n FROM subscription_outbox WHERE subscription=%s
+        GROUP BY state''', (row['id'],)).fetchall()
+    return {'passive_read': True, 'ack': True, 'push': binding is not None,
+        'receiver_id': str(binding['receiver']) if binding else None, 'host_wakeup': 'unverified',
+        'host_turn_verified': False, 'hint_counts': {item['state']: item['n'] for item in counts}}
 
 
 def create_subscription(store, c, p, chat_ids, *, sender_ids=None, kinds=None,
-        direction='incoming', origins=None, label='', expires_at=None):
+        direction='incoming', origins=None, label='', expires_at=None, wake_rules=None, reply_to_send=None):
     from .store import APIError, date_bound
     if 'read' not in p['permissions']:
         raise APIError('forbidden', 403)
@@ -151,6 +161,30 @@ def create_subscription(store, c, p, chat_ids, *, sender_ids=None, kinds=None,
     # committed frontier and cannot skip an uncommitted event transaction.
     head = c.execute('SELECT value FROM feed_counter WHERE id=1').fetchone()['value']
     selector = dict(chat_ids=chats, sender_ids=senders, kinds=kinds, origins=origins, direction=direction)
+    if wake_rules is not None:
+        if not isinstance(wake_rules, (list, tuple)) or not 1 <= len(wake_rules) <= 4:
+            raise APIError('invalid_subscription')
+        rules = _ids(wake_rules, required=True)
+        if set(rules) - {'incoming_message', 'owner_mention', 'reply_to_owner', 'reply_to_confirmed_send'}:
+            raise APIError('invalid_subscription')
+        selector['wake_rules'] = rules
+    if reply_to_send is not None:
+        if not isinstance(reply_to_send, str) or not 1 <= len(reply_to_send) <= 128:
+            raise APIError('not_found', 404)
+        anchor = c.execute('''SELECT o.id,o.account,o.chat,o.provider_chat,o.provider_message_id,a.platform
+            FROM outgoing_messages o JOIN accounts a ON a.id=o.account
+            WHERE o.id=%s AND o.principal=%s AND o.key_id=%s AND o.status='sent'
+            AND o.provider_message_id IS NOT NULL AND o.provider_message_id<>'' ''',
+            (reply_to_send, p['id'], p['key_id'])).fetchone()
+        if anchor is None or anchor['chat'] not in chats:
+            raise APIError('not_found', 404)
+        selector['reply_anchor'] = {'send_id': anchor['id'], 'account': anchor['account'],
+            'chat': anchor['chat'], 'provider_id': anchor['provider_message_id'],
+            'basis': 'confirmed_exact_provider_receipt'}
+        from .reply_evidence import confirmed_native_reference
+        selector['reply_anchor'].update(confirmed_native_reference(c, anchor))
+    if 'reply_to_confirmed_send' in selector.get('wake_rules', []) and 'reply_anchor' not in selector:
+        raise APIError('invalid_subscription')
     if len(json.dumps(selector, ensure_ascii=False).encode()) > 14000:
         raise APIError('invalid_filter')
     row = c.execute('''INSERT INTO subscriptions(principal,key_id,scope_version,key_permission_version,
@@ -229,17 +263,20 @@ def get_subscription_events(store, c, p, subscription_id, *, after=0, limit=50):
             'sender',e.snapshot->'sender','provider_id',e.snapshot->'provider_id',
             'sent_at',e.snapshot->'sent_at','direction',e.snapshot->'direction',
             'deleted',e.snapshot->'deleted','processing',e.snapshot->'processing',
-            'metadata',e.snapshot->'metadata')) AS snapshot
+            'metadata',e.snapshot->'metadata','reply_evidence',e.snapshot->'reply_evidence')) AS snapshot
         FROM subscription_matches sm JOIN events e ON e.id=sm.event
         WHERE sm.subscription=%s AND sm.event>%s ORDER BY sm.event LIMIT %s''',
         (row['id'], after, limit + 1)).fetchall()
     fields = ('message', 'account', 'chat', 'sender', 'provider_id', 'revision', 'sent_at',
-        'direction', 'deleted', 'processing', 'metadata')
+        'direction', 'deleted', 'processing', 'metadata', 'reply_evidence')
     items = [{**{key: event['snapshot'][key] for key in fields if key in event['snapshot']},
         'event_id': event['id'], 'kind': event['kind'], 'origin': event['origin'],
         'revision': event['revision'], 'observed_at': event['created_at'],
         'historical': event['origin'] in ('backfill', 'reconcile'),
         'matching_basis': 'exact_event_revision'} for event in events[:limit]]
+    from .subscription_consumption import wake_reason
+    for item in items:
+        item['wake_reason'] = wake_reason(item, row['selector'])
     return serial({'subscription': state, 'items': items, 'has_more': len(events) > limit,
         'next_after': items[-1]['event_id'] if items else after,
         'consumption': 'passive_read_no_ack', 'scope_masked': False})
@@ -299,7 +336,8 @@ def match_subscriptions(store, *, batch_size=250, max_subscriptions=32):
             head = c.execute('SELECT value FROM feed_counter WHERE id=1').fetchone()['value']
             events = c.execute('''SELECT id,account,kind,origin,
                 jsonb_strip_nulls(jsonb_build_object('chat',snapshot->'chat',
-                    'sender',snapshot->'sender','direction',snapshot->'direction')) AS snapshot
+                    'sender',snapshot->'sender','direction',snapshot->'direction',
+                    'metadata',snapshot->'metadata','reply_evidence',snapshot->'reply_evidence')) AS snapshot
                 FROM events WHERE id>%s AND id<=%s ORDER BY id LIMIT %s''',
                 (row['matched_through'], head, batch_size)).fetchall()
             count = c.execute('SELECT count(*) AS n FROM subscription_matches WHERE subscription=%s',
@@ -307,6 +345,7 @@ def match_subscriptions(store, *, batch_size=250, max_subscriptions=32):
             lookup = {(source['account'], source['chat']): source['sender_ids'] for source in sources}
             selector = row['selector']
             position = row['matched_through']
+            newly_matched = False
             missing = 0
             reason = None
             gap = row['gap'] if row['gap'] and row['gap'].get('intentional') else None
@@ -332,6 +371,11 @@ def match_subscriptions(store, *, batch_size=250, max_subscriptions=32):
                         matches = False
                     else:
                         matches = snapshot['sender'] in lookup[source]
+                if matches and selector.get('wake_rules'):
+                    from .subscription_consumption import wake_reason
+                    evidence = {**snapshot, 'account': event['account'], 'kind': event['kind'],
+                        'historical': event['origin'] in ('backfill', 'reconcile')}
+                    matches = bool(set(selector['wake_rules']) & set(wake_reason(evidence, selector)))
                 if matches:
                     if count >= maximum:
                         reason = 'match_budget'
@@ -343,6 +387,7 @@ def match_subscriptions(store, *, batch_size=250, max_subscriptions=32):
                     if inserted:
                         count += 1
                         stats['matched'] += 1
+                        newly_matched = True
                 position = event['id']
                 stats['scanned'] += 1
             # If the retained range ends below a known committed frontier, the
@@ -357,4 +402,7 @@ def match_subscriptions(store, *, batch_size=250, max_subscriptions=32):
             c.execute('''UPDATE subscriptions SET matched_through=%s,blocked_reason=%s,gap=%s,
                 missing_evidence=missing_evidence+%s,last_matched_at=clock_timestamp()
                 WHERE id=%s''', (position, reason, Jsonb(gap) if gap else None, missing, row['id']))
+            if newly_matched:
+                from .event_delivery import enqueue_hint
+                enqueue_hint(c, row, position)
     return stats

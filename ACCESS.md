@@ -8,8 +8,9 @@ Provider sessions, owner DSN и ключ расшифровки backup аген�
 
 Каждый агент имеет свой principal и отдельный Bearer key. Ключ действует
 1–30 дней (по умолчанию 7), хранится в БД только как SHA256, имеет публичный UUID
-для отзыва. Несколько ключей одного principal имеют общие права и ACK; разные
-агенты получают разные principals. Ключи нельзя передавать в query string,
+для отзыва. Несколько ключей одного principal разделяют principal scope и
+archive-consumer ACK; subscription ACK и feedback принадлежат точному ключу.
+Разные агенты получают разные principals. Ключи нельзя передавать в query string,
 вставлять в переписку или сохранять в отслеживаемые Git файлы.
 
 | Уровень | Правило |
@@ -21,6 +22,9 @@ Provider sessions, owner DSN и ключ расшифровки backup аген�
 | `cursor-write` | ACK ранее полученной страницы; сам по себе не разрешает читать архив |
 | `review-write` вместе с `read` | Неизменяемая отметка разбора с автором, ревизиями всех источников и ссылкой на результат |
 | `send` | Enqueue exact owner-confirmed text and inspect own send receipts; requires separate account opt-in (SENDING.md) |
+| `subscription-write` вместе с `read` | Создание/изменение собственных подписок, привязка заранее зарегистрированного receiver и синтетический test hint |
+| `subscription-ack` вместе с `read` | ACK выданной страницы собственной подписки; отдельная позиция для точного ключа |
+| `feedback-write` вместе с `read` | Локальная приватная запись feedback с проверенными source references; без внешней отправки |
 | `capabilities` | Доступен любому действующему ключу, в том числе без операционных разрешений |
 
 По умолчанию новый principal получает read/download/cursor-write в явно заданных аккаунтах.
@@ -138,3 +142,19 @@ Gateway can only insert request columns/read outbox; collector alone updates
 states and reads public credential expiration/revocation and ACL metadata,
 without token hashes. There is no remote access administration or server approval
 gate. Existing agent-side exact owner confirmation remains mandatory.
+
+## Schema 32: subscription consumption and delivery
+
+`subscription-ack` and `feedback-write` require explicit principal and credential
+ceilings. Existing NULL legacy key ceilings inherit neither capability. Page
+receipts bind principal, exact key, policy versions, subscription generation and
+consumption version/positions; only receipt hashes are stored. A changed policy,
+paused/closed subscription, expiry or stale concurrent page cannot advance it.
+
+The gateway can bind only an operator-registered opaque receiver belonging to
+that exact principal/key; it cannot read endpoint URLs or signing-secret paths.
+The internal matcher can enqueue opaque hints but has no receiver/secret grants
+or public egress. A separate `messaging_event_delivery` role can deliver hints;
+it cannot read message bodies, API token hashes, subscription page receipts or
+ACK state. Its deployment requires explicit HTTPS egress and private secret
+mounts; installation alone activates nothing. [Delivery contract](SUBSCRIPTIONS.md).

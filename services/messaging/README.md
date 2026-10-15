@@ -9,7 +9,7 @@ use SHA-256 deduplication; references to every source message stay separate.
 [Conversation view and compatibility](CONVERSATION.md) explain message kinds,
 ordering uncertainty and the last known dialogue turn.
 
-Development version: **0.9.19 — experimental**, PostgreSQL schema 31.
+Development version: **0.9.19 — experimental**, PostgreSQL schema 32.
 
 The expanded live-operation catalog covers messages, registered attachments,
 reactions, groups, contacts and profile fields. Access requires explicit per-key
@@ -30,7 +30,8 @@ require the development source until the next package release.
 - Encrypted streaming backup with integrity checks and quarantine restore tools.
 - Persistent subscriptions to explicit chats and people, with passive event inspection
   and separate original/text/transcript/description readiness events.
-  See [SUBSCRIPTIONS.md](SUBSCRIPTIONS.md); host push and event ACK are the next block.
+  Independent event ACK, bounded waits and operator-registered signed hints are available;
+  [SUBSCRIPTIONS.md](SUBSCRIPTIONS.md) separates hints from verified host turns.
 
 Text sending through existing collectors is available with separate `send` rights
 and explicit account opt-in. The acting agent obtains exact owner confirmation;

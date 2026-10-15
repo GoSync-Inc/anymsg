@@ -62,7 +62,15 @@ unconfigured derivative contributes text or rank.
 Original `filename`/`status` fields remain. `source_filename` preserves provenance;
 `display_name` decodes only explicit valid MIME encoded words in known charsets
 and removes presentation controls/path separators. It never guesses mojibake or
-percent encoding. Model `title` and `summary` remain separate. Responses report
+percent encoding. Recognized native WhatsApp fallback names (`true_`/`false_`
+plus the exact current provider reference and `.bin`) on WhatsApp photo, video,
+audio, voice or sticker occurrences receive a generated presentation and
+`download_filename` extension for known media MIME types. The account platform,
+current provider ID and observed media kind must all agree. `display_name_basis`
+identifies this case; the original `filename` and `source_filename` never change.
+Document names, uncertain legacy occurrences, other `.bin` names and unknown MIME
+types retain their source names.
+Model `title` and `summary` remain separate. Responses report
 `download_status`, `extraction_status`, and `enrichment_status` independently;
 model derivatives carry an explicit untrusted/generated label. Optional enrichment
 is a separate disabled-by-default worker; this extraction worker invokes no model.
@@ -71,6 +79,11 @@ is a separate disabled-by-default worker; this extraction worker invokes no mode
 character page, `next_offset`, source provenance and overlapping PDF page / XLSX sheet and cell spans.
 `content='enriched'` pages the model transcript/text up to 1,000,000 stored characters;
 raw extraction has the same configurable ceiling. Each response page is at most 8,000 characters.
+`get_attachment` and `request_file_download` expose the same current extraction
+coverage (character count, parser limit, truncation and bounded format metadata).
+They retain that evidence when the registered original is missing, without
+issuing a link or treating a stale derivative as current. Span arrays remain in
+the paged text interface.
 Enrichment coverage states whether timestamps exist; timestamp segments use seconds,
 not character offsets, and are not repeated in every text page. Queued, failed,
 unsupported or unconfigured content returns empty text and its actual status.

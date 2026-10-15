@@ -346,9 +346,10 @@ def test_processing_refs_are_independent_of_message_readiness(seeded):
     assert 'processing' not in events[0] and events[1]['processing']['stage'] == 'transcript'
 
 
-def test_no_push_or_reply_preset_claimed(seeded):
+def test_delivery_capabilities_distinguish_hint_support_from_verified_host(seeded):
     store, _, _ = seeded
     capabilities = store.capabilities(key(store))['subscriptions']
     assert capabilities['implemented'] and capabilities['passive_events']
-    assert not capabilities['ack'] and not capabilities['push']
-    assert not capabilities['verified_host'] and not capabilities['native_reply_preset']
+    assert capabilities['ack'] and capabilities['ack_permission'] == 'subscription-ack'
+    assert capabilities['push'] == 'operator_registered_signed_hints'
+    assert capabilities['native_reply_preset'] and not capabilities['verified_host']

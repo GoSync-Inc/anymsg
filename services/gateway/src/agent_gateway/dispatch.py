@@ -4,6 +4,7 @@ from platform_contracts import Capability, safe_error
 from .adapters.calls import receipt_reference
 
 from .catalog import arguments, CATALOG
+from .diagnostics import discovery, manifest_summary
 from .policy import Denied, key_from_file
 
 
@@ -98,7 +99,13 @@ class Dispatch:
                 )
             )
         ]
-        return current, principal, visible, {"states": states, "scopes": scopes, "actions": actions}
+        manifests = {module: summary for module, caps, _ in results
+                     if (summary := manifest_summary(caps)) is not None}
+        return current, principal, visible, {
+            "states": states, "scopes": scopes, "actions": actions,
+            "discovery": discovery(visible, actions, current["revision"]),
+            "backend_tool_manifests": manifests,
+        }
 
     async def call(self, key, name, values):
         snapshot, agent, tool = self.policy.authorize(key, name)
@@ -112,6 +119,9 @@ class Dispatch:
                 "service": "deedkit",
                 "version": "0.1.0",
                 "principal": agent["id"],
+                "gateway_principal": agent["id"],
+                "discovery": states["discovery"],
+                "backend_tool_manifests": states["backend_tool_manifests"],
                 "policy_revision": snapshot["revision"],
                 "tools": visible,
                 "modules": sorted({CATALOG[n]["module"] for n in visible} - {"gateway"}),
@@ -132,6 +142,10 @@ class Dispatch:
         credential = key_from_file(binding["key_file"], binding["key_sha256"])
         caps = await self.backend_capabilities(snapshot, agent, module)
         if not set(tool["scopes"]) <= set(caps["permissions"]):
+            raise Denied()
+        if (module == "messaging" and tool["operation"] == "get_updates"
+                and args.get("start_from") == "now"
+                and "cursor-write" not in (set(agent["grants"].get(module, [])) & set(caps["permissions"]))):
             raise Denied()
         if not self.implemented(tool, snapshot, agent, caps, args.get("account")):
             raise Denied()
@@ -162,7 +176,12 @@ class Dispatch:
             if error.code in {"backend_unavailable", "backend_response_too_large"} and not tool.get(
                 "annotations", {}
             ).get("readOnlyHint", False):
-                error.detail = safe_error("mutation_outcome_unknown", unknown_outcome=True)
+                diagnostics = getattr(error, "detail", {})
+                error.detail = {
+                    **safe_error("mutation_outcome_unknown", unknown_outcome=True),
+                    **{key: diagnostics[key] for key in ("backend_error", "backend_status", "request_id")
+                       if key in diagnostics},
+                }
             raise
         if module == "calls":
             receipt_reference(tool["operation"], result)
@@ -211,7 +230,13 @@ class Dispatch:
             ):
                 result.pop(field, None)
             result["gateway_tools"] = visible
+            result["gateway_principal"] = agent["id"]
+            result["backend_principal"] = result.get("principal")
             result["gateway_actions"] = allowed_actions
+            result["gateway_actions_scope"] = "messenger_operations"
+            manifest = manifest_summary(caps)
+            if manifest is not None:
+                result["backend_tool_manifest"] = manifest
             if module == "messaging":
                 reports = caps.get("messenger_operations", {})
                 accounts = reports.get("supported_by_account", {}) if isinstance(reports, dict) else {}
