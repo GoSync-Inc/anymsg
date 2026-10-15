@@ -208,7 +208,7 @@ class Store:
                 supported=[row['operation'] for row in operation_manifest(account['platform'],provider=provider)
                            if row['supported']]
                 supported_by_account[account['id']]={'provider':provider,'count':len(supported),'operations':supported}
-            features={'read':['search','history','context','updates','reviews','search_people','search_files','get_file_text','get_file_occurrences','get_sync_status','get_file_segments','resolve_reference','preview_message'], 'download':['attachment'], 'cursor-write':['ack'], 'send':['send_message','get_send_status']}
+            features={'read':['search','history','context','updates','reviews','search_people','search_files','get_file_text','get_file_occurrences','get_sync_status','get_file_segments','resolve_reference','preview_message'], 'download':['attachment','request_file_download'], 'cursor-write':['ack'], 'send':['send_message','get_send_status']}
             if 'read' in p['permissions']:
                 features['review-write']=['record_review']
                 features['cursor-write'].append('dismiss_reply')
@@ -622,33 +622,44 @@ class Store:
         with self.authorized(token,'record_review') as (c,p):
             return serial(record(c,p,message_id,revision,result_ref,request_id,evidence))
 
+    def request_file_download(self, token, attachment_id):
+        from .media_requests import request
+        with self.authorized(token,'request_file_download') as (c,p):
+            return request(self,c,p,attachment_id)
+
     def get_attachment(self, token, attachment_id):
         with self.authorized(token,'get_attachment') as (c, p):
             if not isinstance(attachment_id,str) or not 1<=len(attachment_id)<=256:raise APIError('not_found',404)
             where,args=scope_filter(p,'m')
-            row = c.execute('''SELECT a.* FROM attachments a JOIN messages m ON m.id=a.message
+            row = c.execute('''SELECT a.*,m.account,m.chat,m.provider_id AS provider_message_id,
+                m.revision AS message_revision,ch.provider_chat AS provider_chat_id
+                FROM attachments a JOIN messages m ON m.id=a.message
+                JOIN chats ch ON ch.id=m.chat AND ch.account=m.account
                 WHERE a.id=%s AND a.active AND NOT m.deleted AND '''+where,[attachment_id,*args]).fetchone()
             if not row:
-                pending=c.execute('''SELECT j.id,j.state AS status,j.error_code,j.attempts,j.next_due FROM media_jobs j
-                    JOIN messages m ON m.id=j.message WHERE j.id=%s AND '''+where+'''
-                    AND m.account=j.account AND NOT m.deleted AND j.state NOT IN ('ready','superseded')''',
-                    [attachment_id,*args]).fetchone()
+                from .media_requests import occurrence
+                pending=occurrence(c,p,attachment_id)
                 if pending:
-                    from .status_details import describe
-                    targets(p,[pending['id']]);return {**serial(pending),'error_detail':describe(pending['error_code']),
-                        'download_status':'processing' if pending['status']=='leased' else pending['status'],
-                        'extraction_status':'awaiting_download','enrichment_status':'awaiting_download',**self.dataset(c,p)}
+                    from .attachment_metadata import attachment_fields
+                    fields=attachment_fields(pending)
+                    targets(p,[pending['id']]);return serial({**fields,
+                        'message_id':pending['message'],'reason':fields['download_reason'],
+                        **self.dataset(c,p)})
                 raise APIError('not_found', 404)
+            from .file_index import _available
+            from .attachment_metadata import attachment_fields,processing_phases
+            row.update(processing_phases(c,row))
+            if not _available(self.files,{'sha256':row['digest'],'bytes':row['bytes']}):
+                targets(p,[row['id']])
+                return serial({**attachment_fields(row,original_present=False),
+                    'status':'unavailable','reason':'original_missing',**self.dataset(c,p)})
             grant = secrets.token_urlsafe(32)
             c.execute('DELETE FROM download_grants WHERE expires_at<now()')
             c.execute('''INSERT INTO download_grants VALUES (%s,%s,%s,%s,now()+interval '120 seconds')''',
                       (digest(grant), p['key_digest'], p['scope_version'], row['id']))
             targets(p,[row['id']])
-            from .message_queries import enrich
-            source=self.message(c,p,row['message']);enrich(c,[source])
-            phases=next((f for f in source['attachments'] if f['id']==row['id']),{})
-            return {**row, 'status': 'ready', 'sha256': row['digest'],
-                    **{k:phases.get(k,'unknown') for k in ('download_status','extraction_status','enrichment_status')},
+            fields=attachment_fields(row,original_present=True)
+            return {**serial(row),**serial(fields), 'status': 'ready', 'message_id':row['message'],
                     **self.dataset(c,p),
                     'download_url': f'{self.public_url}/v1/download/{grant}',
                     'download_expires_in': 120,
@@ -750,8 +761,8 @@ class Store:
             c.execute("SET LOCAL statement_timeout='180s'")
             c.execute(Path(__file__).with_name('schema.sql').read_text())
             version=int(c.execute("SELECT value FROM probe_metadata WHERE name='schema_version'").fetchone()['value'])
-            if version>30: raise RuntimeError('database_newer_than_runtime')
-            for target,name in [(2,'002_archive.sql'),(3,'003_collectors.sql'),(4,'004_whatsapp.sql'),(5,'005_access.sql'),(6,'006_reviews.sql'),(7,'007_search_indexes.sql'),(8,'008_people.sql'),(9,'009_file_index.sql'),(10,'010_search_audit.sql'),(11,'011_telegram_window.sql'),(12,'012_search.sql'),(13,'013_file_search.sql'),(14,'014_collector_health.sql'),(15,'015_enrichment.sql'),(16,'016_file_content.sql'),(17,'017_chat_evidence.sql'),(18,'018_collector_operations.sql'),(19,'019_whatsapp_identities.sql'),(20,'020_processing_admission.sql'),(21,'021_media_storage.sql'),(22,'022_outgoing.sql'),(23,'023_receipts.sql'),(24,'024_formatting.sql'),(25,'025_operations.sql'),(26,'026_subscriptions.sql'),(27,'027_reply_queue.sql'),(28,'028_send_reference.sql'),(29,'029_file_uploads.sql'),(30,'030_whatsapp_native_identities.sql')]:
+            if version>31: raise RuntimeError('database_newer_than_runtime')
+            for target,name in [(2,'002_archive.sql'),(3,'003_collectors.sql'),(4,'004_whatsapp.sql'),(5,'005_access.sql'),(6,'006_reviews.sql'),(7,'007_search_indexes.sql'),(8,'008_people.sql'),(9,'009_file_index.sql'),(10,'010_search_audit.sql'),(11,'011_telegram_window.sql'),(12,'012_search.sql'),(13,'013_file_search.sql'),(14,'014_collector_health.sql'),(15,'015_enrichment.sql'),(16,'016_file_content.sql'),(17,'017_chat_evidence.sql'),(18,'018_collector_operations.sql'),(19,'019_whatsapp_identities.sql'),(20,'020_processing_admission.sql'),(21,'021_media_storage.sql'),(22,'022_outgoing.sql'),(23,'023_receipts.sql'),(24,'024_formatting.sql'),(25,'025_operations.sql'),(26,'026_subscriptions.sql'),(27,'027_reply_queue.sql'),(28,'028_send_reference.sql'),(29,'029_file_uploads.sql'),(30,'030_whatsapp_native_identities.sql'),(31,'031_media_requests.sql')]:
                 migration=Path(__file__).with_name('migrations')/name
                 sha=hashlib.sha256(migration.read_bytes()).hexdigest()
                 if version<target:

@@ -14,7 +14,7 @@ def test_normalized_message_kind_keeps_source_and_media_phases():
     result=present_message(dict(original),1)
     assert result['kind']=='voice' and result['body']==''
     assert 'Голосовое' in result['display_text'] and '0:12' in result['display_text']
-    assert 'загружается' in result['display_text']
+    assert 'ожидает загрузки' in result['display_text']
     assert result['attachments']==original['attachments']
     unknown=present_message({'id':'u','body':'','direction':'outgoing'},2)
     assert unknown['kind']=='unknown' and 'неизвестного типа' in unknown['display_text']

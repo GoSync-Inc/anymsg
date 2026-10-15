@@ -37,6 +37,7 @@ SAFE_ERROR_CODES = frozenset({
     'subscription_access_changed','invalid_subscription_state',
     'invalid_upload','invalid_upload_chunk','upload_limit','upload_capacity',
     'upload_expired','upload_offset_conflict','upload_hash_mismatch',
+    'media_request_limit',
 })
 
 _UPLOAD_CHUNK_BYTES = 262144
@@ -265,6 +266,10 @@ class Client:
             _subscription_parameters(operation,parameters)
         if operation in _UPLOAD_FIELDS:
             _upload_parameters(operation,parameters)
+        if operation == 'request_file_download' and (parameters.keys() != {'attachment_id'}
+                or type(parameters.get('attachment_id')) is not str
+                or not 1 <= len(parameters['attachment_id']) <= 256):
+            raise ValueError('invalid_parameters')
         try:
             body=json.dumps(parameters,ensure_ascii=False,allow_nan=False,separators=(",",":")).encode("utf-8")
         except (ValueError,TypeError,RecursionError):
@@ -300,6 +305,14 @@ class Client:
 
     def capabilities(self):
         return self.call("capabilities")
+
+    def request_file_download(self, *, attachment_id):
+        """Prioritize one existing original; poll get_attachment without requesting again.
+
+        Requires download permission. Retrieval remains asynchronous, bounded by
+        collector policy, source availability and disk floor. Never sends or marks read.
+        """
+        return self.call('request_file_download', {'attachment_id': attachment_id})
 
     def prepare_file_upload(self, *, account, chat_id, filename, mime, bytes, sha256, request_id):
         """Stage scoped metadata only. Preserve request_id after an uncertain response."""

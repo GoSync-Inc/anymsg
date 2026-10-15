@@ -233,8 +233,10 @@ class Archive:
             return {'outcome':outcome,'message':mid}
 
     def claim_media(self,owner,*,account=None,ttl=120,collector_lease=None,since=None,writer=None,
-                    live_writer=None,live_window_seconds=86400):
+                    live_writer=None,live_window_seconds=86400,media_prefetch_days=None):
         from .storage_admission import StorageAdmission
+        from .media_policy import validate_prefetch_days
+        validate_prefetch_days(media_prefetch_days)
         if not re.fullmatch(r'[a-zA-Z0-9_.-]{1,64}',owner) or not 10<=ttl<=600: raise ValueError('invalid_worker')
         if live_writer is not None and (writer is None or
                 live_writer.root.resolve()!=writer.root.resolve() or
@@ -262,12 +264,16 @@ class Archive:
                 NOT m.deleted AND NOT(ch.provider_chat=ANY(p.exclude_chats)) AND
                 (p.discover_chats OR ch.provider_chat=ANY(p.include_chats)) AND
                 (%s::timestamptz IS NULL OR m.sent_at>=%s) AND
+                (%s::integer IS NULL OR j.requested_until>clock_timestamp() OR
+                    (%s::integer>0 AND m.sent_at>=clock_timestamp()-%s*interval '1 day'
+                        AND m.sent_at<=clock_timestamp()+interval '5 minutes')) AND
                 ((j.state='queued' AND j.next_due<=clock_timestamp()) OR
                  (j.state='leased' AND j.lease_until<clock_timestamp()))
-                ORDER BY priority.live_media DESC,
+                ORDER BY COALESCE(j.requested_until>clock_timestamp(),false) DESC,priority.live_media DESC,
                     CASE WHEN priority.live_media THEN m.sent_at END DESC,j.next_due,j.id
                 FOR UPDATE OF j SKIP LOCKED LIMIT 1''',
-                (live_max,live_max,live_window_seconds,account,account,since,since)).fetchone()
+                (live_max,live_max,live_window_seconds,account,account,since,since,
+                    media_prefetch_days,media_prefetch_days,media_prefetch_days)).fetchone()
             if not job: return None
             expires=c.execute("SELECT clock_timestamp()+%s*interval '1 second' AS at",(ttl,)).fetchone()['at']
             reservation=None

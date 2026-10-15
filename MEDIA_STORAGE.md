@@ -1,5 +1,21 @@
 # Media storage admission
 
+Telegram and WhatsApp collector configurations use `media_prefetch_days: 7` by
+default: automatically download originals from the rolling last seven days.
+Set an integer from 1 to 36500 for another window, `0` for explicit requests
+only, or `null` to prefetch all available history. This changes original-file
+selection only; it never truncates captured messages, deletes stored originals,
+or changes Telegram's separately configured `history_since` hard boundary.
+Direct embedded `Archive.claim_media` calls retain their legacy unbounded
+default; live collector entry points always pass the validated configuration.
+
+An unexpired explicit original request is selected ahead of automatic prefetch,
+including outside its rolling window. It does not override history bounds,
+collection/account/chat access, deleted or superseded revisions, the attempt cap,
+provider cooldown, file-size limits or storage admission. Outside-window jobs
+remain queued without consuming a provider attempt. Requests do not reset failed
+or exhausted jobs; originals may no longer be available from the provider.
+
 Message capture and original downloads have separate disk budgets. Collector
 `disk_reserve_bytes` retains the capture/spool floor (default 1 GiB).
 `media_disk_reserve_bytes` controls the original-file floor (default the larger
@@ -7,7 +23,7 @@ of 10 GiB and the existing capture floor),
 must be at least the capture floor, and can be configured independently. A
 storage pause never changes message coverage into a successful history result.
 
-Telegram can opt into a separate floor for recent small originals with
+Telegram and WhatsApp can opt into a separate floor for recent small originals with
 `media_live_disk_reserve_bytes`. It is disabled by default (`null`), must remain
 at least the capture floor, and cannot exceed the background media floor.
 `media_live_max_bytes` defaults to the smaller of 32 MiB and `max_media_bytes`;
@@ -17,7 +33,9 @@ unknown-size, older and larger originals retain the background budget. Future
 timestamps more than five minutes ahead cannot enter this tier. History bounds
 and account/chat exclusions apply to both tiers.
 
-Eligible recent originals are claimed before background history, newest first.
+After explicit requests, eligible recent originals are claimed before background
+history, newest first. An older or larger explicit request still uses the
+background floor; requesting a file never silently lowers its storage budget.
 Both tiers share the same CAS, atomic reservations and lease fences. The chosen
 floor also applies during streaming, rather than only before download. This
 policy keeps small fresh originals available during a background storage pause;
@@ -66,3 +84,27 @@ together. These transient capacity leases are not a durable blob residency or
 cold-storage catalog. Trusted offline replay may use `claim_media` without a
 writer for compatibility; live collectors always provide one. Gateway/MCP has
 no direct media claim capability.
+
+Migration 31 adds bounded download demand. Call `get_attachment(attachment_id)`
+to inspect an existing occurrence without changing queues. If it is queued,
+`request_file_download(attachment_id)` (gateway: `messages_request_file_download`)
+requests priority for one hour. The caller needs the existing `download` right;
+it cannot supply a URL, server path or provider descriptor. Duplicate requests
+coalesce without extending that hour. Outstanding demand is capped at 32 per
+credential and 128 globally; `media_request_limit` means to let earlier requests
+finish. Poll `get_attachment` after the returned interval; requesting priority
+does not promise completion or bypass any collection, retry or storage limit.
+If a provider cooldown outlasts the one-hour request window, the response is
+`deferred` with `next_due`/`retry_after_seconds`; no demand lease is created.
+Request again after that time instead of repeatedly polling or resetting backoff.
+
+Pending responses retain the full declared name, MIME, size, source message and
+download reason. Download, text extraction and enrichment have independent
+statuses. `get_attachment` verifies local presence before issuing a temporary
+link; an absent registered original returns `original_missing`, without resetting
+the download receipt or discarding the recorded processing statuses.
+
+The seven-day prefetch window is **not** an eviction TTL. Already stored originals
+are retained. A future cold-storage lifecycle must verify a durable copy before
+eviction, retain independently readable text/analysis, and test rehydration.
+Provider history/CDN availability alone is not a durable backup.

@@ -20,7 +20,7 @@ OPERATION_PERMISSIONS = {
     'capabilities': None,
     'list_chats': 'read', 'search': 'read', 'get_messages': 'read',
     'get_context': 'read', 'get_updates': 'read',
-    'get_attachment': 'download', 'download': 'download',
+    'get_attachment': 'download', 'download': 'download', 'request_file_download':'download',
     'ack_updates': 'cursor-write', 'dismiss_reply':'cursor-write',
     'get_reviews': 'read', 'record_review': 'review-write',
     'search_people': 'read', 'search_files': 'read', 'get_file_text': 'read',
@@ -58,6 +58,7 @@ AUDIT_CODES = frozenset({
     'subscription_access_changed','invalid_subscription_state',
     'invalid_upload','invalid_upload_chunk','upload_limit','upload_capacity','upload_expired',
     'upload_offset_conflict','upload_hash_mismatch',
+    'media_request_limit',
 })
 UNSET = object()
 
