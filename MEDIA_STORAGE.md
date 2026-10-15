@@ -60,7 +60,13 @@ have already consumed some disk space. It is conservative, not a promise of
 exact available capacity. It cannot protect against unrelated software filling
 the same disk: the writer rechecks the media floor on every chunk and cleans up
 its own pending file after interruption. No original is deleted or evicted by
-this feature.
+this feature. A writer killed outright (SIGKILL, power loss) leaves a
+`.pending-*` file; collectors remove such top-level files untouched for a day
+at startup. If a stored original fails verification, the next verified download
+of the same digest replaces it instead of failing with `blob_corrupt`.
+
+Telegram original transfers get a deadline sized for paced 512 KiB requests
+(at least one hour, at most six), so files above about 1.7 GiB can finish.
 
 If there is insufficient capacity, the job stays `queued` with
 `error_code=paused_storage`, retries after 60 seconds, and does not increment

@@ -6,6 +6,7 @@ Ambiguous sends are terminal unknown, never automatically retried.
 import asyncio
 import hashlib
 import re
+import time
 
 from psycopg.types.json import Jsonb
 
@@ -16,6 +17,59 @@ from .store import APIError, serial
 
 class SendRejected(RuntimeError):
     """A local rejection before invoking the provider send operation."""
+
+
+class DispatchNotStarted(Exception):
+    """The provider never received the request, so the outcome is certain: not sent."""
+
+
+PROVIDER_PHASES=frozenset({'waiting','started','refused'})
+
+
+async def dispatch(job,call,timeout,*,passthrough=()):
+    """Run call(job), counting `timeout` from the moment the provider is invoked.
+
+    A provider opts in to exact outcomes by calling job['_provider_phase'] with
+    'waiting' before local checks or a shared rate gate, 'started' right before
+    the request leaves the process, and 'refused' when the provider rejected it
+    without acting (a Telegram flood wait). Local waiting is bounded by the job
+    expiry instead of the provider timeout, and a failure outside 'started'
+    raises DispatchNotStarted. Providers that never report keep one timeout.
+    """
+    loop=asyncio.get_running_loop()
+    phase=None
+    def report(value):
+        nonlocal phase
+        if value not in PROVIDER_PHASES:raise ValueError('invalid_provider_phase')
+        phase=value
+        if value=='started':scope.reschedule(loop.time()+timeout)
+        elif value=='waiting':scope.reschedule(loop.time()+max(0.,job['expires_at']-time.time())+1)
+    try:
+        async with asyncio.timeout(timeout) as scope:
+            job['_provider_phase']=report
+            return await call(job)
+    except passthrough:raise
+    except Exception as exc:
+        if phase in ('waiting','refused'):raise DispatchNotStarted() from exc
+        raise
+
+
+async def finish_durably(finish,*args,attempts=4):
+    """Record a dispatch outcome, retrying transient database faults.
+
+    The outcome exists only in this process: losing it to one pool timeout
+    would turn a confirmed send into `sender_interrupted`. The update matches
+    only the dispatching row of this lease, so a retry after an unseen commit
+    changes nothing. If every attempt fails the collector must stop: the
+    next lease marks the row interrupted instead of leaving it dispatching.
+    """
+    import psycopg
+    from psycopg_pool import PoolTimeout
+    for attempt in range(attempts):
+        try:return await asyncio.to_thread(finish,*args)
+        except (psycopg.OperationalError,PoolTimeout) as exc:
+            if attempt==attempts-1:raise RuntimeError('dispatch_result_unrecorded') from exc
+            await asyncio.sleep(2**attempt)
 
 
 def valid_text(text):
@@ -193,8 +247,11 @@ def reconcile_send_receipt(state,value):
     The current fenced account owner can record a previous dispatch's fact. No
     mutation is retried, and a queued/rejected/conflicting row is never promoted.
     """
+    from .spool import PoisonItem
     value=validate_send_receipt(value)
-    if value['account']!=state.account:raise ValueError('foreign_send_receipt')
+    # Permanent mismatches (for example after restoring an older backup) are
+    # quarantined by the spool instead of blocking every later receipt.
+    if value['account']!=state.account:raise PoisonItem('foreign_send_receipt')
     if state.lease is None:raise RuntimeError('collector_lease_lost')
     with state.archive.store.pool.connection() as c:
         state.archive.fence(c,state.account,state.lease)
@@ -202,14 +259,14 @@ def reconcile_send_receipt(state,value):
             WHERE o.id=%s AND o.account=%s AND a.platform='whatsapp' FOR UPDATE OF o''',
             (value['send_id'],state.account)).fetchone()
         if not row or row['provider_chat']!=value['requested_chat']:
-            raise ValueError('send_receipt_target_mismatch')
+            raise PoisonItem('send_receipt_target_mismatch')
         reference=value['archive_reference'];provider_id=value['provider_message_id']
         if row['status']=='sent':
             if row['provider_message_id']!=provider_id or row['archive_reference']!=reference:
-                raise ValueError('send_receipt_conflict')
+                raise PoisonItem('send_receipt_conflict')
             return {'outcome':'duplicate_send_receipt'}
         if row['status'] not in ('dispatching','unknown'):
-            raise ValueError('send_receipt_state_mismatch')
+            raise PoisonItem('send_receipt_state_mismatch')
         c.execute('''UPDATE outgoing_messages SET status='sent',provider_message_id=%s,
             archive_reference=%s,error_code=NULL,finished_at=clock_timestamp() WHERE id=%s''',
             (provider_id,Jsonb(reference),row['id']))
@@ -445,7 +502,7 @@ class OutgoingWorker:
             await asyncio.to_thread(self.preflight,job)
             async def preflight():await asyncio.to_thread(self.preflight,job)
             job['_preflight']=preflight
-            receipt=await asyncio.wait_for(self.send(job),30)
+            receipt=await dispatch(job,self.send,30,passthrough=SendRejected)
             provider_id=receipt.get('provider_message_id') if isinstance(receipt,dict) else None
             if not isinstance(provider_id,str) or not 1<=len(provider_id)<=256:
                 raise RuntimeError('send_receipt_missing')
@@ -453,13 +510,19 @@ class OutgoingWorker:
         except SendRejected as exc:
             code=str(exc) if str(exc) in ('send_expired','sending_disabled','send_target_invalid','send_access_changed') else 'send_rejected'
             terminal='expired' if code=='send_expired' else 'cancelled' if code=='send_access_changed' else 'failed'
-            await asyncio.to_thread(self.finish,job,terminal,None,code)
+            await finish_durably(self.finish,job,terminal,None,code)
+        except DispatchNotStarted:
+            # Rate gate, local checks or a provider refusal: nothing left the
+            # process, so the agent may safely send again with a new action ID.
+            expired=time.time()>=job['expires_at']
+            await finish_durably(self.finish,job,'expired' if expired else 'failed',None,
+                'send_expired' if expired else 'send_not_started')
         except Exception as exc:
             # Never expose arbitrary provider error text or turn uncertainty
             # into a retry. Preserve only useful, content-free diagnostics.
             code=str(exc) if str(exc) in ('send_receipt_mismatch','send_receipt_missing',
                 'provider_disconnected','provider_page_stalled','provider_operation_uncertain') else 'send_result_unknown'
-            await asyncio.to_thread(self.finish,job,'unknown',None,code)
+            await finish_durably(self.finish,job,'unknown',None,code)
         else:
-            await asyncio.to_thread(self.finish,job,'sent',provider_id)
+            await finish_durably(self.finish,job,'sent',provider_id)
         return True

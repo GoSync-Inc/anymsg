@@ -27,11 +27,11 @@ iCloud: сначала скрытый ввод app-specific password в legacy r
 ```sh
 uv run family-calendar connection add-icloud --id apple-parent
 uv run family-calendar pilot icloud discover --connection apple-parent
-uv run family-calendar service import-icloud --connection apple-parent --owner egor
+uv run family-calendar service import-icloud --connection apple-parent --owner egor --timezone Asia/Makassar
 uv run family-calendar service discover --connection apple-parent
 ```
 
-Импорт не изменяет credentials, journals и allowlists пилота. Сервис имеет свой Vault и отдельный write opt-in; каждый аккаунт использует отдельный транспорт.
+`--timezone` — IANA-зона календарей, в которой читаются события на весь день (по умолчанию `Asia/Makassar`). Discover заменяет её зоной из VTIMEZONE календаря, а если её нет, оставляет выбранную при импорте. Импорт не изменяет credentials, journals и allowlists пилота. Сервис имеет свой Vault и отдельный write opt-in; каждый аккаунт использует отдельный транспорт.
 
 ## Семья и разрешения
 
@@ -144,6 +144,14 @@ Intent и `sending` сохраняются до сети; operation/resource adv
 CalDAV create: `If-None-Match`, update/delete: `If-Match`. Google update/delete: `If-Match`; insert: сохранённый client-generated ID, поскольку conditional insert не поддерживается. [Google resource versions](https://developers.google.com/workspace/calendar/api/guides/version-resources).
 
 Сейчас запись — отдельные неповторяющиеся timed события без гостей/специальных Google типов. Незапрошенные поля и ICS свойства/alarms сохраняются. Recurrence/future из harness не включены в MCP. Обязанности `dropoff/pickup/stay_with_child` хранятся отдельно: assigned занимает слот, proposed — нет. Изменять/отменять по `assignment_id` и `expected_version`. Согласие другого человека не утверждается. Автоматической связи с занятием ребёнка и проекций в календари родителей пока нет.
+
+## Покрытие и ошибки чтения
+
+Повторения iCloud разворачиваются лениво: в одном окне календаря не больше 500 экземпляров, как и в ответах agenda/slots (`event_limit`). Перед разворачиванием каждый RRULE оценивается сверху без генерации: dateutil проходит все экземпляры от DTSTART до конца окна. Больше 100 000 на ресурс или 1 000 000 на календарь дают `coverage_incomplete`, например `FREQ=MINUTELY`/`SECONDLY` или ежечасное событие, идущее больше 11 лет. Ежечасное напоминание даёт 744 события за 31 день, поэтому такое окно остаётся `unknown`, а окно до 20 дней читается полностью. Лимит 500 не повышен: его же применяют agenda и slots, так что больший лимит одного worker не дал бы покрытия. При `coverage_incomplete` из-за плотного календаря запросить более короткое окно.
+
+Событие нулевой длины (например, DTSTART без DTEND) публикуется как момент: `instant=true`, `busy=false`, `end` равен `start`; слоты оно не занимает. Событие, которое кончается раньше начала, даёт coverage `invalid_provider_event_time`, а данные, которые нельзя сохранить, — `invalid_provider_data`. Это ошибки данных календаря, а не `provider_unavailable`.
+
+Если worker перезапустился во время чтения, это обновление становится `failed`, а coverage получает `sync_interrupted`. Повторно оно не запускается: чтение, уронившее процесс, иначе блокировало бы все обновления и операции. Для нового чтения агент снова вызывает agenda/slots с `refresh=true`.
 
 ## Эксплуатация
 

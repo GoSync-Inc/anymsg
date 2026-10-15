@@ -105,12 +105,78 @@ SECURITY_HEADERS = {'Cache-Control': 'no-store', 'Referrer-Policy': 'no-referrer
                     'X-Content-Type-Options': 'nosniff', 'X-Frame-Options': 'DENY'}
 
 
+PEER_PER_MINUTE = 600
+# Per authenticated principal. The gateway runs a capabilities pre-check before
+# every call and a 32 MiB upload is 128 chunks; separate budgets keep neither
+# from halving or exhausting the general one.
+PRINCIPAL_PER_MINUTE = {'principal': 180, 'capabilities': 600, 'upload': 256}
+
+
+def budget(path, envelope=None):
+    """Name of the per-principal budget one authenticated request is charged to."""
+    name = path.removeprefix('/v1/')
+    if (isinstance(envelope, dict) and envelope.get('method')=='tools/call'
+            and isinstance(envelope.get('params'), dict)):
+        name = envelope['params'].get('name')
+    if not isinstance(name, str): return 'principal'
+    return {'capabilities':'capabilities','upload_file_chunk':'upload'}.get(name, 'principal')
+
+
 def bearer(headers):
     value = (headers or {}).get('authorization', '')
     scheme, _, token = value.partition(' ')
     if scheme.lower()!='bearer' or not token or ' ' in token:
         raise APIError('unauthorized', 401)
     return token
+
+
+class ActiveDownloads:
+    """Download grants with an admitted GET, used only by HEAD revalidation.
+
+    A running transfer may outlive its grant's TTL. A relaying gateway keeps
+    checking access with HEAD, which then validates the binding admitted with
+    the GET instead of the TTL (Store.download). An entry lasts while a GET is
+    sending and LINGER seconds after, because a slow client can still be
+    receiving bytes buffered in the relay once this server has finished. A new
+    GET always needs an unexpired grant. Process-local: a restart ends these
+    transfers anyway.
+    """
+    LINGER=600
+    LIMIT=4096
+
+    def __init__(self):
+        self.entries={}
+
+    def binding(self, grant):
+        entry=self.entries.get(digest(grant))
+        if entry and (entry['streams'] or time.monotonic()<entry['until']):return entry['binding']
+        return None
+
+    def start(self, grant, binding):
+        now=time.monotonic()
+        for k in [k for k,v in self.entries.items() if not v['streams'] and v['until']<=now]:
+            del self.entries[k]
+        # Oldest finished transfers go first; running ones are never dropped.
+        idle=[k for k,v in self.entries.items() if not v['streams']]
+        for k in idle[:max(0,len(self.entries)+1-self.LIMIT)]:
+            del self.entries[k]
+        entry=self.entries.setdefault(digest(grant),{'binding':binding,'streams':0,'until':now})
+        entry['streams']+=1
+        def done():
+            entry['streams']-=1
+            entry['until']=time.monotonic()+self.LINGER
+        return done
+
+
+class TrackedFileResponse(FileResponse):
+    """Report the end of a transfer however it ends."""
+    def __init__(self, path, done, **kwargs):
+        super().__init__(path,**kwargs)
+        self.done=done
+
+    async def __call__(self, scope, receive, send):
+        try:await super().__call__(scope,receive,send)
+        finally:self.done()
 
 
 class Boundary:
@@ -123,13 +189,17 @@ class Boundary:
         self.buckets = OrderedDict()
         self.models=models or {}
 
-    def allow(self, key, maximum):
+    def allow(self, key, maximum, cost=1):
         now = time.monotonic()
         count, start = self.buckets.pop(key, (0,now))
         if now-start>=60: count,start=0,now
-        self.buckets[key] = (count+1,start)
+        self.buckets[key] = (count+cost,start)
         if len(self.buckets)>4096: self.buckets.popitem(last=False)
         return count<maximum
+
+    def charge(self, principal, name):
+        if not self.allow(name+':'+principal,PRINCIPAL_PER_MINUTE[name]):
+            raise APIError('rate_limited',429)
 
     async def __call__(self, scope, receive, send):
         if scope['type']!='http':
@@ -161,12 +231,21 @@ class Boundary:
                 raise APIError('unauthorized',401)
             if request.url.path=='/healthz' and request.method=='GET':
                 return await JSONResponse({'status':'alive','version':__version__}, headers=SECURITY_HEADERS)(scope,receive,send)
-            # Bound unauthenticated work; the proxy is intentionally not trusted to supply a client IP.
-            if not self.allow('peer:'+peer,600): raise APIError('rate_limited',429)
-            if not request.url.path.startswith('/v1/download/'):
-                token = bearer(request.headers)
-                principal = await run_in_threadpool(self.store.authenticate, token)
-                if not self.allow('principal:'+principal,180): raise APIError('rate_limited',429)
+            # Bound unauthenticated work (download grants, missing or rejected
+            # credentials) per peer before any database access; the proxy is
+            # intentionally not trusted to supply a client IP. Authenticated
+            # requests are charged to their principal instead, because every
+            # agent behind one gateway shares its peer address.
+            download=request.url.path.startswith('/v1/download/')
+            if not self.allow('peer:'+peer,PEER_PER_MINUTE,cost=1 if download else 0):
+                raise APIError('rate_limited',429)
+            principal=None
+            if not download:
+                try:principal=await run_in_threadpool(self.store.authenticate,bearer(request.headers))
+                except APIError as error:
+                    if error.status==401:self.allow('peer:'+peer,PEER_PER_MINUTE)
+                    raise
+                if request.method!='POST':self.charge(principal,'principal')
             if request.method=='GET' and request.url.path.rstrip('/')=='/mcp':
                 # Optional SSE requires a connection that can deliver server
                 # notifications. This service uses independent JSON POSTs and
@@ -191,9 +270,12 @@ class Boundary:
                         if not event.get('more_body'): return bytes(data)
                 try: body=await asyncio.wait_for(read_body(),10)
                 except TimeoutError: raise APIError('body_timeout',408) from None
+                envelope=None
                 if mcp_route:
                     try: envelope=json.loads(body)
-                    except (ValueError,UnicodeError):envelope=None
+                    except (ValueError,UnicodeError):pass
+                if principal is not None:self.charge(principal,budget(request.url.path,envelope))
+                if mcp_route:
                     if len(body)>16384 and not (isinstance(envelope,dict) and
                         envelope.get('method')=='tools/call' and isinstance(envelope.get('params'),dict)
                         and envelope['params'].get('name')=='upload_file_chunk'):
@@ -855,11 +937,18 @@ def create_app(store: Store, allowed_hosts: list[str]):
             raise
         return JSONResponse(result)
 
+    transfers=ActiveDownloads()
     async def download(request):
         from .file_index import file_response_fields
-        row,path=await run_in_threadpool(store.download,request.path_params['grant'])
-        return FileResponse(path,media_type='application/octet-stream',filename=file_response_fields(row)['download_filename'],
-                            content_disposition_type='attachment',headers={'X-Content-SHA256':row['digest']})
+        grant=request.path_params['grant']
+        if request.method=='HEAD':
+            # A relaying gateway revalidates its running transfer this way.
+            row,path,_=await run_in_threadpool(store.download,grant,active=transfers.binding(grant))
+            return FileResponse(path,media_type='application/octet-stream',filename=file_response_fields(row)['download_filename'],
+                                content_disposition_type='attachment',headers={'X-Content-SHA256':row['digest']})
+        row,path,binding=await run_in_threadpool(store.download,grant)
+        return TrackedFileResponse(path,transfers.start(grant,binding),media_type='application/octet-stream',
+            filename=file_response_fields(row)['download_filename'],content_disposition_type='attachment',headers={'X-Content-SHA256':row['digest']})
 
     models={name:tool.fn_metadata.arg_model for name,tool in mcp._tool_manager._tools.items()}
     for tool in mcp._tool_manager._tools.values():tool.parameters['additionalProperties']=False

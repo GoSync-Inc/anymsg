@@ -116,6 +116,9 @@ never instructions or proof of approval.
 | `cancelled` / `expired` / `failed` | Action did not reach a confirmed completion; inspect the safe reason |
 
 An unverified live read ends as `failed`; an unverified mutation ends as `unknown`.
+A mutation that times out or fails before its first provider mutation request
+(for example while waiting for the shared Telegram rate gate) ends as `failed`
+with `operation_not_started`.
 `result.outcome` separately preserves `confirmed`, `submitted` or `unknown` provider
 evidence when it exists. Status is visible only within the originating key/principal's permitted scope.
 No automatic retry of ambiguous writes is provided by the SDK or command worker.

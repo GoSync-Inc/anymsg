@@ -99,3 +99,19 @@ def test_conflicting_journal_cannot_replace_a_confirmed_stanza(native_sender):
     with pytest.raises(ValueError,match='send_receipt_conflict'):
         reconcile_send_receipt(state,receipt(queued,provider_message_id='true_'+PN+'_OTHER',
             archive_reference={'provider_chat_id':LID,'provider_message_id':'true_'+LID+'_OTHER'}))
+
+
+def test_receipt_for_a_cancelled_send_is_quarantined_not_a_crash_loop(native_sender,tmp_path):
+    # After restoring an older backup the row can be terminal or missing while
+    # the collector still holds the provider receipt. Later receipts must drain.
+    store, _, key, state, queued=native_sender
+    with store.pool.connection() as c:
+        c.execute("UPDATE outgoing_messages SET status='cancelled' WHERE id=%s",(queued['send_id'],))
+    spool=DurableSpool(tmp_path/'receipts',validator=validate_send_receipt,reserve_bytes=0)
+    spool.put(receipt(queued))
+    spool.put(receipt(queued,send_id='send_'+'f'*32))
+    assert spool.drain(lambda value:reconcile_send_receipt(state,value))==0
+    assert not list(spool.path.glob('*.json')) and spool.quarantined()==2
+    reasons=sorted(path.read_text() for path in spool.quarantine_path.glob('*.reason'))
+    assert reasons==['send_receipt_state_mismatch\n','send_receipt_target_mismatch\n']
+    assert store.get_send_status(key,queued['send_id'])['status']=='cancelled'

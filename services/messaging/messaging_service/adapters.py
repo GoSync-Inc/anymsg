@@ -18,6 +18,34 @@ def timestamp(value):
     return value
 
 
+MAX_MEDIA_BYTES=8*1024**3
+
+
+def display_text(value,maximum):
+    """Bound provider-supplied display text instead of rejecting the whole message."""
+    if not isinstance(value,str):return ''
+    return value.replace('\x00','\ufffd')[:maximum]
+
+
+def media_mime(value):
+    # Senders choose these values; parameters and malformed types must not block capture.
+    if not isinstance(value,str) or re.search(r'[\x00-\x1f\x7f]',value):return 'application/octet-stream'
+    mime=value.split(';',1)[0].strip().lower()
+    return mime if len(mime)<=127 and re.fullmatch(r'[\w.+-]+/[\w.+-]+',mime) else 'application/octet-stream'
+
+
+def media_name(value,fallback):
+    name=display_text(value,4096) or fallback
+    if len(name)<=255:return name
+    stem,dot,suffix=name.rpartition('.')
+    # Keep a short extension; it is display metadata, never a storage path.
+    return stem[:254-len(suffix)]+dot+suffix if dot and stem and len(suffix)<=16 else name[:255]
+
+
+def media_bytes(value):
+    return value if type(value) is int and 0<=value<=MAX_MEDIA_BYTES else None
+
+
 def observed_duration(value):
     """Retain only bounded numeric duration observed in cached provider metadata."""
     return value if type(value) in (int,float) and 0<=value<=86400 and math.isfinite(value) else None
@@ -53,8 +81,9 @@ def telegram_message(account,message,*,chat_title='',origin='live',verified_self
         from telethon.tl.custom.file import File
         file=File(provider_media)
     if file and provider_media:
-        media.append({'provider_id':str(provider_media.id),'filename':file.name or f'{message.id}{file.ext or ".bin"}',
-                      'mime':file.mime_type or 'application/octet-stream','bytes':file.size})
+        media.append({'provider_id':str(provider_media.id),
+                      'filename':media_name(file.name,f'{message.id}{file.ext or ".bin"}'),
+                      'mime':media_mime(file.mime_type),'bytes':media_bytes(file.size)})
     entity=getattr(message,'sender',None)  # Telethon's cached entity; never get_sender()/network here.
     # NewMessage can belong to a chat absent from the last dialog discovery.
     # Use only the entity already attached to this message, and verify its peer.
@@ -130,12 +159,9 @@ def whatsapp_message(account,event,*,origin='live',change='message',observed_at=
     if change!='message' and observed_at is None: raise ValueError('missing_change_time')
     media=[]
     if event.get('hasMedia') and change!='delete':
-        mime=event.get('mimetype') or 'application/octet-stream'
-        if not isinstance(mime,str) or re.search(r'[\x00-\x1f\x7f]',mime):raise ValueError('invalid_mime')
-        mime=mime.split(';',1)[0].strip().lower()
         media.append({'provider_id':str(event['messageId']),
-                      'filename':event.get('filename') or str(event['messageId'])[:120]+'.bin',
-                      'mime':mime,'bytes':event.get('filesize')})
+                      'filename':media_name(event.get('filename'),str(event['messageId'])[:120]+'.bin'),
+                      'mime':media_mime(event.get('mimetype')),'bytes':media_bytes(event.get('filesize'))})
     edited=event.get('editedTimestampMs')
     updated=(edited/1000 if type(edited) is int and edited>0 else None)
     if change=='delete' or (change=='edit' and updated is None): updated=observed_at
@@ -147,15 +173,22 @@ def whatsapp_message(account,event,*,origin='live',change='message',observed_at=
         'vcard':'contact','multi_vcard':'contact','poll_creation':'poll'}.get(native_type,'unknown')
     if native_type is None and event.get('mediaKind'):
         kind='video' if event['mediaKind']=='animation' else event['mediaKind'] if event['mediaKind']!='other' else 'unknown'
+    body=event.get('body') or ''
+    formatting=event.get('formatting',unknown_formatting())
+    if isinstance(body,str) and ('\x00' in body or len(body)>65536):
+        # Sender-controlled text: keep a bounded copy. Its wire proof no longer applies.
+        body,formatting=display_text(body,65536),unknown_formatting()
+    reply=event.get('replyToId')
+    reply=reply if isinstance(reply,str) and 0<len(reply)<=256 and '\x00' not in reply else None
     return validate({'account':account,'platform':'whatsapp','chat':event['chatId'],
-        'chat_title':event.get('chatName') or event['chatId'],'provider_id':event['messageId'],
-        'sender':event.get('senderId') or '','body':event.get('body') or '',
-        'formatting':event.get('formatting',unknown_formatting()),
+        'chat_title':display_text(event.get('chatName'),512) or event['chatId'],'provider_id':event['messageId'],
+        'sender':event.get('senderId') or '','body':body,
+        'formatting':formatting,
         'sent_at':timestamp(event['timestamp']),'updated_at':timestamp(updated or event['timestamp']),
         'deleted':change=='delete','direction':'outgoing' if event.get('fromMe') else 'incoming',
-        'origin':origin,'media':media,'sender_profile':{'display_name':event.get('senderName') or '',
-                                                     'username':event.get('senderUsername') or ''},
-        'metadata':{'reply_to_provider_id':event.get('replyToId'),
+        'origin':origin,'media':media,'sender_profile':{'display_name':display_text(event.get('senderName'),512),
+                                                     'username':display_text(event.get('senderUsername'),128)},
+        'metadata':{'reply_to_provider_id':reply,
                     'is_service':service,
                     'message_kind':kind,'provider_message_type':native_type,
                     'timestamp_resolution':'second',

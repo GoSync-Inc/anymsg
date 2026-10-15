@@ -243,7 +243,9 @@ def test_blob_limits_integrity_and_interrupted_stream(tmp_path):
     assert list(writer.root.iterdir())==[]
     blob=writer.write([b'ab',b'cd']); assert writer.write([b'abcd'])==blob
     (writer.root/blob.digest).write_bytes(b'xxxx')
-    with pytest.raises(RuntimeError,match='corrupt'): writer.write([b'abcd'])
+    with pytest.raises(RuntimeError,match='corrupt'): writer.verify(blob)
+    # A verified download of the same digest repairs the damaged copy.
+    assert writer.write([b'abcd'])==blob and writer.verify(blob).read_bytes()==b'abcd'
 
 
 def test_blob_disk_reserve(tmp_path,monkeypatch):

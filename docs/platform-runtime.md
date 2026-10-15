@@ -71,11 +71,31 @@ digests, receipts, expected revisions and unknown outcomes pass through unchange
 A transport failure after a mutation dispatch is explicitly reported as unknown;
 the gateway does not resend it or invent a new request ID.
 
-Original files use bounded, short-lived gateway bearer links. SHA/length are checked
-while streaming. Gateway revocation is rechecked every chunk and by a 250 ms watcher;
-backend access is revalidated with the authenticated backend grant's HEAD route at
-one-second intervals with a two-second timeout. Failure aborts the stream, including
-a stalled client. Restart invalidates temporary links. Never log download paths,
+Original files use bounded, short-lived gateway bearer links. Their expiry bounds
+when a download may start, not how long a started transfer may run. SHA/length are
+checked while streaming, and the final chunk is withheld until both match, so a
+mismatch truncates the response rather than completing a 200. Gateway revocation is rechecked every chunk and by a 250 ms
+watcher; backend access is revalidated with the authenticated backend grant's HEAD
+route at one-second intervals with a two-second timeout. A 401/403/404, redirect or
+other unexpected status aborts at once. Rate limiting (429), 5xx, timeouts and
+connection errors are tolerated until ten seconds pass without a confirmation, so a
+busy backend does not cut a transfer but cannot hide a revocation for longer than
+that. Messaging records the
+binding of each grant whose GET it admitted. While that GET is sending, and for ten
+minutes afterwards (relay buffers may still be draining to a slow client), HEAD
+checks the current key, download permission, scope version and file instead of the
+grant's 120-second TTL. A new GET always needs an unexpired grant. This record is
+process-local; a messaging restart ends those transfers anyway. Failure aborts the
+stream, including a stalled client.
+
+Every agent behind one gateway reaches messaging from the same address, so
+messaging charges authenticated requests to their principal, per minute: 180
+general calls, 600 `capabilities` reads (the gateway's pre-check before each call)
+and 256 upload chunks (two 32 MiB uploads, across REST and MCP). Only
+unauthenticated work counts per peer address: download grant requests and missing
+or rejected credentials, 600 per minute, checked before any database access. A peer
+that keeps presenting rejected credentials is blocked for the rest of that minute,
+including its valid agents. Restart invalidates temporary links. Never log download paths,
 credentials, source content or private filenames at the reverse proxy.
 
 CI retains the existing messaging checks and adds module JUnit reports with qualified

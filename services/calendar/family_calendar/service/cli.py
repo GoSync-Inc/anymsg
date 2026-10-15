@@ -3,6 +3,7 @@ import asyncio
 import json
 import logging
 from pathlib import Path
+from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
 from psycopg import sql
 import secrets
@@ -36,6 +37,11 @@ def parser():
     imported = sub.add_parser("import-icloud")
     imported.add_argument("--connection", required=True)
     imported.add_argument("--owner", default="egor")
+    imported.add_argument(
+        "--timezone",
+        default="Asia/Makassar",
+        help="IANA zone of the imported calendars until discover reads their own",
+    )
     google = sub.add_parser("connect-google")
     google.add_argument("--id", required=True)
     google.add_argument("--email", required=True)
@@ -95,7 +101,9 @@ async def discover(store, vault, connection_id):
                 calendar_ref = c["ref"]
                 target = c["href"]
                 label = c["label"]
-                zone = "Asia/Makassar"
+                # Without a calendar VTIMEZONE keep the zone chosen at import.
+                old = store.one("SELECT timezone FROM calendars WHERE ref=%s", (calendar_ref,))
+                zone = old["timezone"] if old else "Asia/Makassar"
                 privilege = c["privilege"]
                 if c.get("timezone_ical"):
                     from icalendar import Calendar
@@ -237,6 +245,10 @@ def dispatch(args, home, root, config, store):
         return {"disconnected": True}
     vault = Vault(root / "vault")
     if args.action == "import-icloud":
+        try:
+            ZoneInfo(args.timezone)
+        except (ZoneInfoNotFoundError, ValueError):
+            raise CalendarError("invalid_timezone") from None
         legacy = Registry(home)
         connection = legacy.load(args.connection)
         # Preserve the pilot's credentials/discovery/allowlists/journals unchanged.
@@ -246,7 +258,7 @@ def dispatch(args, home, root, config, store):
         )
         store.connection(args.connection, args.owner, "icloud")
         for c in legacy._entry(args.connection)["calendars"]:
-            store.calendar(c["ref"], args.connection, c["href"], c["label"], "Asia/Makassar", c["privilege"])
+            store.calendar(c["ref"], args.connection, c["href"], c["label"], args.timezone, c["privilege"])
         return {"connection_id": args.connection, "imported": True, "write_enabled": False}
     if args.action == "connect-google":
         result = connect(args.client, vault, args.id, args.email, root / "google-authorization.url")

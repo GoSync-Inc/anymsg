@@ -76,8 +76,12 @@ class Store:
         self._status_cache_lock=threading.Lock()
         self.files = files.resolve()
         self.public_url = public_url.rstrip('/')
+        # Keepalives and tcp_user_timeout turn a half-open connection into a
+        # prompt OperationalError instead of a call that outlives the lease.
         self.pool = ConnectionPool(dsn, min_size=1, max_size=6, timeout=5, open=True,
             kwargs={'row_factory': dict_row, 'connect_timeout': 5,
+                    'keepalives': 1, 'keepalives_idle': 30, 'keepalives_interval': 10,
+                    'keepalives_count': 3, 'tcp_user_timeout': 30000,
                     'options': '-c statement_timeout=5000 -c timezone=UTC'})
         self.pool.wait(timeout=10)
 
@@ -669,34 +673,50 @@ class Store:
                     'download_expires_in': 120,
                     'notice': 'Temporary bearer link. Do not share or put it in public logs.'}
 
-    def download(self, grant):
+    def download(self, grant, *, active=None):
+        """Resolve a bearer grant to (attachment row, original path, binding).
+
+        The grant's TTL limits admission. `active` is the binding returned when
+        a GET on this grant was admitted: revalidating that running transfer
+        checks the current key, download permission, scope version and resource
+        instead of the TTL, so it outlives the grant but not a revocation.
+        """
         def resolve(c):
             if not isinstance(grant,str) or not re.fullmatch(r'[A-Za-z0-9_-]{43}',grant):raise APIError('not_found',404)
-            row=c.execute('SELECT key_digest FROM download_grants WHERE digest=%s AND expires_at>clock_timestamp()',
-                          (digest(grant),)).fetchone()
-            if not row:raise APIError('not_found',404)
-            p=self.identity_digest(c,row['key_digest'],missing='not_found',status=404)
+            if active is None:
+                row=c.execute('SELECT key_digest FROM download_grants WHERE digest=%s AND expires_at>clock_timestamp()',
+                              (digest(grant),)).fetchone()
+                if not row:raise APIError('not_found',404)
+            p=self.identity_digest(c,row['key_digest'] if active is None else active[0],missing='not_found',status=404)
             if 'download' not in p['permissions']:
                 error=APIError('not_found',404);error.audit_identity=p;raise error
             return p
         with self.access('download',resolve) as (c,p):
             where,args=scope_filter(p,'m')
-            row = c.execute('''SELECT a.*,m.provider_id AS provider_message_id,
+            columns='''a.*,m.provider_id AS provider_message_id,
                 (SELECT platform FROM accounts WHERE id=m.account) AS provider_platform,
                 (SELECT metadata->>'media_kind' FROM message_metadata
-                    WHERE message=m.id AND revision=m.revision) AS media_kind
-                FROM download_grants g
-                JOIN attachments a ON a.id=g.attachment JOIN messages m ON m.id=a.message
-                WHERE g.digest=%s AND g.expires_at>clock_timestamp() AND g.key_digest=%s
-                AND g.scope_version=%s AND a.active AND NOT m.deleted AND '''+where,
-                [digest(grant),p['key_digest'],p['scope_version'],*args]).fetchone()
+                    WHERE message=m.id AND revision=m.revision) AS media_kind'''
+            if active is None:
+                row = c.execute('SELECT '+columns+''' FROM download_grants g
+                    JOIN attachments a ON a.id=g.attachment JOIN messages m ON m.id=a.message
+                    WHERE g.digest=%s AND g.expires_at>clock_timestamp() AND g.key_digest=%s
+                    AND g.scope_version=%s AND a.active AND NOT m.deleted AND '''+where,
+                    [digest(grant),p['key_digest'],p['scope_version'],*args]).fetchone()
+            elif active[1]!=p['scope_version']:row=None
+            else:
+                # The expired grant row may already be deleted; its admitted
+                # binding carries the same key, scope version and attachment.
+                row = c.execute('SELECT '+columns+''' FROM attachments a JOIN messages m ON m.id=a.message
+                    WHERE a.id=%s AND a.active AND NOT m.deleted AND '''+where,
+                    [active[2],*args]).fetchone()
             if not row:
                 raise APIError('not_found', 404)
             path = self.files/row['digest']
             if path.is_symlink() or not path.is_file() or path.stat().st_size != row['bytes']:
                 raise APIError('attachment_unavailable', 503)
             targets(p,[row['id']])
-            return row, path
+            return row, path, (p['key_digest'],p['scope_version'],row['id'])
 
     def get_updates(self, token, consumer, limit=20, *, accounts=None,chats=None,senders=None,
                     origins=None,kinds=None,direction='',from_time='',to_time='',compact=False,

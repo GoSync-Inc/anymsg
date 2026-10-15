@@ -127,11 +127,19 @@ upstream, initializes only a new consumer, and cannot reset an existing consumer
 ACK state. The legacy default remains `start_from="beginning"`.
 
 Original files are streamed through bounded, short-lived bearer tickets with separate
-connection pools. URLs cannot select another origin or path. Tickets recheck current
-local policy and credential binding, and poll the backend's existing HEAD download
-grant check during long transfers. Revocation terminates an active response; a partial
-file is never converted to a successful error JSON. Clients should verify the advertised
-length and SHA-256. Do not share or log these bearer URLs. Access logging is disabled.
+connection pools. URLs cannot select another origin or path. A ticket's expiry limits
+when a download may start; a started transfer may outlive it. Throughout the transfer
+the gateway rechecks current local policy and credential binding, and polls the
+backend's existing HEAD download grant check. A denial or unexpected answer ends the
+transfer at once; 429, 5xx, timeouts and connection errors end it only after 10
+seconds without a confirmation. For a transfer it is serving, the messaging backend
+answers that HEAD from the current key, scope and file instead of the grant's
+120-second expiry; upgrade it first, or long transfers still end there.
+Revocation terminates an active response; a partial file is never converted to a
+successful error JSON. The final chunk is withheld until length and SHA-256 match, so
+a corrupted original ends short of its Content-Length instead of completing. Clients
+should still verify the advertised length and SHA-256. Do not share or log these
+bearer URLs. Access logging is disabled.
 
 Deployment profiles in `config/profiles/` select managed or external backends. Run
 `python scripts/deedkit.py resolve --profile config/profiles/existing-readers.toml --json`

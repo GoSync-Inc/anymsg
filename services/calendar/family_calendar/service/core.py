@@ -267,7 +267,7 @@ class FamilyService:
                 event = {
                     "calendar_ref": calendar_ref,
                     "start": e["start_at"].isoformat(),
-                    "end": e["end_at"].isoformat(),
+                    "end": (e["start_at"] if e["details"].get("instant") else e["end_at"]).isoformat(),
                     "busy": e["busy"],
                 }
                 if cal["visibility"] == "details":

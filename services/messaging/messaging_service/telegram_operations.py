@@ -197,6 +197,10 @@ async def _execute(client, job, *, verified_self=None, governor=None):
 
     check_expiry()
     started_mutation = False
+    report = job.get('_provider_phase')
+    if report is not None:
+        # The shared rate gate and lookups may delay the first mutation.
+        report('waiting')
     stream = None
     referenced_peers = set()
 
@@ -238,6 +242,8 @@ async def _execute(client, job, *, verified_self=None, governor=None):
             check_policy()
             if mutation:
                 started_mutation = True
+                if report is not None:
+                    report('started')
             return await fn()
         return await governor.call(guarded, 'provider_command') if governor else await guarded()
 

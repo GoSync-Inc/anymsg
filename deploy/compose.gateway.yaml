@@ -13,6 +13,29 @@ services:
     ports: ["127.0.0.1:13240:13240"]
     networks: [integration]
     restart: unless-stopped
+    # Liveness only: unauthenticated /healthz with the exact public Host the
+    # boundary requires, no proxy and no output. Port matches --port above.
+    healthcheck:
+      test:
+        - CMD
+        - python
+        - -c
+        - |
+          import sys, urllib.parse, urllib.request
+          try:
+              host = urllib.parse.urlsplit(sys.argv[1]).netloc
+              request = urllib.request.Request(f"http://127.0.0.1:{int(sys.argv[2])}/healthz", headers={"Host": host})
+              with urllib.request.build_opener(urllib.request.ProxyHandler({})).open(request, timeout=8) as response:
+                  healthy = response.status == 200
+          except Exception:
+              healthy = False
+          sys.exit(0 if healthy else 1)
+        - "${DEEDKIT_PUBLIC_URL:?Set gateway HTTPS origin}"
+        - "13240"
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 40s
     read_only: true
     user: "10001:10001"
     cpu_shares: 512

@@ -17,11 +17,18 @@ def test_download_receipt_has_current_source_filename_proof(archive,kind,generat
     writer=BlobWriter(store.files,reserve_bytes=0)
     ar.finish_media(job,writer.write([b'xxxx']),writer=writer)
     link=store.get_attachment(key,job['id'])['download_url']
-    row,path=store.download(link.rsplit('/',1)[-1])
+    grant=link.rsplit('/',1)[-1]
+    row,path,binding=store.download(grant)
     assert path.read_bytes()==b'xxxx'
     expected='attachment-'+job['id']+'.jpg' if generated else provider+'.bin'
     assert file_response_fields(row)['download_filename']==expected
     assert row['filename']==provider+'.bin'
+    # Revalidating an admitted transfer retains the same current source metadata.
+    with store.pool.connection() as c:
+        c.execute('DELETE FROM download_grants')
+    active_row,active_path,_=store.download(grant,active=binding)
+    assert active_path==path
+    assert file_response_fields(active_row)['download_filename']==expected
 
 
 def test_fifth_active_media_attempt_is_still_processing_when_requested(archive):

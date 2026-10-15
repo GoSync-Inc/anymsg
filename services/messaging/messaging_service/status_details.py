@@ -39,6 +39,7 @@ DETAILS={
     'retry_exhausted':('The bounded download attempts are exhausted. Automatic retry is stopped.','inspect_download_failure'),
     'spool_full':('The durable capture queue reached its bound.','check_capture_backlog'),
     'disk_reserve':('The configured disk reserve prevents additional writes.','check_free_disk'),
+    'capture_quarantined':('Some captured items could not be applied and were moved to the spool quarantine folder. Later captures continue; the held items are not in the archive.','inspect_capture_quarantine'),
     'paused_storage':('Original download is deferred by local storage admission. Message capture and searchable metadata remain independent; provider attempts are not consumed.','check_media_storage_capacity'),
     'durable_capture_failed':('A callback could not be durably saved; reconnect reconciliation is required.','check_collector_health'),
 }

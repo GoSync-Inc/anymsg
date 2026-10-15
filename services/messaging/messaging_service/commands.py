@@ -15,6 +15,7 @@ from psycopg.types.json import Jsonb
 from .envelope import canonical
 from .policy import audit, effective_permissions, lock_principal, targets
 from .store import APIError, serial
+from .outgoing import finish_durably
 
 MAX_FILE_BYTES = 32 * 1024**2
 BLOCKED_RESULT_KEYS = frozenset(('token','access_token','refresh_token','session','session_data',
@@ -480,11 +481,14 @@ class CommandWorker:
         job=await asyncio.to_thread(self.claim)
         if not job:return False
         if job.get('cancelled'):return True
+        phases=[]
         try:
             await asyncio.to_thread(self.preflight,job)
             async def last_moment_preflight():
                 await asyncio.to_thread(self.preflight,job,verify_file=False)
             job['_preflight']=last_moment_preflight
+            # Providers report 'waiting' and then 'started' before the first mutation.
+            job['_provider_phase']=phases.append
             timeout=180 if job['operation']=='send_file' else 30
             answer=safe_result(await asyncio.wait_for(self.execute(job),timeout))
             if isinstance(answer.get('data'),dict) and 'archive_reference' in answer['data']:
@@ -495,11 +499,15 @@ class CommandWorker:
             code=str(exc) if str(exc) in ('operation_expired','operation_disabled','operation_access_changed',
                 'operation_target_changed','sender_not_ready','attachment_unavailable','unsupported_operation',
                 'forbidden','not_found','operation_rejected') else 'operation_rejected'
-            await asyncio.to_thread(self.finish,job,'expired' if code=='operation_expired' else 'failed',None,code)
+            await finish_durably(self.finish,job,'expired' if code=='operation_expired' else 'failed',None,code)
         except Exception:
-            await asyncio.to_thread(self.finish,job,'unknown' if job['mutation'] else 'failed',None,'operation_result_unknown')
+            # A provider that reports no phase stays conservative: any mutation may have run.
+            if job['mutation'] and phases and phases[-1]!='started':
+                await finish_durably(self.finish,job,'failed',None,'operation_not_started')
+            else:
+                await finish_durably(self.finish,job,'unknown' if job['mutation'] else 'failed',None,'operation_result_unknown')
         else:
             confirmed=answer['outcome']=='confirmed'
-            await asyncio.to_thread(self.finish,job,'succeeded' if confirmed else
+            await finish_durably(self.finish,job,'succeeded' if confirmed else
                 'unknown' if job['mutation'] else 'failed',answer,None if confirmed else 'operation_result_unknown')
         return True
