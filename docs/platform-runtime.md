@@ -71,7 +71,11 @@ Original files use bounded, short-lived gateway bearer links. Their expiry bound
 when a download may start, not how long a started transfer may run. SHA/length are
 checked while streaming. Gateway revocation is rechecked every chunk and by a 250 ms
 watcher; backend access is revalidated with the authenticated backend grant's HEAD
-route at one-second intervals with a two-second timeout. Messaging records the
+route at one-second intervals with a two-second timeout. A 401/403/404, redirect or
+other unexpected status aborts at once. Rate limiting (429), 5xx, timeouts and
+connection errors are tolerated until ten seconds pass without a confirmation, so a
+busy backend does not cut a transfer but cannot hide a revocation for longer than
+that. Messaging records the
 binding of each grant whose GET it admitted. While that GET is sending, and for ten
 minutes afterwards (relay buffers may still be draining to a slow client), HEAD
 checks the current key, download permission, scope version and file instead of the

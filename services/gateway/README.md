@@ -63,7 +63,9 @@ Original files are streamed through bounded, short-lived bearer tickets with sep
 connection pools. URLs cannot select another origin or path. A ticket's expiry limits
 when a download may start; a started transfer may outlive it. Throughout the transfer
 the gateway rechecks current local policy and credential binding, and polls the
-backend's existing HEAD download grant check. For a transfer it is serving, the
+backend's existing HEAD download grant check. A denial or unexpected answer ends the
+transfer at once; 429, 5xx, timeouts and connection errors end it only after 10
+seconds without a confirmation. For a transfer it is serving, the
 messaging backend answers that HEAD from the current key, scope and file instead of
 the grant's 120-second expiry; upgrade it first, or long transfers still end there.
 Revocation terminates an active response; a partial file is never converted to a

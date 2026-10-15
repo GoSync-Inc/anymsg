@@ -2,12 +2,17 @@ import asyncio
 import hashlib
 import json
 import time
+from types import SimpleNamespace
 from urllib.parse import urlsplit
 
 import httpx
+import pytest
 from starlette.testclient import TestClient
 
+from agent_gateway import files
 from agent_gateway.app import create_app
+from agent_gateway.files import Tickets
+from agent_gateway.policy import Denied
 from test_policy import config
 
 
@@ -200,3 +205,81 @@ def test_started_transfer_still_stops_on_policy_revocation(tmp_path):
         response = client.get(url)
         assert time.monotonic() - started < 2
         assert response.status_code == 200 and len(response.content) < len(data)
+
+
+@pytest.mark.parametrize(
+    "answers, complete",
+    [
+        ([429, 503, 502, 200], True),
+        ([503], False),
+        ([429], False),
+        ([401], False),
+        ([403], False),
+        ([404], False),
+    ],
+)
+def test_backend_revalidation_ends_only_on_denial_or_lasting_failure(
+    tmp_path, monkeypatch, answers, complete
+):
+    monkeypatch.setattr(files, "WATCH_SECONDS", 0.02)
+    monkeypatch.setattr(files, "BACKEND_RECHECK_SECONDS", 0.05)
+    monkeypatch.setattr(files, "BACKEND_GRACE_SECONDS", 0.6)
+    heads = []
+
+    def head():
+        heads.append(time.monotonic())
+        return answers[min(len(heads), len(answers)) - 1]
+
+    async def body(data):
+        yield data[:65536]
+        await asyncio.sleep(1.5)
+        yield data[65536:]
+
+    app, _, data, _ = setup(tmp_path, body=body, head=head)
+    with TestClient(app, raise_server_exceptions=False) as client:
+        url = issue(client).json()["download_url"]
+        started = time.monotonic()
+        response = client.get(url)
+        elapsed = time.monotonic() - started
+    if complete:
+        assert response.content == data and len(heads) > len(answers)
+    elif answers[0] in (429, 503):
+        # Overload is tolerated until nothing was confirmed for the grace period.
+        assert len(response.content) < len(data) and 0.6 <= elapsed < 1.4 and len(heads) > 3
+    else:
+        assert len(response.content) < len(data) and elapsed < 0.5 and len(heads) == 1
+
+
+def test_backend_check_separates_denials_from_unavailability():
+    async def answer(value):
+        def handler(request):
+            assert request.method == "HEAD"
+            if value == "error":
+                raise httpx.ConnectError("synthetic")
+            return httpx.Response(value)
+
+        transport = httpx.MockTransport(handler)
+        async with httpx.AsyncClient(base_url="http://messaging-api", transport=transport) as client:
+            tickets = Tickets(None, SimpleNamespace(metadata={"messaging": client}), "http://testserver")
+            try:
+                return await tickets.check_backend({"path": "/v1/download/" + "a" * 43})
+            except Denied as error:
+                return error.status
+
+    async def run():
+        return {
+            value: await answer(value) for value in [200, 429, 500, 503, "error", 302, 400, 401, 403, 404]
+        }
+
+    assert asyncio.run(run()) == {
+        200: True,
+        429: False,
+        500: False,
+        503: False,
+        "error": False,
+        302: 404,
+        400: 404,
+        401: 404,
+        403: 404,
+        404: 404,
+    }

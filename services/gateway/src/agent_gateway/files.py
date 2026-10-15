@@ -15,6 +15,14 @@ from starlette.responses import JSONResponse, StreamingResponse
 from .policy import Denied, key_from_file
 
 
+WATCH_SECONDS = 0.25
+BACKEND_RECHECK_SECONDS = 1
+# A definitive backend denial ends a transfer at once. Rate limiting, overload,
+# timeouts and transport errors only end it once the backend has confirmed
+# nothing for this long.
+BACKEND_GRACE_SECONDS = 10
+
+
 def origin(value):
     parsed = urlsplit(value)
     return parsed.scheme, parsed.hostname, parsed.port or (443 if parsed.scheme == "https" else 80)
@@ -30,14 +38,17 @@ class FileResponse(StreamingResponse):
         owner = asyncio.current_task()
 
         async def monitor():
-            last_backend_check = time.monotonic()
+            confirmed = checked = time.monotonic()
             while True:
-                await asyncio.sleep(0.25)
+                await asyncio.sleep(WATCH_SECONDS)
                 try:
                     self.check()
-                    if self.backend_check and time.monotonic() - last_backend_check >= 1:
-                        await self.backend_check()
-                        last_backend_check = time.monotonic()
+                    if self.backend_check and time.monotonic() - checked >= BACKEND_RECHECK_SECONDS:
+                        if await self.backend_check():
+                            confirmed = time.monotonic()
+                        elif time.monotonic() - confirmed >= BACKEND_GRACE_SECONDS:
+                            raise Denied("backend_unavailable", 503)
+                        checked = time.monotonic()
                 except Exception:
                     # Also interrupts a blocked upstream read or client send.
                     # Headers may already be sent; abort instead of a second
@@ -139,16 +150,24 @@ class Tickets:
         key_from_file(binding["key_file"], row["backend_key_digest"])
 
     async def check_backend(self, row):
-        # The existing download route validates the grant/key/resource for HEAD
-        # too. Use the independent metadata pool so bulk saturation cannot mask
-        # a backend ACL change. No body is consumed and no new grant is minted.
+        """True if the backend confirms access, False if it could not answer now.
+
+        Raises Denied for any other answer (401/403/404, redirects, unexpected
+        statuses). The existing download route validates the grant/key/resource
+        for HEAD too. Use the independent metadata pool so bulk saturation cannot
+        mask a backend ACL change. No body is consumed and no new grant is minted.
+        """
         try:
             async with asyncio.timeout(2):
                 async with self.clients.metadata["messaging"].stream("HEAD", row["path"]) as response:
-                    if response.status_code != 200:
-                        raise Denied("not_found", 404)
+                    status = response.status_code
         except (TimeoutError, httpx.HTTPError):
-            raise Denied("backend_unavailable", 503) from None
+            return False
+        if status == 200:
+            return True
+        if status == 429 or 500 <= status <= 599:
+            return False
+        raise Denied("not_found", 404)
 
     async def download(self, token, request):
         stack = AsyncExitStack()
