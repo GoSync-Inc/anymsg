@@ -12,6 +12,10 @@ const metadata=JSON.parse(readFileSync(new URL('../package.json',import.meta.url
 const declared=readFileSync(new URL('../lib/index.d.ts',import.meta.url),'utf8');
 
 const actions={
+  prepareFileUpload:{account:'synthetic',chat_id:'chat_synthetic',filename:'fixture.txt',mime:'text/plain',
+    bytes:1,sha256:'a'.repeat(64),request_id:'synthetic-upload'},
+  uploadFileChunk:{upload_id:'up_'+'a'.repeat(32),offset:0,data_base64:'YQ=='},
+  getFileUpload:{upload_id:'up_'+'a'.repeat(32)},
   dismissReply:{chat_id:'chat_synthetic',message_id:'msg_synthetic',expected_revision:2},
   previewMessage:{account:'synthetic',chat_id:'chat_synthetic',text:'Synthetic',format:'markdown',
     reply_to:'msg_synthetic',link_preview:false,allow_lossy:true},
@@ -48,7 +52,8 @@ test('every public convenience helper delegates the exact operation and retains 
     assert.equal(typeof client[name],'function',name);
     assert.strictEqual(await client[name](args),server,name);
     assert.deepEqual(seen.at(-1),[operation,args],name);
-    const method=new RegExp(`\\b${name}\\(args(\\?)?:[^\\n]+Promise<Record<string,\\s*unknown>>;`).exec(declared);
+    const resultType=['prepareFileUpload','uploadFileChunk','getFileUpload'].includes(name)?'FileUploadStatus':'Record<string,\\s*unknown>';
+    const method=new RegExp(`\\b${name}\\(args(\\?)?:[^\\n]+Promise<${resultType}>;`).exec(declared);
     assert.ok(method,`typed declaration missing for ${name}`);
     assert.equal(Boolean(method[1]),defaults.has(name),name);
   }

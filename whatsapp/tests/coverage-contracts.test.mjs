@@ -340,7 +340,7 @@ async function providerFixture({wrongIdentity=false,reserveBytes=0}={}){
   fs.writeFileSync(fake,`import {EventEmitter} from 'node:events';import fs from 'node:fs';
 const cfg=JSON.parse(fs.readFileSync(process.argv[2]));
 function msg(n,chat='123@c.us',fromMe=false){return {id:{_serialized:(fromMe?'true_':'false_')+chat+'_'+n,remote:chat},
- from:chat,to:chat,fromMe,body:'*observed*',timestamp:1792000000+n,hasMedia:true,type:'ptt',isForwarded:true,
+ from:fromMe?cfg.expected_wid:chat,to:chat,fromMe,body:'*observed*',timestamp:1792000000+n,hasMedia:true,type:'ptt',isForwarded:true,
  _data:{size:17,mimetype:'audio/ogg',quotedStanzaID:'reply',quotedParticipant:'123456789@c.us',notifyName:'Name',latestEditSenderTimestampMs:1792000020000},
  mentionedIds:['123456789@c.us']};}
 export class LocalAuth{constructor(options){this.options=options;}}
@@ -451,8 +451,14 @@ test('actual provider entrypoint pins identity and captures live edit global-del
     assert.equal(options.takeoverOnConflict,false);assert.equal(options.qrMaxRetries,1);
     assert.ok(!options.puppeteer.args.includes('--no-sandbox'));
     assert.equal(fs.statSync(path.join(f.session,'observed-options.json')).mode&0o777,0o600);
-    const sent=await f.call('send_text',{chat:'123@c.us',text:'events',expires_at:Date.now()/1000+60},true);
+    const send_id='send_'+'a'.repeat(32);
+    const sent=await f.call('send_text',{chat:'123@c.us',text:'events',send_id,expires_at:Date.now()/1000+60},true);
     assert.equal(sent.result.provider_message_id,'true_123@c.us_8');
+    const receipts=fs.readdirSync(path.join(f.events,'send-receipts')).filter(x=>x.endsWith('.json'));
+    assert.equal(receipts.length,1);
+    const receipt=JSON.parse(fs.readFileSync(path.join(f.events,'send-receipts',receipts[0])));
+    assert.equal(receipt.send_id,send_id);assert.equal(receipt.requested_chat,'123@c.us');
+    assert.deepEqual(receipt.archive_reference,sent.result.archive_reference);
     const values=fs.readdirSync(f.events).filter(x=>x.endsWith('.json')).map(name=>{
       const bytes=fs.readFileSync(path.join(f.events,name));
       assert.equal(name.slice(21,-5),createHash('sha256').update(bytes).digest('hex'));

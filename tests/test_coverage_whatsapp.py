@@ -168,10 +168,19 @@ def test_history_pass_status_names_distinguish_gaps_missing_chats_and_discovery_
 
 
 def test_event_and_page_spools_are_drained_together_before_next_poll(monkeypatch):
+    from messaging_service import outgoing
     async def run():
         worker = wa.WhatsAppCollector.__new__(wa.WhatsAppCollector)
         worker.events_spool, worker.spool = object(), object()
         actions = []
+        receipt=object()
+        class ReceiptSpool:
+            def drain(self,apply,limit):
+                actions.append(('receipt_spool',limit))
+                apply(receipt)
+        worker.send_receipts=ReceiptSpool()
+        monkeypatch.setattr(outgoing,'reconcile_send_receipt',
+            lambda state,item:actions.append(('receipt',state,item)))
         async def drain(spools): actions.append(('drain', spools))
         worker.drain_captures = drain
         worker.state = SimpleNamespace(apply_tombstones=lambda: actions.append(('tombstones',)))
@@ -180,7 +189,8 @@ def test_event_and_page_spools_are_drained_together_before_next_poll(monkeypatch
             raise RuntimeError('end synthetic cycle')
         monkeypatch.setattr(wa.asyncio, 'sleep', stop_after_cycle)
         with pytest.raises(RuntimeError, match='end synthetic cycle'): await worker.drain_loop()
-        assert actions == [('drain', [worker.events_spool, worker.spool]), ('tombstones',)]
+        assert actions == [('receipt_spool',100),('receipt',worker.state,receipt),
+            ('drain', [worker.events_spool, worker.spool]), ('tombstones',)]
     asyncio.run(run())
 
 

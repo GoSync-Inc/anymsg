@@ -29,6 +29,51 @@ export interface MessengerOperationAction extends MessengerOperationPreview {
   /** Required for mutations; binds payload but never proves owner approval. */
   preview_digest?: string;
 }
+export interface FileUploadPreparation {
+  account: string;
+  chat_id: string;
+  /** Basename only, no URL or server path. */
+  filename: string;
+  /** MIME type without parameters, e.g. image/jpeg. */
+  mime: string;
+  /** 1–33554432 bytes. */
+  bytes: number;
+  /** Lowercase SHA-256 of the exact original bytes. */
+  sha256: string;
+  /** Stable across explicit reconciliation/resume; never generate another ID after uncertainty. */
+  request_id: string;
+}
+export interface FileUploadChunk {
+  upload_id: string;
+  offset: number;
+  /** Canonical padded base64 for 1–262144 raw bytes. */
+  data_base64: string;
+}
+export interface FileUploadStatus {
+  upload_id: string;
+  account: string;
+  chat_id: string;
+  filename: string;
+  mime: string;
+  bytes: number;
+  sha256: string;
+  offset: number;
+  status: 'uploading' | 'ready' | 'expired';
+  chunk_bytes: number;
+  expires_at: string;
+  changes_provider_state: false;
+  owner_approval_verified_by_server: false;
+}
+export interface LocalFileUploadOptions {
+  account: string;
+  chat_id: string;
+  request_id: string;
+  /** Defaults to the local basename. */
+  filename?: string;
+  /** Defaults to application/octet-stream; use image/jpeg or image/png for photos. */
+  mime?: string;
+  signal?: AbortSignal;
+}
 export type SubscriptionEventKind = 'message.created' | 'message.edited' | 'message.deleted' |
   'message.status' | 'attachment.ready' | 'file.text.ready' | 'file.transcript.ready' |
   'file.description.ready' | 'file.processing.failed';
@@ -66,6 +111,11 @@ export declare class AnyMsgClient {
     maxResponseBytes?: number; fetch?: typeof globalThis.fetch});
   call<T = Record<string, unknown>>(method: string, arguments_?: Arguments, options?: {signal?: AbortSignal}): Promise<T>;
   capabilities(args?: Arguments): Promise<Record<string, unknown>>;
+  prepareFileUpload(args: FileUploadPreparation, options?: {signal?: AbortSignal}): Promise<FileUploadStatus>;
+  uploadFileChunk(args: FileUploadChunk, options?: {signal?: AbortSignal}): Promise<FileUploadStatus>;
+  getFileUpload(args: {upload_id:string}, options?: {signal?: AbortSignal}): Promise<FileUploadStatus>;
+  /** Stream a local regular file, reject changes, and stage only. Never previews or sends. */
+  uploadFile(file: string, options: LocalFileUploadOptions): Promise<FileUploadStatus>;
   dismissReply(args: {chat_id: string; message_id: string; expected_revision: number}): Promise<Record<string, unknown>>;
   listChats(args?: Arguments): Promise<Record<string, unknown>>;
   search(args?: Arguments): Promise<Record<string, unknown>>;

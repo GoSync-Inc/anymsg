@@ -57,9 +57,10 @@ def permitted(p,account,chat):
     return account in p['accounts'] and (p['chat_ids'] is None or chat in p['chat_ids'])
 
 
-def _required_permissions(permission,operation):
+def _required_permissions(permission,operation,parameters=None):
     values={permission}
-    if operation=='send_file':values.add('download')
+    if operation=='send_file':
+        values.update(('read','upload') if isinstance(parameters,dict) and 'upload_id' in parameters else ('download',))
     if operation=='forward_message':values.add('read')
     return sorted(values)
 
@@ -147,12 +148,12 @@ def _registered_file(store,c,p,account,parameters,*,verify=False):
 
 
 def _resolve(store,c,p,account,operation,chat_id,message_id,expected_revision,parameters,
-             *,ready=False,verify_file=False,validate_parameters=True):
+             *,ready=False,verify_file=False,validate_parameters=True,retained_upload=False):
     from .messenger_operations import validate_operation,operation_manifest,CATALOG_VERSION
     from .whatsapp_capabilities import account_provider
     spec=_spec(operation);account_row=_account(c,p,account)
     provider=account_provider(c,account,account_row['platform'])
-    required=_required_permissions(spec['permission'],operation)
+    required=_required_permissions(spec['permission'],operation,parameters)
     if set(required)-set(p['permissions']):raise APIError('forbidden',403)
     if spec['full_account'] and p['chat_ids'] is not None:raise APIError('forbidden',403)
     if validate_parameters:
@@ -194,12 +195,27 @@ def _resolve(store,c,p,account,operation,chat_id,message_id,expected_revision,pa
             source_provider_message=source['provider_id'])
         provider_chats.append(source_chat['provider_chat']);refs.extend((source['chat'],source['id']))
     if operation=='send_file':
-        original=_registered_file(store,c,p,account,parameters,verify=verify_file)
-        source_chat=_chat(c,p,account,original['chat'])
-        payload.update(file_message_id=original['message'],file_message_revision=original['revision'],
-            file_chat_id=original['chat'],file_digest=original['digest'],file_bytes=original['bytes'],
-            file_mime=original['mime'],file_name=original['filename'])
-        provider_chats.append(source_chat['provider_chat']);refs.extend((original['chat'],original['message'],original['id']))
+        if 'upload_id' in parameters:
+            from .uploads import source
+            original=source(store,c,p,account,chat_id,parameters,verify=verify_file,retained=retained_upload)
+            payload.update(file_upload_id=original['id'],file_digest=original['sha256'],file_bytes=original['bytes'],
+                file_mime=original['mime'],file_name=original['filename'])
+            refs.append(original['id'])
+        else:
+            original=_registered_file(store,c,p,account,parameters,verify=verify_file)
+            source_chat=_chat(c,p,account,original['chat'])
+            payload.update(file_message_id=original['message'],file_message_revision=original['revision'],
+                file_chat_id=original['chat'],file_digest=original['digest'],file_bytes=original['bytes'],
+                file_mime=original['mime'],file_name=original['filename'])
+            provider_chats.append(source_chat['provider_chat']);refs.extend((original['chat'],original['message'],original['id']))
+        mode=parameters['mode'];mime=payload['file_mime']
+        family={'photo':'image/','video':'video/','video_note':'video/','audio':'audio/','voice':'audio/','sticker':'image/'}.get(mode)
+        if family and not mime.startswith(family):raise APIError('invalid_operation_parameters')
+        if account_row['platform']=='telegram' and mode=='photo' and (
+            mime not in ('image/jpeg','image/png','image/webp') or payload['file_bytes']>10*1024**2):
+            raise APIError('unsupported_operation')
+        if provider=='whatsmeow' and (mode=='sticker' and mime!='image/webp' or
+            mode in ('audio','voice','sticker') and parameters['caption']):raise APIError('unsupported_operation')
     _policy(c,account,operation,provider_chats,ready=ready)
     targets(p,refs)
     return payload,spec
@@ -233,8 +249,12 @@ def manifest(c,p,account):
         permitted_here=(not(set(required)-set(p['permissions'])) and
                         (not entry['full_account'] or p['chat_ids'] is None) and
                         (entry['target']=='account' or p['chat_ids']!=[]))
+        if entry['operation']=='send_file' and {'read','send','upload'}<=set(p['permissions']) and p['chat_ids']!=[]:
+            permitted_here=True
         enabled=bool(policy and policy['enabled'] and entry['operation'] in policy['operations_enabled'])
-        items.append({**entry,'required_permissions':required,'key_permitted':permitted_here,'account_enabled':enabled,
+        items.append({**entry,'required_permissions':required,
+            **({'source_permissions':{'attachment_id':['download','send'],'upload_id':['read','send','upload']}} if entry['operation']=='send_file' else {}),
+            'key_permitted':permitted_here,'account_enabled':enabled,
             'available':bool(entry['supported'] and permitted_here and enabled)})
     return {'account':account,'platform':row['platform'],'provider':provider,'items':items,
             'owner_approval_verified_by_server':False,'automatic_retry':False}
@@ -309,7 +329,7 @@ def _check_saved(store,c,p,row,*,ready=True,check_versions=True,verify_file=True
         type(binding.get('full_account')) is not bool or
         not isinstance(binding.get('required_permissions'),list)):
         raise APIError('operation_access_changed',409)
-    required=set(binding['required_permissions'])|set(_required_permissions(row['permission'],row['operation']))
+    required=set(binding['required_permissions'])|set(_required_permissions(row['permission'],row['operation'],payload['parameters']))
     if required-set(p['permissions']):raise APIError('forbidden',403)
     if row['key_permission_version']!=p['key_permission_version'] or (
         check_versions and row['scope_version']!=p['scope_version']):
@@ -334,13 +354,19 @@ def _check_saved(store,c,p,row,*,ready=True,check_versions=True,verify_file=True
         if row['operation']=='forward_message':
             scoped_message(payload['parameters']['source_message_id'],payload['source_chat_id'])
         if row['operation']=='send_file':
-            scoped_message(payload['file_message_id'],payload['file_chat_id'])
-            original=c.execute('SELECT message FROM attachments WHERE id=%s',
-                               (payload['parameters']['attachment_id'],)).fetchone()
-            if not original or original['message']!=payload['file_message_id']:raise APIError('not_found',404)
+            if 'upload_id' in payload['parameters']:
+                from .uploads import owned
+                original=owned(c,p,payload['parameters']['upload_id'])
+                if original['account']!=row['account'] or original['chat']!=row['chat']:raise APIError('not_found',404)
+            else:
+                scoped_message(payload['file_message_id'],payload['file_chat_id'])
+                original=c.execute('SELECT message FROM attachments WHERE id=%s',
+                                   (payload['parameters']['attachment_id'],)).fetchone()
+                if not original or original['message']!=payload['file_message_id']:raise APIError('not_found',404)
         return {key:value for key,value in payload.items() if key!='request_input'}
     current,spec=_resolve(store,c,p,row['account'],row['operation'],row['chat'] or '',row['message'] or '',
-        row['expected_revision'],payload['parameters'],ready=ready,verify_file=verify_file,validate_parameters=False)
+        row['expected_revision'],payload['parameters'],ready=ready,verify_file=verify_file,
+        validate_parameters=False,retained_upload=True)
     # A catalog release must not rewrite reviewed, persisted normalized intent.
     current['catalog_version']=payload['catalog_version']
     saved={key:value for key,value in payload.items() if key!='request_input'}
@@ -426,8 +452,11 @@ class CommandWorker:
                 payload['_policy']=dict(policy)
                 if payload['operation']=='send_file':
                     # Only collectors get a filesystem path; previews/status never do.
-                    payload.update(registered_file_path=str(store.files/payload['file_digest']),
-                        trusted_blob_directory=str(store.files))
+                    root=store.files
+                    if payload.get('file_upload_id'):
+                        from .uploads import _root
+                        root=_root(store,payload['file_upload_id'])
+                    payload.update(registered_file_path=str(root/payload['file_digest']),trusted_blob_directory=str(root))
                 job.update(payload)
                 return job
         except (APIError,OSError,ValueError,KeyError) as exc:

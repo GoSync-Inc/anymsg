@@ -1,6 +1,8 @@
 """Reviewed, packaged schemas. New backend methods never appear automatically."""
 
 from copy import deepcopy
+import base64
+import binascii
 from importlib.resources import files
 import json
 
@@ -36,6 +38,13 @@ def arguments(tool, value):
     schema = tool["inputSchema"]
     if next(Draft202012Validator(schema).iter_errors(value), None) is not None:
         raise ValueError("invalid_arguments")
+    if tool["operation"] == "upload_file_chunk":
+        try:
+            raw = base64.b64decode(value["data_base64"], validate=True)
+        except (ValueError, binascii.Error):
+            raise ValueError("invalid_arguments") from None
+        if not 0 < len(raw) <= 262144:
+            raise ValueError("invalid_arguments")
     result = deepcopy(value)
     # REST and MCP backend defaults differ for conversation tools. Preserve the
     # reviewed MCP defaults when routing either gateway transport over REST.

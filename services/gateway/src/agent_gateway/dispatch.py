@@ -30,6 +30,17 @@ class Dispatch:
                 supported.update(values)
         return sorted(allowed & supported)
 
+    def implemented(self, tool, snapshot, agent, caps, account=None):
+        if tool.get("required_manifest"):
+            manifest = caps.get("tool_manifest")
+            names = manifest.get("names") if isinstance(manifest, dict) else None
+            if not isinstance(names, list) or not all(isinstance(n, str) for n in names):
+                return False
+            if tool["operation"] not in names:
+                return False
+        action = tool.get("required_action")
+        return not action or action in self.actions(snapshot, agent, caps, account)
+
     async def backend_capabilities(self, snapshot, agent, module):
         target = snapshot["deployment"]["backends"].get(module)
         if target != self.clients.deployment["backends"].get(module):
@@ -76,6 +87,7 @@ class Dispatch:
             or (
                 states.get(CATALOG[n]["module"]) == "ready"
                 and set(CATALOG[n]["scopes"]) <= scopes[CATALOG[n]["module"]]
+                and self.implemented(CATALOG[n], current, principal, capabilities[CATALOG[n]["module"]])
                 and (
                     not CATALOG[n].get("action_group")
                     or bool(actions)
@@ -120,6 +132,8 @@ class Dispatch:
         credential = key_from_file(binding["key_file"], binding["key_sha256"])
         caps = await self.backend_capabilities(snapshot, agent, module)
         if not set(tool["scopes"]) <= set(caps["permissions"]):
+            raise Denied()
+        if not self.implemented(tool, snapshot, agent, caps, args.get("account")):
             raise Denied()
         allowed_actions = self.actions(snapshot, agent, caps) if module == "messaging" else []
         if tool["operation"] == "get_messenger_operation":
@@ -176,6 +190,7 @@ class Dispatch:
                 for n in self.policy.visible(snapshot, agent)
                 if CATALOG[n]["module"] == module
                 and set(CATALOG[n]["scopes"]) <= set(caps["permissions"])
+                and self.implemented(CATALOG[n], snapshot, agent, caps)
                 and (
                     not CATALOG[n].get("action_group")
                     or bool(allowed_actions)

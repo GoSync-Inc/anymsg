@@ -215,6 +215,10 @@ class Policy:
             and (CATALOG[name]["module"] == "gateway" or CATALOG[name]["module"] in agent["credentials"])
             and set(CATALOG[name]["scopes"]) <= set(agent["grants"].get(CATALOG[name]["module"], []))
             and (not CATALOG[name].get("action_group") or bool(Policy.actions(snapshot, agent)))
+            and (
+                not CATALOG[name].get("required_action")
+                or CATALOG[name]["required_action"] in Policy.actions(snapshot, agent)
+            )
         ]
 
     def authorize(self, key, name):

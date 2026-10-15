@@ -8,7 +8,11 @@ from .policy import scope_filter, targets
 def validate_observation(value):
     if not isinstance(value, dict) or set(value)-{'observed_at','unread_count','read_inbox_max_id','basis','is_self_chat'}:
         raise ValueError('invalid_read_observation')
-    if value.get('basis') not in ('telegram_dialog','whatsapp_cached_chat'):
+    basis=value.get('basis')
+    # Native discovery is a local WhatsApp cache observation too. Preserve the
+    # existing stored basis/schema; it does not imply a known unread count.
+    if basis=='whatsmeow_captured_chat':basis='whatsapp_cached_chat'
+    if basis not in ('telegram_dialog','whatsapp_cached_chat'):
         raise ValueError('invalid_read_observation')
     at=utc(value.get('observed_at'))
     if datetime.fromisoformat(at)>datetime.now(timezone.utc):
@@ -19,9 +23,9 @@ def validate_observation(value):
             raise ValueError('invalid_read_observation')
     if value.get('is_self_chat') is not None and type(value['is_self_chat']) is not bool:
         raise ValueError('invalid_read_observation')
-    if value['basis']=='whatsapp_cached_chat' and value.get('read_inbox_max_id') is not None:
+    if basis=='whatsapp_cached_chat' and value.get('read_inbox_max_id') is not None:
         raise ValueError('invalid_read_observation')
-    return {**value,'observed_at':at}
+    return {**value,'observed_at':at,'basis':basis}
 
 
 def telegram_read_capture(account,update,*,verified_self,expected_user_id):
@@ -52,14 +56,26 @@ def observe(c,account,provider_chat,value):
     platform=c.execute('SELECT platform FROM accounts WHERE id=%s',(account,)).fetchone()
     if not platform or value['basis'].split('_',1)[0]!=platform['platform']:
         raise ValueError('invalid_read_observation')
+    chat=stable_id('chat',account,provider_chat)
+    # One timestamp covers both read fields. An incomplete observation must not
+    # discard known evidence or make retained numbers look newly verified.
     c.execute('''INSERT INTO chat_read_observations(chat,account,observed_at,unread_count,read_inbox_max_id,basis,is_self_chat)
         VALUES(%s,%s,%s,%s,%s,%s,%s) ON CONFLICT(chat) DO UPDATE SET
         observed_at=excluded.observed_at,unread_count=excluded.unread_count,
         read_inbox_max_id=excluded.read_inbox_max_id,basis=excluded.basis,
         is_self_chat=coalesce(excluded.is_self_chat,chat_read_observations.is_self_chat)
-        WHERE excluded.observed_at>chat_read_observations.observed_at''',
-        (stable_id('chat',account,provider_chat),account,value['observed_at'],value.get('unread_count'),
+        WHERE excluded.observed_at>chat_read_observations.observed_at
+          AND (excluded.unread_count IS NOT NULL OR excluded.read_inbox_max_id IS NOT NULL)
+          AND (chat_read_observations.unread_count IS NULL OR excluded.unread_count IS NOT NULL)
+          AND (chat_read_observations.read_inbox_max_id IS NULL OR excluded.read_inbox_max_id IS NOT NULL)''',
+        (chat,account,value['observed_at'],value.get('unread_count'),
          value.get('read_inbox_max_id'),value['basis'],value.get('is_self_chat')))
+    if value.get('is_self_chat') is not None:
+        # Identity evidence is independent of read evidence. Never refresh the
+        # count timestamp when discovery only proves whether this is self-chat.
+        c.execute('''UPDATE chat_read_observations SET is_self_chat=%s
+            WHERE chat=%s AND account=%s AND observed_at<=%s''',
+            (value['is_self_chat'],chat,account,value['observed_at']))
 
 
 def dismiss(store,c,p,chat_id,message_id,expected_revision):

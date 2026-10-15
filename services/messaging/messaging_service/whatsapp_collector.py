@@ -254,7 +254,8 @@ class NodeProvider:
                 raise SendRejected(code)
             if isinstance(code,str) and code in CONNECTION_ERRORS:raise RuntimeError(code)
             if code in ('media_unavailable','media_reference_changed','unsupported_media_type'): raise ProviderUnavailable(code)
-            safe=MEDIA_ERRORS|{'provider_operation_failed','chat_excluded'}
+            safe=MEDIA_ERRORS|{'provider_operation_failed','chat_excluded','send_receipt_mismatch',
+                'send_receipt_missing','provider_operation_uncertain'}
             raise ProviderOperationError(code if isinstance(code,str) and code in safe else 'provider_operation_failed')
         return result
     @property
@@ -307,6 +308,7 @@ class NodeProvider:
         if job.get('_preflight') is not None:await job['_preflight']()
         return await self._call_unlocked('send_text',{'chat':job['provider_chat'],'text':payload['text'],
             'link_preview':payload['link_preview'],
+            **({'send_id':job['id']} if re.fullmatch(r'send_[a-f0-9]{32}',job.get('id','')) else {}),
             'reply_provider_id':job.get('reply_provider_id'),'expires_at':job['expires_at']},sending=True)
     async def execute_operation(self,job):
         if not self.send_lock.locked():raise RuntimeError('send_gate_required')
@@ -403,6 +405,10 @@ class WhatsAppCollector(TelegramCollector):
     def __init__(self,*args,events_spool,**kwargs):
         kwargs.setdefault('max_dialogs',2000)
         super().__init__(*args,**kwargs); self.events_spool=events_spool
+        from .spool import DurableSpool
+        from .outgoing import validate_send_receipt
+        self.send_receipts=DurableSpool(events_spool.path/'send-receipts',validator=validate_send_receipt,
+            max_bytes=4*1024**2,max_entries=1000,reserve_bytes=events_spool.reserve_bytes)
     async def heartbeat(self):
         while True:
             await asyncio.sleep(self.heartbeat_interval)
@@ -487,6 +493,9 @@ class WhatsAppCollector(TelegramCollector):
         from psycopg_pool import PoolTimeout
         while True:
             try:
+                from .outgoing import reconcile_send_receipt
+                await asyncio.to_thread(self.send_receipts.drain,
+                    lambda item:reconcile_send_receipt(self.state,item),100)
                 await self.drain_captures([self.events_spool,self.spool])
                 await asyncio.to_thread(self.state.apply_tombstones)
             except (psycopg.OperationalError,PoolTimeout): await asyncio.sleep(1)

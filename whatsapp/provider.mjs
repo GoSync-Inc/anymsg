@@ -1,8 +1,9 @@
 import {recoverNavigation} from './navigation.mjs';
 // Private child process. No TCP listener, HTTP API or agent credentials.
-import {sendText} from './outgoing.mjs';
+import {sendText,sendReceiptEvent} from './outgoing.mjs';
 import {executeOperation,OPERATION_ERRORS} from './operations.mjs';
 import fs from 'node:fs';
+import path from 'node:path';
 import {runLane,sendingSocket} from './ipc.mjs';
 import {DiskCapture,event,asId,chatId,allows,cursor,compare,readPolicy} from './capture.mjs';
 import {download} from './media.mjs';
@@ -11,7 +12,7 @@ import {readPage} from './history.mjs';
 import {cachedDialogs} from './read-state.mjs';
 import {createPageBounds,PageEvaluationStalled} from './bounds.mjs';
 import {CONNECTION_ERRORS,connectClient,writeFailure} from './transport-state.mjs';
-import {IdentityCache,cachedIdentityObservations} from './identity.mjs';
+import {IdentityCache,cachedIdentityObservations,cachedBidirectionalPair} from './identity.mjs';
 import {bindReceiptCapture} from './receipts.mjs';
 
 process.umask(0o077);
@@ -19,7 +20,7 @@ process.umask(0o077);
 console.log=console.warn=console.error=()=>{};
 const cfg=JSON.parse(fs.readFileSync(process.argv[2],'utf8'));
 cfg.max_media_bytes ??= 512*1024**2;
-let client,policy,spool,stopping=false,ready=false,verified=false,ownerIds=[];
+let client,policy,spool,sendReceipts,stopping=false,ready=false,verified=false,ownerIds=[];
 let failureRecorded=false;
 function failed(code) {
   ready=false;
@@ -67,6 +68,8 @@ function deleted(after,before) {
 async function start(initialPolicy) {
   policy=initialPolicy;
   spool=new DiskCapture(cfg.events_directory,{reserveBytes:cfg.disk_reserve_bytes});
+  sendReceipts=new DiskCapture(path.join(cfg.events_directory,'send-receipts'),{
+    maxBytes:4*1024**2,maxEntries:1000,reserveBytes:cfg.disk_reserve_bytes});
   const {default:pkg}=await import('whatsapp-web.js');
   const {Client,LocalAuth}=pkg;
   // Run as unprivileged UID with Chromium's own sandbox. No --no-sandbox escape.
@@ -146,9 +149,13 @@ async function handle(request,emit) {
     else if(method==='dialogs')result=await dialogs(Math.min(10000,params.limit));
     else if(method==='page')result=await page(params.chat,Math.min(100,params.limit),params.before);
     else if(method==='send_text'){
-      const receipt=await sendText(client,params,currentPolicy);
+      const receipt=await sendText(client,params,currentPolicy,{ownerIds,
+        verifyAlias:pair=>pageBounds.names([pair],pairs=>client.pupPage.evaluate(cachedBidirectionalPair,pairs[0]))});
+      // This exact receipt is fsynced before capture/IPC. Recovery never searches
+      // bodies or infers a successful send from an unrelated phone message.
+      if(params.send_id)sendReceipts.put(sendReceiptEvent(cfg.account,params,receipt));
       capture(receipt.message);
-      result={provider_message_id:receipt.provider_message_id};
+      result={provider_message_id:receipt.provider_message_id,archive_reference:receipt.archive_reference};
     }
     else if(method==='messenger_operation')result=await executeOperation(client,params,currentPolicy);
     else if(method==='media'){

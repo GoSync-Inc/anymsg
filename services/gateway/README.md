@@ -36,6 +36,21 @@ than inferring them from a provider name or count. Scoped receipt reads remain
 available across provider changes under the existing action permission ceiling.
 Upgrade the messaging backend before the gateway when adding this contract.
 
+New file staging is separately selected with `messages_prepare_file_upload`,
+`messages_upload_file_chunk` and `messages_get_file_upload`. It requires current
+backend manifest support, local and backend `read`, `send`, `upload` grants and
+an allowed `send_file` action. The current `send_file` ceiling also requires
+`download`, including sends using newly uploaded files; this draft preserves that
+existing authorization model. Existing profiles do not gain upload access.
+Source bytes are staged for one credential/account/chat; URLs and server paths
+are not accepted. Uploading never sends to the messenger or asserts owner approval.
+Chunks contain at most 262144 decoded bytes, 349528 base64 characters, and an
+exact 360448-byte HTTP/MCP envelope cap. Every other gateway request keeps the
+65536-byte cap. A separate upload pool admits 2 active and 4 waiting requests,
+with 8 chunks per second per backend credential. Body reads and upstream chunk
+transfers each have a 10-second deadline.
+Read back the upload's next offset after an uncertain response; writes are not retried.
+
 Original files are streamed through bounded, short-lived bearer tickets with separate
 connection pools. URLs cannot select another origin or path. Tickets recheck current
 local policy and credential binding, and poll the backend's existing HEAD download

@@ -8,7 +8,7 @@ production account has already been switched.
 
 ```sh
 (cd whatsapp/whatsmeow && go test -race ./... && go vet ./... && go build -trimpath -o /tmp/anymsg-whatsmeow .)
-docker build -f services/messaging/Dockerfile --target whatsapp-native -t anymsg-whatsapp-native:0.9.18 .
+docker build -f services/messaging/Dockerfile --target whatsapp-native -t anymsg-whatsapp-native:0.9.19 .
 ```
 
 `deploy/whatsapp.example.json` selects `provider: whatsmeow` and an absolute
@@ -38,6 +38,19 @@ Native global revoke uses the explicit revoke operation. It never degrades to
 local deletion. Native PN/LID mappings require observed message/store evidence.
 Read-only reactions, pins and receipts are bounded local observations with
 explicit coverage; absence is not proof of no reaction/read/pin.
+
+Changing providers must not erase previously observed state. The central
+`message_receipts` table is independent of browser/native sessions and remains
+authoritative evidence for archived delivery/read state. Current native
+`get_message_info` still reads its private cache; merging central evidence into
+that response is a follow-up. Reaction and pin observations do not yet have a
+normalized central registry: retained provider caches and saved command results
+must be preserved before removing the old provider state. Do not promise that
+uncollected historical metadata can be recovered. An empty or partial new cache
+must not overwrite a known snapshot or imply that a reaction/pin was removed.
+Historical observations need their original timestamp, source and completeness;
+they do not prove the current live state. Unknown native unread counts likewise
+must preserve a previous known count without refreshing its observation time.
 
 Remote address-book add/delete and business label replacement remain unavailable
 until their server-side semantics are verified. A local contact name update is

@@ -215,6 +215,8 @@ class Store:
                 features['read'].extend(['list_subscriptions','get_subscription','get_subscription_events'])
                 features['subscription-write']=['create_subscription','update_subscription']
             available=[feature for permission,names in features.items() if permission in p['permissions'] for feature in names]
+            if {'read','send','upload'}<=set(p['permissions']):
+                available.extend(['prepare_file_upload','upload_file_chunk','get_file_upload'])
             operation_tools=['list_messenger_operations','preview_messenger_operation',
                              'execute_messenger_operation','get_messenger_operation']
             if any(spec['permission'] in p['permissions'] for spec in OPERATIONS.values()):
@@ -257,6 +259,11 @@ class Store:
                     'chat_coverage':True,'provider_id_lookup':'resolve_reference',
                     'empty_result_diagnostics':True,'message_conflicts':'scoped_active_and_historical'},
                 'available':available,
+                'file_uploads':{'implemented':True,'permission':'upload','required_permissions':['read','send','upload'],
+                    'new_permission_inherited':False,'ownership':'originating_key_account_destination_chat',
+                    'expires_seconds':3600,'chunk_bytes':262144,'max_bytes':32*1024**2,
+                    'changes_provider_state':False,'paths_and_urls_accepted':False,
+                    'send_via':'preview_and_execute_messenger_operation_send_file'},
                 'subscriptions':{'implemented':True,'definitions':True,'passive_events':True,
                     'source_selection':'frozen_explicit_chats_and_account_scoped_sender_ids',
                     'event_selection':'structural_exact_revision','origin_default':'live',
@@ -303,6 +310,7 @@ class Store:
                            'download_grant_seconds': 120, 'delivery_seconds': 900,
                            'review_sources':20, 'context_reviews':5,'send_text_utf16_units':4000,
                            'format_source_utf16_units':16000,'http_json_body_bytes':16384,
+                           'upload_chunk_http_json_body_bytes':360448,
                            'send_queue_ttl_seconds':600,'send_per_account_per_minute':60}}
 
     def preview_message(self,token,account,chat_id,text,reply_to='',format='plain',
@@ -322,6 +330,27 @@ class Store:
         from .outgoing import status
         with self.authorized(token,'get_send_status') as (c,p):
             return status(c,p,send_id)
+
+    def prepare_file_upload(self,token,account,chat_id,filename,mime,bytes,sha256,request_id):
+        from .uploads import prepare
+        with self.authorized(token,'prepare_file_upload') as (c,p):
+            return prepare(self,c,p,account,chat_id,filename,mime,bytes,sha256,request_id)
+
+    def upload_file_chunk(self,token,upload_id,offset,data_base64):
+        from .uploads import chunk
+        with self.authorized(token,'upload_file_chunk') as (c,p):
+            return chunk(self,c,p,upload_id,offset,data_base64)
+
+    def get_file_upload(self,token,upload_id):
+        from .uploads import status
+        with self.authorized(token,'get_file_upload') as (c,p):
+            return status(self,c,p,upload_id)
+
+    def cleanup_file_uploads(self):
+        """API-owned maintenance; retains staged sources of pending sends."""
+        from .uploads import cleanup
+        with self.pool.connection() as c:
+            cleanup(self,c)
 
     def list_messenger_operations(self,token,account):
         from .commands import manifest
@@ -721,8 +750,8 @@ class Store:
             c.execute("SET LOCAL statement_timeout='180s'")
             c.execute(Path(__file__).with_name('schema.sql').read_text())
             version=int(c.execute("SELECT value FROM probe_metadata WHERE name='schema_version'").fetchone()['value'])
-            if version>28: raise RuntimeError('database_newer_than_runtime')
-            for target,name in [(2,'002_archive.sql'),(3,'003_collectors.sql'),(4,'004_whatsapp.sql'),(5,'005_access.sql'),(6,'006_reviews.sql'),(7,'007_search_indexes.sql'),(8,'008_people.sql'),(9,'009_file_index.sql'),(10,'010_search_audit.sql'),(11,'011_telegram_window.sql'),(12,'012_search.sql'),(13,'013_file_search.sql'),(14,'014_collector_health.sql'),(15,'015_enrichment.sql'),(16,'016_file_content.sql'),(17,'017_chat_evidence.sql'),(18,'018_collector_operations.sql'),(19,'019_whatsapp_identities.sql'),(20,'020_processing_admission.sql'),(21,'021_media_storage.sql'),(22,'022_outgoing.sql'),(23,'023_receipts.sql'),(24,'024_formatting.sql'),(25,'025_operations.sql'),(26,'026_subscriptions.sql'),(27,'027_reply_queue.sql'),(28,'028_send_reference.sql')]:
+            if version>29: raise RuntimeError('database_newer_than_runtime')
+            for target,name in [(2,'002_archive.sql'),(3,'003_collectors.sql'),(4,'004_whatsapp.sql'),(5,'005_access.sql'),(6,'006_reviews.sql'),(7,'007_search_indexes.sql'),(8,'008_people.sql'),(9,'009_file_index.sql'),(10,'010_search_audit.sql'),(11,'011_telegram_window.sql'),(12,'012_search.sql'),(13,'013_file_search.sql'),(14,'014_collector_health.sql'),(15,'015_enrichment.sql'),(16,'016_file_content.sql'),(17,'017_chat_evidence.sql'),(18,'018_collector_operations.sql'),(19,'019_whatsapp_identities.sql'),(20,'020_processing_admission.sql'),(21,'021_media_storage.sql'),(22,'022_outgoing.sql'),(23,'023_receipts.sql'),(24,'024_formatting.sql'),(25,'025_operations.sql'),(26,'026_subscriptions.sql'),(27,'027_reply_queue.sql'),(28,'028_send_reference.sql'),(29,'029_file_uploads.sql')]:
                 migration=Path(__file__).with_name('migrations')/name
                 sha=hashlib.sha256(migration.read_bytes()).hexdigest()
                 if version<target:

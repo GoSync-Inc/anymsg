@@ -28,7 +28,7 @@ var operationFields = map[string]string{
 	"request_chat_history": "count",
 	"chat_info":            "", "list_participants": "offset limit", "get_reactions": "offset limit", "get_message_info": "",
 	"get_profile": "", "list_contacts": "offset limit", "get_contact": "user_id", "list_blocked": "offset limit", "get_pinned_messages": "offset limit",
-	"send_file": "attachment_id sha256 mode caption", "forward_message": "source_message_id source_revision", "send_poll": "question options multiple",
+	"send_file": "attachment_id upload_id sha256 mode caption", "forward_message": "source_message_id source_revision", "send_poll": "question options multiple",
 	"send_contact": "contact_ids", "send_location": "latitude longitude description", "edit_message": "text", "delete_message": "revoke",
 	"send_reaction": "emoji", "pin_message": "seconds", "unpin_message": "", "mark_read": "", "mark_unread": "", "archive_chat": "", "unarchive_chat": "",
 	"mute_chat": "seconds", "unmute_chat": "", "pin_chat": "", "unpin_chat": "", "star_message": "", "unstar_message": "", "create_group": "title user_ids",

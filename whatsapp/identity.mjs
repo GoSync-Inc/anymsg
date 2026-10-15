@@ -32,3 +32,14 @@ export class IdentityCache {
     return [...new Set([message.senderId,message.chatId])].map(id=>this.values.get(id)).filter(Boolean);
   }
 }
+
+// Receipt verification must check both cache directions. One observation, equal
+// digits or a network lookup is not proof that the requested PN is this LID.
+export function cachedBidirectionalPair({pn,lid}) {
+  if(!/^\d{1,20}@c\.us$/.test(pn || '') || !/^\d{1,20}@lid$/.test(lid || ''))return false;
+  try {
+    const factory=window.require('WAWebWidFactory'),contacts=window.require('WAWebApiContact');
+    return contacts.getCurrentLid(factory.createWid(pn))?._serialized===lid &&
+      contacts.getPhoneNumber(factory.createWid(lid))?._serialized===pn;
+  }catch{return false;}
+}

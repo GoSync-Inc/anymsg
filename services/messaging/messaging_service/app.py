@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import asyncio
 from collections import OrderedDict
+from contextlib import asynccontextmanager, suppress
 import json
 import logging
 import time
@@ -27,6 +28,7 @@ from . import __version__
 from .error_details import payload,classified
 from .presentation import options, render
 from .telemetry import capture as capture_error
+from .uploads import UPLOAD_BODY_BYTES
 
 Detail = Literal['compact','full']
 ConversationView = Literal['archive','conversation']
@@ -151,22 +153,29 @@ class Boundary:
                     'transport':'streamable_http','next_action':'use_post_requests'},
                     status_code=405,headers={'Allow':'POST'})(scope,receive,protected_send)
             if request.method=='POST':
+                upload_route=request.url.path=='/v1/upload_file_chunk'
+                mcp_route=request.url.path.rstrip('/')=='/mcp'
+                body_limit=UPLOAD_BODY_BYTES if upload_route or mcp_route else 16384
                 try: size=int(request.headers.get('content-length','0'))
                 except ValueError: raise APIError('invalid_body') from None
-                if size<0 or size>16384: raise APIError('body_too_large',413)
+                if size<0 or size>body_limit: raise APIError('body_too_large',413)
                 async def read_body():
                     data=bytearray()
                     while True:
                         event=await receive()
                         if event['type']=='http.disconnect': raise APIError('disconnected',400)
                         data.extend(event.get('body',b''))
-                        if len(data)>16384: raise APIError('body_too_large',413)
+                        if len(data)>body_limit: raise APIError('body_too_large',413)
                         if not event.get('more_body'): return bytes(data)
                 try: body=await asyncio.wait_for(read_body(),10)
                 except TimeoutError: raise APIError('body_timeout',408) from None
-                if request.url.path.rstrip('/')=='/mcp':
+                if mcp_route:
                     try: envelope=json.loads(body)
                     except (ValueError,UnicodeError):envelope=None
+                    if len(body)>16384 and not (isinstance(envelope,dict) and
+                        envelope.get('method')=='tools/call' and isinstance(envelope.get('params'),dict)
+                        and envelope['params'].get('name')=='upload_file_chunk'):
+                        raise APIError('body_too_large',413)
                     if isinstance(envelope,dict) and envelope.get('method')=='tools/call':
                         params=envelope.get('params')
                         if isinstance(params,dict) and isinstance(params.get('name'),str):
@@ -310,6 +319,45 @@ def create_app(store: Store, allowed_hosts: list[str]):
         exact provider times remain null. Never sends, retries or marks a chat read.
         """
         return call(ctx,'get_send_status',send_id=send_id)
+
+    upload_write=ToolAnnotations(readOnlyHint=False,destructiveHint=False,
+        idempotentHint=True,openWorldHint=False)
+
+    @mcp.tool(structured_output=True,annotations=upload_write)
+    def prepare_file_upload(ctx: Context,account: StrictStr,chat_id: StrictStr,
+        filename: StrictStr,mime: StrictStr,bytes: StrictInt,sha256: StrictStr,
+        request_id: StrictStr) -> dict[str,Any]:
+        """Prepare a private immutable upload, at most 32 MiB, for one destination.
+
+        Requires read, send and explicit upload permissions plus account send_file
+        opt-in. No paths or URLs. Supply original size and SHA256, then upload
+        base64 chunks at the returned offset. Uploading never sends a message.
+        Uploads expire after one hour. Reuse request_id for exact metadata only.
+        """
+        return call(ctx,'prepare_file_upload',account=account,chat_id=chat_id,
+            filename=filename,mime=mime,bytes=bytes,sha256=sha256,request_id=request_id)
+
+    @mcp.tool(structured_output=True,annotations=upload_write)
+    def upload_file_chunk(ctx: Context,upload_id: StrictStr,offset: StrictInt,
+        data_base64: StrictStr) -> dict[str,Any]:
+        """Upload at most 262144 decoded bytes at the exact next offset.
+
+        Canonical base64 only. Identical bytes at an already received offset are
+        safe to retry. Finalization verifies original size and SHA256. Poll
+        get_file_upload after interrupted requests; this never sends anything.
+        """
+        return call(ctx,'upload_file_chunk',upload_id=upload_id,offset=offset,
+            data_base64=data_base64)
+
+    @mcp.tool(structured_output=True,annotations=read)
+    def get_file_upload(ctx: Context,upload_id: StrictStr) -> dict[str,Any]:
+        """Read your key's private upload state, immutable metadata and next offset.
+
+        Ready uploads can be send_file parameters with their exact SHA256, mode
+        and caption through preview/execute_messenger_operation. Owner approval
+        remains required before sending to a messenger.
+        """
+        return call(ctx,'get_file_upload',upload_id=upload_id)
 
     @mcp.tool(structured_output=True, annotations=read)
     def list_messenger_operations(ctx: Context, account: StrictStr) -> dict[str, Any]:
@@ -675,6 +723,7 @@ def create_app(store: Store, allowed_hosts: list[str]):
                     'get_attachment','get_updates','ack_updates','dismiss_reply','record_review','get_reviews',
                     'search_people','search_files','get_file_text','get_sync_status','get_file_occurrences','get_file_segments','resolve_reference','preview_message','send_message','get_send_status',
                     'list_messenger_operations','preview_messenger_operation','execute_messenger_operation','get_messenger_operation',
+                    'prepare_file_upload','upload_file_chunk','get_file_upload',
                     'create_subscription','list_subscriptions','get_subscription','update_subscription','get_subscription_events'}
         method=request.path_params['operation']
         if method not in operations: raise APIError('not_found',404)
@@ -700,7 +749,7 @@ def create_app(store: Store, allowed_hosts: list[str]):
 
     models={name:tool.fn_metadata.arg_model for name,tool in mcp._tool_manager._tools.items()}
     for tool in mcp._tool_manager._tools.values():tool.parameters['additionalProperties']=False
-    app=mcp.streamable_http_app(stateless_http=True,json_response=True,max_request_body_size=16384,
+    app=mcp.streamable_http_app(stateless_http=True,json_response=True,max_request_body_size=UPLOAD_BODY_BYTES,
         transport_security=TransportSecuritySettings(enable_dns_rebinding_protection=True,
             allowed_hosts=allowed_hosts,allowed_origins=[urlsplit(store.public_url)._replace(path='',query='',fragment='').geturl()]))
     async def api_error(request,error):
@@ -727,4 +776,20 @@ def create_app(store: Store, allowed_hosts: list[str]):
     # Preserve the SDK lifespan; no separate MCP protocol implementation.
     app.routes.extend([Route('/v1/{operation}',rest,methods=['POST']),
                        Route('/v1/download/{grant}',download,methods=['GET'])])
+    sdk_lifespan=app.router.lifespan_context
+    @asynccontextmanager
+    async def lifespan(application):
+        async def sweep_uploads():
+            while True:
+                try:await run_in_threadpool(store.cleanup_file_uploads)
+                except Exception:log.error('upload_cleanup_unavailable')
+                await asyncio.sleep(60)
+        async with sdk_lifespan(application) as state:
+            task=asyncio.create_task(sweep_uploads()) if hasattr(store,'cleanup_file_uploads') else None
+            try:yield state
+            finally:
+                if task:
+                    task.cancel()
+                    with suppress(asyncio.CancelledError):await task
+    app.router.lifespan_context=lifespan
     return Boundary(app,store,allowed_hosts,models)

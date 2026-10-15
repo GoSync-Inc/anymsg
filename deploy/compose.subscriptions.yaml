@@ -2,7 +2,7 @@
 # separate LOGIN inheriting messaging_subscriptions; never use the gateway DSN.
 services:
   subscriptions:
-    image: anymsg-subscriptions:${MESSAGING_VERSION:-0.9.18}
+    image: anymsg-subscriptions:${MESSAGING_VERSION:-0.9.19}
     build:
       context: ..
       target: runtime

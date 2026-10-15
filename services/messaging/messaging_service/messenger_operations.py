@@ -39,11 +39,12 @@ OPERATIONS = {
     'get_contact': _spec('contacts-read', 'account', full_account=True, fields=_user),
     'list_blocked': _spec('contacts-read', 'account', full_account=True, fields=_page),
     'send_file': _spec('send', mutation=True, fields={
-        'attachment_id': _field('attachment_id', required=True),
+        'attachment_id': _field('attachment_id'),
+        'upload_id': _field('upload_id'),
         'sha256': _field('sha256', required=True),
         'mode': _field('file_mode', default='document'),
         'caption': _field('string', default='', maximum=1024)},
-        limitation='Registered accessible SHA-256 verified original only; 32 MiB upload bound.'),
+        limitation='Exactly one accessible attachment_id or own finalized destination-bound upload_id; SHA-256 verified original only, 32 MiB bound.'),
     'forward_message': _spec('send', mutation=True, fields={
         'source_message_id': _field('message_id', required=True),
         'source_revision': _field('integer', required=True, minimum=1, maximum=2147483647)},
@@ -163,7 +164,7 @@ def operation_manifest(platform, *, provider=None):
         elif platform=='whatsapp' and provider=='whatsmeow' and name=='delete_message':
             row['limitation']='Own outgoing message only; explicit global revoke, never local-delete fallback.'
         elif platform=='whatsapp' and provider=='whatsmeow' and name=='send_file':
-            row['limitation']='Registered SHA-256 verified original only; 32 MiB bound. Sticker requires existing WebP. Audio/voice/sticker captions are unsupported; no implicit conversion.'
+            row['limitation']='Archived attachment or own destination-bound uploaded SHA-256 original only; 32 MiB bound. Sticker requires existing WebP. Audio/voice/sticker captions are unsupported; no implicit conversion.'
         elif platform=='whatsapp' and provider=='whatsmeow' and name=='forward_message':
             row['limitation']='Authorized retained ordinary content only; control, view-once and poll replay are unsupported.'
         elif platform == 'whatsapp' and name == 'delete_message':
@@ -176,6 +177,7 @@ def operation_manifest(platform, *, provider=None):
 
 def _valid(platform, descriptor, value):
     kind = descriptor['type']
+    if kind=='upload_id':return isinstance(value,str) and re.fullmatch(r'up_[a-f0-9]{32}',value) is not None
     if kind == 'string':
         return (isinstance(value, str) and len(value.encode('utf-16-le')) // 2 <= descriptor['maximum']
             and not any(ord(c) < 32 and c not in '\n\r\t' or ord(c) == 127 for c in value)
@@ -234,6 +236,8 @@ def validate_operation(platform, operation, parameters, *, provider=None):
             if not _valid(platform, descriptor, value): raise ValueError('invalid_operation_parameters')
             output[name] = value
         if operation == 'update_profile' and not output: raise ValueError('invalid_operation_parameters')
+        if operation == 'send_file' and (('attachment_id' in output)+('upload_id' in output)!=1):
+            raise ValueError('invalid_operation_parameters')
     except (UnicodeError, TypeError, OverflowError):
         raise ValueError('invalid_operation_parameters') from None
     return output

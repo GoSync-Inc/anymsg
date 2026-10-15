@@ -35,6 +35,7 @@ services:
       - ./private/whatsapp1-session:/sessions
       - whatsapp1_spool:/spool
       - files:/data
+      - file_uploads:/data/files/.uploads:ro
   whatsapp2:
     <<: *whatsapp
     volumes:
@@ -44,6 +45,7 @@ services:
       - ./private/whatsapp2-session:/sessions
       - whatsapp2_spool:/spool
       - files:/data
+      - file_uploads:/data/files/.uploads:ro
 volumes:
   whatsapp1_spool: {}
   whatsapp2_spool: {}

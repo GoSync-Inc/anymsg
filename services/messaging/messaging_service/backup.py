@@ -44,6 +44,7 @@ V22_TABLES={'outgoing_messages':'id'}
 V23_TABLES={'message_receipts':'id','receipt_event_jobs':'receipt','receipt_event_publications':'message'}
 V25_TABLES={'messenger_commands':'id'}
 V27_TABLES={'chat_read_observations':'chat','reply_dismissals':'key_id,chat'}
+V29_TABLES={'file_uploads':'id'}
 V26_TABLES={'subscriptions':'id','subscription_sources':'subscription,account,chat',
             'subscription_matches':'subscription,event'}
 V17_TABLES={'message_conflicts':'receipt_digest'}
@@ -53,7 +54,7 @@ V15_TABLES={'message_metadata':'message','attachment_enrichment':'attachment','e
 def database_manifest(c):
     tables={}
     version=int(c.execute("SELECT value FROM probe_metadata WHERE name='schema_version'").fetchone()['value'])
-    if version not in range(2,29): raise ValueError('unsupported_backup_schema')
+    if version not in range(2,30): raise ValueError('unsupported_backup_schema')
     for name,order in {**TABLES,**(V3_TABLES if version>=3 else {}),**(V4_TABLES if version>=4 else {}),
                        **(V5_TABLES if version>=5 else {}),**(V6_TABLES if version>=6 else {}),
                        **(V8_TABLES if version>=8 else {}),**(V9_TABLES if version>=9 else {}),
@@ -61,7 +62,8 @@ def database_manifest(c):
                        **(V19_TABLES if version>=19 else {}),**(V20_TABLES if version>=20 else {}),
                        **(V21_TABLES if version>=21 else {}),**(V22_TABLES if version>=22 else {}),
                        **(V23_TABLES if version>=23 else {}),**(V25_TABLES if version>=25 else {}),
-                       **(V26_TABLES if version>=26 else {}),**(V27_TABLES if version>=27 else {})}.items():
+                       **(V26_TABLES if version>=26 else {}),**(V27_TABLES if version>=27 else {}),
+                       **(V29_TABLES if version>=29 else {})}.items():
         query=sql.SQL('SELECT row_to_json(t) AS record FROM {} t ORDER BY {}').format(
             sql.Identifier(name),sql.SQL(',').join(sql.Identifier(part) for part in order.split(',')))
         sha=hashlib.sha256(); count=0
@@ -137,7 +139,7 @@ def create_snapshot(store,destination,dump_command,recovery_config=None,*,captur
 def verify_bundle(directory,*,blob_root=None):
     from .recovery_state import read_manifest,verify_recovery
     directory=Path(directory); manifest=read_manifest(directory)
-    if manifest.get('format') not in (1,2) or manifest.get('schema_version') not in range(2,29): raise ValueError('unsupported_backup')
+    if manifest.get('format') not in (1,2) or manifest.get('schema_version') not in range(2,30): raise ValueError('unsupported_backup')
     verify_recovery(directory,manifest)
     if (directory/'database.dump').is_symlink(): raise ValueError('invalid_backup_file')
     fd=os.open(directory/'database.dump',os.O_RDONLY|os.O_NOFOLLOW|os.O_NONBLOCK)
@@ -189,6 +191,9 @@ def quarantine_restore(store):
                 error_code='restored_disabled',finished_at=clock_timestamp() WHERE status IN ('queued','dispatching')""")
         if version>=26:
             c.execute("UPDATE subscriptions SET state='closed',version=version+1")
+        if version>=29:
+            # Upload staging is transient and excluded from original blob backups.
+            c.execute("UPDATE file_uploads SET state='expired'")
         # A snapshot can predate a key revocation. Never revive old credentials on restore.
         c.execute('UPDATE api_keys SET revoked=true')
         c.execute("UPDATE collector_leases SET expires_at=now()-interval '1 second'")

@@ -68,6 +68,8 @@ class StorageAdmission:
         requested=payload+STREAM_WORKSPACE_BYTES
         reserved=c.execute('''SELECT coalesce(sum(reserved_bytes),0) AS bytes
             FROM media_reservations WHERE volume_key=%s''',(self.volume,)).fetchone()['bytes']
+        reserved+=c.execute("""SELECT coalesce(sum(2*bytes+%s),0) AS bytes FROM file_uploads
+            WHERE volume_key=%s AND state<>'expired'""",(STREAM_WORKSPACE_BYTES,self.volume)).fetchone()['bytes']
         free=shutil.disk_usage(self.writer.root).free
         if not has_capacity(free,reserved,requested,self.writer.reserve_bytes):
             return None

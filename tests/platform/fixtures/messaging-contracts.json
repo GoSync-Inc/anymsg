@@ -191,6 +191,132 @@
     {
       "annotations": {
         "destructiveHint": false,
+        "idempotentHint": true,
+        "openWorldHint": false,
+        "readOnlyHint": false
+      },
+      "description": "Prepare a private immutable upload, at most 32 MiB, for one destination.\n\nRequires read, send and explicit upload permissions plus account send_file\nopt-in. No paths or URLs. Supply original size and SHA256, then upload\nbase64 chunks at the returned offset. Uploading never sends a message.\nUploads expire after one hour. Reuse request_id for exact metadata only.\n",
+      "inputSchema": {
+        "properties": {
+          "account": {
+            "title": "Account",
+            "type": "string"
+          },
+          "chat_id": {
+            "title": "Chat Id",
+            "type": "string"
+          },
+          "filename": {
+            "title": "Filename",
+            "type": "string"
+          },
+          "mime": {
+            "title": "Mime",
+            "type": "string"
+          },
+          "bytes": {
+            "title": "Bytes",
+            "type": "integer"
+          },
+          "sha256": {
+            "title": "Sha256",
+            "type": "string"
+          },
+          "request_id": {
+            "title": "Request Id",
+            "type": "string"
+          }
+        },
+        "required": [
+          "account",
+          "chat_id",
+          "filename",
+          "mime",
+          "bytes",
+          "sha256",
+          "request_id"
+        ],
+        "type": "object",
+        "title": "prepare_file_uploadArguments",
+        "additionalProperties": false
+      },
+      "name": "prepare_file_upload",
+      "outputSchema": {
+        "type": "object",
+        "additionalProperties": true,
+        "title": "prepare_file_uploadDictOutput"
+      }
+    },
+    {
+      "annotations": {
+        "destructiveHint": false,
+        "idempotentHint": true,
+        "openWorldHint": false,
+        "readOnlyHint": false
+      },
+      "description": "Upload at most 262144 decoded bytes at the exact next offset.\n\nCanonical base64 only. Identical bytes at an already received offset are\nsafe to retry. Finalization verifies original size and SHA256. Poll\nget_file_upload after interrupted requests; this never sends anything.\n",
+      "inputSchema": {
+        "properties": {
+          "upload_id": {
+            "title": "Upload Id",
+            "type": "string"
+          },
+          "offset": {
+            "title": "Offset",
+            "type": "integer"
+          },
+          "data_base64": {
+            "title": "Data Base64",
+            "type": "string"
+          }
+        },
+        "required": [
+          "upload_id",
+          "offset",
+          "data_base64"
+        ],
+        "type": "object",
+        "title": "upload_file_chunkArguments",
+        "additionalProperties": false
+      },
+      "name": "upload_file_chunk",
+      "outputSchema": {
+        "type": "object",
+        "additionalProperties": true,
+        "title": "upload_file_chunkDictOutput"
+      }
+    },
+    {
+      "annotations": {
+        "destructiveHint": false,
+        "openWorldHint": false,
+        "readOnlyHint": true
+      },
+      "description": "Read your key's private upload state, immutable metadata and next offset.\n\nReady uploads can be send_file parameters with their exact SHA256, mode\nand caption through preview/execute_messenger_operation. Owner approval\nremains required before sending to a messenger.\n",
+      "inputSchema": {
+        "properties": {
+          "upload_id": {
+            "title": "Upload Id",
+            "type": "string"
+          }
+        },
+        "required": [
+          "upload_id"
+        ],
+        "type": "object",
+        "title": "get_file_uploadArguments",
+        "additionalProperties": false
+      },
+      "name": "get_file_upload",
+      "outputSchema": {
+        "type": "object",
+        "additionalProperties": true,
+        "title": "get_file_uploadDictOutput"
+      }
+    },
+    {
+      "annotations": {
+        "destructiveHint": false,
         "openWorldHint": false,
         "readOnlyHint": true
       },

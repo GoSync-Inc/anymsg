@@ -12,7 +12,7 @@ const MAX_RESULT=64*1024;
 const SPECS={
   chat_info:[],list_participants:['offset','limit'],get_reactions:['offset','limit'],get_message_info:[],
   get_profile:[],list_contacts:['offset','limit'],get_contact:['user_id'],list_blocked:['offset','limit'],
-  get_pinned_messages:['offset','limit'],send_file:['attachment_id','sha256','mode','caption'],
+  get_pinned_messages:['offset','limit'],send_file:['attachment_id','upload_id','sha256','mode','caption'],
   forward_message:['source_message_id','source_revision'],send_poll:['question','options','multiple'],
   send_contact:['contact_ids'],send_location:['latitude','longitude','description'],edit_message:['text'],
   delete_message:['revoke'],send_reaction:['emoji'],pin_message:['seconds'],unpin_message:[],

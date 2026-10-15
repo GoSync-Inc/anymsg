@@ -32,7 +32,7 @@ PARAMETERS = {
     'list_topics': {'limit', 'offset'},
     'get_profile': set(), 'list_contacts': {'limit', 'offset'},
     'get_contact': {'user_id'}, 'list_blocked': {'limit', 'offset'},
-    'send_file': {'mode', 'caption', 'attachment_id', 'sha256'},
+    'send_file': {'mode', 'caption', 'attachment_id', 'upload_id', 'sha256'},
     'forward_message': {'source_message_id', 'source_revision'},
     'send_poll': {'question', 'options', 'multiple'},
     'send_contact': {'phone', 'first_name', 'last_name'},
