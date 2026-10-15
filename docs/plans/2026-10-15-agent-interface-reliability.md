@@ -1,6 +1,6 @@
 # Agent interface reliability and event delivery
 
-Status: investigation and implementation in progress.
+Status: source implementation and independent reviews complete; pull-request CI and operational acceptance remain separate.
 
 Objective: agents receive consistent, scoped and actionable messaging, event and
 calendar evidence through DeedKit. The external audit is evidence to reproduce,
@@ -52,3 +52,22 @@ Use independent file ownership and test-first changes. Review each implementatio
 for contract compliance before code-quality review, then review integration.
 Keep private reports, runtime data, tokens and sessions outside Git. Stop owned
 test infrastructure at the end; leave shared services and unrelated work alone.
+
+## Verification record
+
+All fixtures are synthetic. The integrated messaging suite reported 2494 passed
+and 8 optional-dependency skips (Tiden run 239), including installed-package and
+native encrypted backup/restore quarantine checks. The subsequent search cursor
+fix passed 181 focused regressions (245); passive subscriptions and native wake
+evidence passed 44 checks (247). Calendar passed 142 tests (237), gateway 139
+(238), and the npm client 248 executions (240).
+
+The messaging, gateway/contracts, calendar and npm archives were inspected for
+private/runtime files; installed messaging, gateway and npm interfaces were
+checked outside the checkout. Contract and code-quality reviews approved the
+query, evidence, delivery, gateway and client changes. Calendar integration was
+reviewed by the parent agent under its local contributor policy.
+
+These results establish source behavior. They do not establish deployed capture
+recovery, actual host wake-up, provider access or historical send confirmation.
+Follow-up status remains in the root backlog and the audit matrix.

@@ -346,7 +346,9 @@ def test_processing_refs_are_independent_of_message_readiness(seeded):
     assert 'processing' not in events[0] and events[1]['processing']['stage'] == 'transcript'
 
 
-def test_delivery_capabilities_distinguish_hint_support_from_verified_host(seeded):
+def test_no_push_or_reply_preset_claimed(seeded):
+    # Preserve the historical case identity. The refined contract advertises
+    # native evidence and operator hints while leaving host execution unverified.
     store, _, _ = seeded
     capabilities = store.capabilities(key(store))['subscriptions']
     assert capabilities['implemented'] and capabilities['passive_events']
