@@ -5,7 +5,7 @@ installations for different owners. Keep database ports private, gateway origina
 mounts read-only, provider sessions isolated and backup keys outside collectors.
 
 Report vulnerabilities using GitHub private vulnerability reporting at
-https://github.com/GoSync-Inc/anymsg/security/advisories/new.
+https://github.com/GoSync-Inc/deedkit/security/advisories/new.
 Do not include real tokens, phone numbers, message bodies, sessions, dumps or files
 in public issues. Use synthetic reproducers. Do not test against other people's accounts.
 

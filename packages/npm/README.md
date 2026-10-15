@@ -34,7 +34,7 @@ server has no approval gate yet. Reuse the same action ID after a lost response;
 never automatically resend an unknown result. MCP clients connect directly to the
 server's `/mcp` endpoint; this package is not a stdio MCP bridge.
 
-Server, source and Python package: https://github.com/GoSync-Inc/anymsg.
+Server, source and Python package: https://github.com/GoSync-Inc/deedkit.
 MIT license, copyright GoSync.
 
 Development source 0.9.17 adds `dismissReply({chat_id, message_id,

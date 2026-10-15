@@ -85,11 +85,10 @@ uncommitted files are not GitHub App sync inputs. Link the migration PR to its
 intent branch and publish real results there before reviewing the merge. After
 merge, verify both main's gate and the GitHub App processing/drift state.
 
-The first baseline increment adds read-only snapshot/comparison tools and their
-regressions. It does not import calendar/calls or claim their Tiden coverage.
-Keep existing messaging check/test identities and links. Add module reports and
-reviewed specs when their implementation enters this repository; a successful
-messaging run must never be presented as verification of an unrun module.
+The integrated CI includes gateway, calendar, calls and calls-frontend reports,
+plus the measured gateway load gate. Existing messaging check/test identities
+and links remain intact. Module assertions support reviewed contracts in the
+same product; a successful messaging run alone cannot verify another module.
 
 ## Native and adapter proofs
 

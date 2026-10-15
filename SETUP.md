@@ -12,7 +12,7 @@ that already holds an archive. Clone the tagged release, then enter `deploy/`.
 PostgreSQL has no public port; the API binds to loopback on port 18940.
 
 ```sh
-git clone --branch v0.9.9 https://github.com/GoSync-Inc/anymsg.git
+git clone --branch v0.9.9 https://github.com/GoSync-Inc/deedkit.git
 cd anymsg/deploy
 cp .env.example .env
 ```

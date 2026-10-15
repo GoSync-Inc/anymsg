@@ -79,8 +79,8 @@ AI artifact reuse are planned. Optional cloud processing is off until explicitly
 For a source installation with Python 3.13:
 
 ```sh
-git clone https://github.com/GoSync-Inc/anymsg.git
-cd anymsg
+git clone https://github.com/GoSync-Inc/deedkit.git
+cd deedkit
 uv sync --group dev
 uv run anymsg --help
 ```
@@ -147,7 +147,7 @@ Optional runtime diagnostics: [TELEMETRY.md](TELEMETRY.md).
 
 MIT for original GoSync code. Dependencies retain their own licenses; see
 [THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md) and `deploy/MOBY-LICENSE`.
-Report vulnerabilities privately through [GitHub security advisories](https://github.com/GoSync-Inc/anymsg/security/advisories/new),
+Report vulnerabilities privately through [GitHub security advisories](https://github.com/GoSync-Inc/deedkit/security/advisories/new),
 not by posting session data or tokens in an issue. See [SECURITY.md](SECURITY.md).
 
 Platform operations: [profiles, access, backup, cutover and rollback](docs/operations/platform-cutover.md).
