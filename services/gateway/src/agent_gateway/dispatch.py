@@ -9,6 +9,7 @@ from .policy import Denied, key_from_file
 
 CALENDAR_CONSTRAINTS = {
     "event_write",
+    "time_format",
     "recurrence_write",
     "future_split",
     "invitations",

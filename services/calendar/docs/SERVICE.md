@@ -137,6 +137,8 @@ REST: `POST /v1/{method}`, те же JSON arguments, ключ и policy layer. U
 {"plan_id":"PLAN_REF","request_id":"stable-user-request-001"}
 ```
 
+Время события в `plan` — ISO 8601 со смещением или `Z`; без смещения (`YYYY-MM-DDTHH:MM[:SS]`) оно читается как местное время в `event.timezone` (IANA). Несуществующее и двойное местное время перехода DST отклоняются как `invalid_local_time` и `ambiguous_local_time`. Окна agenda/slots/assignments требуют смещения. Ошибки времени содержат фиксированный `hint`, а `capabilities.constraints.time_format` описывает формат. `plan` сохраняет только локальный план и не меняет календари, поэтому помечен как недеструктивный; чтения помечены read-only.
+
 Intent и `sending` сохраняются до сети; operation/resource advisory locks защищают от двух workers. После записи обязателен read-back. Повтор apply с тем же request ID возвращает ту же operation; другой plan под этим ID отклоняется. Crash/unknown сверяется по тому же Google ID или CalDAV href и **не отправляет create повторно**. `service reconcile --operation OP_REF` проверяет отправленные неизвестные шаги; если результат не доказан, остаётся `needs_attention`. После ambiguous шага следующие не отправляются. Между провайдерами нет атомарности; partial не означает rollback.
 
 CalDAV create: `If-None-Match`, update/delete: `If-Match`. Google update/delete: `If-Match`; insert: сохранённый client-generated ID, поскольку conditional insert не поддерживается. [Google resource versions](https://developers.google.com/workspace/calendar/api/guides/version-resources).

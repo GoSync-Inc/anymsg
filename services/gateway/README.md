@@ -59,8 +59,8 @@ not forwarded as diagnostics. MCP and REST return the same safe error. A failure
 after a mutation is dispatched still reports `mutation_outcome_unknown` and forbids
 automatic retries, even when a backend error classification is available.
 Calendar capabilities retain a reviewed `constraints` allowlist (write limitations,
-freshness, bounded refresh and request limits), while upstream feature/tool catalogs
-remain hidden. `gateway_tools` is the selected connection's operation ceiling;
+accepted time format, freshness, bounded refresh and request limits), while upstream
+feature/tool catalogs remain hidden. `gateway_tools` is the selected connection's operation ceiling;
 `gateway_actions` describes messenger actions only. Calendar `allowed_event_actions`
 also intersects local/backend scopes and requires both selected plan/apply tools.
 `write_enabled` alone is not a write grant. Slot requests may add explicitly reviewed

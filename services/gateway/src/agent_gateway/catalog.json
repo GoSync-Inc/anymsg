@@ -1808,7 +1808,7 @@
   },
   {
     "name": "calendar_capabilities",
-    "description": "Supported operations and limits in this agent scope. Read this before planning.",
+    "description": "Read-only. Granted calendars with allowed event actions, plus constraints: accepted time format, window/calendar/event limits, plan action limit and TTL, and unsupported writes (recurrence, invitations). Read this before planning.",
     "inputSchema": {
       "additionalProperties": false,
       "properties": {},
@@ -1817,7 +1817,12 @@
     },
     "module": "calendar",
     "operation": "capabilities",
-    "scopes": []
+    "scopes": [],
+    "annotations": {
+      "readOnlyHint": true,
+      "destructiveHint": false,
+      "openWorldHint": false
+    }
   },
   {
     "name": "calendar_calendars",
@@ -1830,7 +1835,12 @@
     },
     "module": "calendar",
     "operation": "calendars",
-    "scopes": []
+    "scopes": [],
+    "annotations": {
+      "readOnlyHint": true,
+      "destructiveHint": false,
+      "openWorldHint": false
+    }
   },
   {
     "name": "calendar_members",
@@ -1843,7 +1853,12 @@
     },
     "module": "calendar",
     "operation": "members",
-    "scopes": []
+    "scopes": [],
+    "annotations": {
+      "readOnlyHint": true,
+      "destructiveHint": false,
+      "openWorldHint": false
+    }
   },
   {
     "name": "calendar_agenda",
@@ -1886,11 +1901,16 @@
     "operation": "agenda",
     "scopes": [
       "agenda:read"
-    ]
+    ],
+    "annotations": {
+      "readOnlyHint": true,
+      "destructiveHint": false,
+      "openWorldHint": false
+    }
   },
   {
     "name": "calendar_slots",
-    "description": "Find free intervals from member bindings plus additional_calendar_refs. Inspect source_selection; incomplete, pending, unbound or stale sources yield unknown. Poll pending refresh with refresh=false.",
+    "description": "Find candidate intervals within member bindings plus additional_calendar_refs. Inspect source_selection and coverage; overall member availability stays unknown without a complete source inventory. Poll pending refresh with refresh=false.",
     "inputSchema": {
       "additionalProperties": false,
       "properties": {
@@ -1944,7 +1964,12 @@
     "operation": "slots",
     "scopes": [
       "availability:read"
-    ]
+    ],
+    "annotations": {
+      "readOnlyHint": true,
+      "destructiveHint": false,
+      "openWorldHint": false
+    }
   },
   {
     "name": "calendar_operation",
@@ -1967,7 +1992,12 @@
     "operation": "operation",
     "scopes": [
       "event:read"
-    ]
+    ],
+    "annotations": {
+      "readOnlyHint": true,
+      "destructiveHint": false,
+      "openWorldHint": false
+    }
   },
   {
     "name": "calendar_assignments",
@@ -1995,7 +2025,12 @@
     "operation": "assignments",
     "scopes": [
       "assignment:read"
-    ]
+    ],
+    "annotations": {
+      "readOnlyHint": true,
+      "destructiveHint": false,
+      "openWorldHint": false
+    }
   },
   {
     "annotations": {
@@ -2630,7 +2665,7 @@
   },
   {
     "name": "calendar_plan",
-    "description": "Prepare an immutable preview for 1–8 guest-free single-event changes; no mutation occurs.",
+    "description": "Prepare an immutable preview and field diff for 1–8 guest-free single-event changes. Only a local plan record is stored for apply; no calendar mutation occurs. Event start/end: ISO 8601 with offset, or wall time YYYY-MM-DDTHH:MM[:SS] read in the event's IANA timezone. Advisory cached overlap checks cover visible calendars only.",
     "inputSchema": {
       "$defs": {
         "Action": {
@@ -2769,8 +2804,9 @@
     ],
     "annotations": {
       "readOnlyHint": false,
-      "destructiveHint": true,
-      "openWorldHint": true
+      "destructiveHint": false,
+      "idempotentHint": false,
+      "openWorldHint": false
     }
   },
   {
