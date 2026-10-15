@@ -24,7 +24,10 @@ test('hanging history stays pending, is reused, and does not block a different c
     assert.equal(window.__messengerArchiveLoads.size,0);
   }finally{delete globalThis.window;}
 });
-test('history limits outstanding loads and only declares exhaustion after an empty provider result',async()=>{
+test('history limits outstanding loads and only declares exhaustion after an empty provider result',async(t)=>{
+  // Exercise the outstanding-load cap independently of wall-clock scheduling.
+  // A real 2 ms deadline can expire before a provider load is even admitted.
+  t.mock.method(Date,'now',()=>0);
   let calls=0;
   setup(()=>{calls++;return new Promise(()=>{});});
   try {
