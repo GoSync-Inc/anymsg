@@ -50,6 +50,9 @@ can select `calls`. Explicitly select only the deployed native WhatsApp adapter;
 this tool does not convert browser sessions. Databases and unrelated services
 are never selected. State, mounts, networks, ports and private settings are
 retained from the resolved configuration.
+All profiles are included when resolving the snapshot so existing profiled
+collectors/workers remain visible. Apply still names only the explicitly selected
+services and uses `--no-deps`; loading profiles does not launch other services.
 
 Before initial enrollment, compare the resolved configuration with the running
 containers and reconcile missing shell variables or settings drift. Container

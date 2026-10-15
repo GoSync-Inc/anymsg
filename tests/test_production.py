@@ -105,6 +105,8 @@ def fixture(tmp_path, monkeypatch):
             return json.dumps([{"Id": IMAGE, "Config": {"Labels": {"org.opencontainers.image.revision": SHA}}}])
         if argv[:2] == ["docker", "compose"] and "config" in argv:
             value = json.loads(Path(argv[argv.index("-f") + 1]).read_text())
+            if "--profile" not in argv:
+                value["services"] = {key: unit for key, unit in value["services"].items() if not unit.get("profiles")}
             # Compose unescapes $$ without consulting a real environment.
             return json.dumps(value).replace("$$", "$")
         if argv[:2] == ["docker", "ps"]:
@@ -136,6 +138,23 @@ def test_preparation_builds_only_exact_main_source_and_does_not_restart_services
     smoke = next(call for call in calls if call[:2] == ["docker", "run"])
     assert smoke[smoke.index("--network") + 1] == "none"
     assert not any("--volume" in call or "-v" in call for call in calls)
+
+
+def test_profiled_live_services_remain_in_the_candidate_without_starting_other_profiles(tmp_path, monkeypatch):
+    settings, calls, document = fixture(tmp_path, monkeypatch)
+    document["services"]["api"]["profiles"] = ["collectors"]
+    document["services"]["optional"] = {"profiles": ["other"], "image": "unrelated:pinned"}
+    Path(settings["projects"][0]["files"][0]).write_text(json.dumps(document))
+    receipt = p.prepare(settings, SHA)
+    candidate = p.read(receipt["projects"][0]["file"])
+    assert candidate["services"]["api"]["image"] == IMAGE
+    assert candidate["services"]["optional"] == document["services"]["optional"]
+    calls.clear()
+    p.apply(settings, SHA)
+    mutations = [call for call in calls if "stop" in call or "up" in call]
+    assert len(mutations) == 2
+    assert all(call[-1] == "api" and "optional" not in call and "db" not in call for call in mutations)
+    assert "--no-deps" in mutations[-1]
 
 
 def test_main_moving_during_source_fetch_prevents_any_build(tmp_path, monkeypatch):

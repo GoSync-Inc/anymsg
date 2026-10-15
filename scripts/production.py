@@ -146,7 +146,9 @@ def lock(state):
 
 
 def compose(project):
-    result = ["docker", "compose", "--project-name", project["name"], "--project-directory", project["directory"]]
+    # Config omits inactive profiles by default, even for currently running
+    # services. Loading profiles does not start them; apply selects exact names.
+    result = ["docker", "compose", "--profile", "*", "--project-name", project["name"], "--project-directory", project["directory"]]
     for filename in project["files"]:
         result += ["-f", filename]
     for filename in project.get("env_files", []):
@@ -264,7 +266,7 @@ def prepare(settings, sha):
         path = release / (project["name"] + ".json")
         write(path, escaped(candidate))
         # Verify that serializing/re-reading did not change secrets, mounts or ports.
-        reread = json.loads(run(["docker", "compose", "-f", str(path), "config", "--format", "json"]))
+        reread = json.loads(run(["docker", "compose", "--profile", "*", "-f", str(path), "config", "--format", "json"]))
         if reread != candidate:
             raise Refused("resolved Compose snapshot did not round-trip exactly")
         projects.append({"name": project["name"], "file": str(path), "digest": digest(read(path)),
@@ -298,7 +300,7 @@ def apply(settings, sha):
     evidence = verify(sha)
     write(release / "attempted.json", {"sha": sha, "ci": evidence, "status": "applying"})
     for project, item in zip(settings["projects"], receipt["projects"], strict=True):
-        command = ["docker", "compose", "--project-name", project["name"], "-f", item["file"]]
+        command = ["docker", "compose", "--profile", "*", "--project-name", project["name"], "-f", item["file"]]
         services = list(project["services"])
         # Stop the existing owners before replacements can connect to their sessions.
         run(command + ["stop", *services])
