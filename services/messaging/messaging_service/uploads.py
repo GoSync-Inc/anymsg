@@ -54,12 +54,25 @@ def _pinned(c, upload_id):
         (upload_id,)).fetchone() is not None
 
 
+def _lifecycle_lock(c, upload_id):
+    """Fence one upload's bytes until transaction commit, without capacity locks."""
+    if not isinstance(upload_id,str) or not re.fullmatch(r'up_[a-f0-9]{32}',upload_id):
+        raise APIError('not_found',404)
+    c.execute('SELECT pg_advisory_xact_lock(hashtextextended(%s,0))',('file-upload:'+upload_id,))
+
+
 def cleanup(store,c):
     """Bounded opportunistic reaping, serialized with admission and chunk writes."""
     StorageAdmission.lock(c)
-    rows=c.execute("""SELECT * FROM file_uploads WHERE state<>'expired'
-        AND expires_at<=clock_timestamp() ORDER BY expires_at,id LIMIT 64 FOR UPDATE""").fetchall()
-    for row in rows:
+    candidates=c.execute("""SELECT id FROM file_uploads WHERE state<>'expired'
+        AND expires_at<=clock_timestamp() ORDER BY expires_at,id LIMIT 64""").fetchall()
+    for candidate in candidates:
+        # Match chunk's capacity -> lifecycle -> row order. A source holds only
+        # this upload's lifecycle lock; it never waits for capacity admission.
+        _lifecycle_lock(c,candidate['id'])
+        row=c.execute("""SELECT * FROM file_uploads WHERE id=%s AND state<>'expired'
+            AND expires_at<=clock_timestamp() FOR UPDATE""",(candidate['id'],)).fetchone()
+        if not row:continue
         if _pinned(c,row['id']):continue
         root=_root(store,row['id'])
         if root.exists():
@@ -155,6 +168,7 @@ def status(store,c,p,upload_id):
 def chunk(store,c,p,upload_id,offset,data_base64):
     # Serialize in the same order as admission/reaping; never grow an unknown file.
     StorageAdmission.lock(c)
+    _lifecycle_lock(c,upload_id)
     row=owned(c,p,upload_id,lock=True)
     _target(c,p,row['account'],row['chat'])
     if _public(row,c)['status']=='expired':raise APIError('upload_expired',409)
@@ -220,8 +234,10 @@ def chunk(store,c,p,upload_id,offset,data_base64):
 def source(store,c,p,account,chat_id,parameters,*,verify=False,retained=False):
     # Keep the lifecycle fence until the caller commits its command. Otherwise
     # TTL reaping can unlink a verified file before that command starts pinning it.
-    # Chunks/admission/reaping take this same transaction lock before upload rows.
-    StorageAdmission.lock(c)
+    # Dispatch already holds the collector fence. Taking capacity admission here
+    # would invert media admission's capacity -> collector order. Chunks/reaping
+    # fence the same upload before its row, without acquiring collector fences.
+    _lifecycle_lock(c,parameters['upload_id'])
     row=owned(c,p,parameters['upload_id'])
     if row['account']!=account or row['chat']!=chat_id:raise APIError('not_found',404)
     if row['sha256']!=parameters['sha256']:raise APIError('operation_target_changed',409)

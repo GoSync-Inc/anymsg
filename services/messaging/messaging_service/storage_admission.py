@@ -52,6 +52,8 @@ class StorageAdmission:
 
     @staticmethod
     def lock(c):
+        # Capacity admission precedes collector/job fences. Staged command
+        # sources use an independent per-upload lifecycle lock, never this lock.
         c.execute("SELECT pg_advisory_xact_lock(hashtextextended('media-storage-admission',0))")
 
     @staticmethod
