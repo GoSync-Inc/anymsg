@@ -66,7 +66,22 @@ reviewed source/image and test them in CI before selecting that service. The
 tool accepts mounts under the established data/config roots (`/data`,
 `/sessions`, `/spool`, `/run/secrets`, `/run/deedkit`, `/models`,
 `/processing-locks`, `/broker`, `/voice-broker`); it refuses executable file
-mounts and other roots. It never silently drops a legacy extension.
+mounts and other roots, including Compose `secrets`/`configs` targets. It never
+silently drops a legacy extension.
+
+A selected service's `entrypoint`, `command` and healthcheck may name a mounted
+path only as the value of `--config`, `--policy`, `--home` or `--dsn-file`.
+The tool refuses a script, `python -m` module or `working_dir` under a mount
+root, inline shell code (`sh -c`, `CMD-SHELL`), `node -e`/`--require`, and
+inline `python -c` except as a healthcheck probe that names no mount root.
+It refuses every `PYTHON*` variable except `PYTHONUNBUFFERED`,
+`PYTHONDONTWRITEBYTECODE`, `PYTHONFAULTHANDLER`, `PYTHONIOENCODING`, `PYTHONUTF8`,
+`PYTHONNOUSERSITE`, `PYTHONHASHSEED` and `PYTHONWARNINGS`; `LD_*`, `NODE_OPTIONS`,
+`NODE_PATH` and similar loader variables; and `PATH` or `HOME` under a mount root.
+`privileged`, `cap_add`, `devices`, `volumes_from`, unconfined
+seccomp/AppArmor, host network/PID/IPC/UTS/user/cgroup namespaces, a shared PID
+namespace and Compose lifecycle hooks are refused too. These checks keep routine
+promotion on reviewed images; they are not a sandbox against a host root operator.
 
 The messaging `runtime` image includes the existing `telegram_session_owner` and
 `telegram_broker` modules. For an existing broker-enabled collector, use

@@ -3,6 +3,7 @@ import copy
 import json
 import os
 from pathlib import Path
+import re
 import stat
 import subprocess
 from types import SimpleNamespace
@@ -245,6 +246,135 @@ def test_external_import_path_cannot_bypass_the_verified_image(tmp_path, monkeyp
     with pytest.raises(p.Refused, match="import path"):
         p.prepare(settings, SHA)
     assert not any(call[:2] == ["docker", "build"] or "stop" in call or "up" in call for call in calls)
+
+
+BROKER = {"type": "bind", "source": "/opt/legacy/bridge", "target": "/broker"}
+BYPASSES = {
+    # Synthetic reproductions from the 2026-10-15 audit, then close variants.
+    "broker-script": ({"volumes": [BROKER], "command": ["python", "/broker/telegram_session_owner.py"]}, "host-mounted code"),
+    "broker-relative-script": ({"volumes": [BROKER], "command": ["python", "../broker/owner"]}, "host-mounted code"),
+    "broker-module": ({"volumes": [BROKER], "command": ["python", "-m", "broker.telegram_session_owner"]}, "host-mounted code"),
+    "attached-module": ({"volumes": [BROKER], "command": ["python3", "-Imbroker.owner"]}, "host-mounted code"),
+    "working-dir": ({"working_dir": "/data/patch", "command": ["python", "-m", "messaging_service", "serve"]}, "host-mounted code"),
+    "pythonuserbase": ({"environment": {"PYTHONUSERBASE": "/data/u"}}, "import path"),
+    "pythonhome": ({"environment": {"PYTHONHOME": "/data/python"}}, "import path"),
+    "pythonstartup": ({"environment": {"PYTHONSTARTUP": "/data/startup.py"}}, "import path"),
+    "pythonsafepath": ({"environment": {"PYTHONSAFEPATH": ""}}, "import path"),
+    "pycache-prefix": ({"environment": {"PYTHONPYCACHEPREFIX": "/data/pyc"}}, "import path"),
+    "empty-pythonpath": ({"environment": {"PYTHONPATH": ""}}, "import path"),
+    "listed-pythonpath": ({"environment": ["PYTHONPATH=/data"]}, "import path"),
+    "user-site-home": ({"environment": {"HOME": "/data/home"}}, "import path"),
+    "path-prefix": ({"environment": {"PATH": "/broker:/usr/local/bin:/usr/bin"}}, "import path"),
+    "node-options": ({"environment": {"NODE_OPTIONS": "--require /data/x.js"}}, "import path"),
+    "ld-audit": ({"environment": {"LD_AUDIT": "/data/audit.so"}}, "import path"),
+    "gconv": ({"environment": {"GCONV_PATH": "/data/gconv"}}, "import path"),
+    "entrypoint-sh-c": ({"entrypoint": ["sh", "-c", "python - <<<'print(1)'"]}, "inline"),
+    "entrypoint-string": ({"entrypoint": "/bin/bash -lc 'exec python app.py'"}, "inline"),
+    "python-c": ({"command": ["python", "-W", "ignore", "-c", "import runpy"]}, "inline"),
+    "python-stdin": ({"command": ["python", "-"]}, "inline"),
+    "wrapped-shell": ({"command": ["nice", "-n", "5", "busybox", "sh", "-ec", "true"]}, "inline"),
+    "env-assignment": ({"command": ["env", "PYTHONPATH=/srv/extension", "python", "-m", "messaging_service"]}, "import path"),
+    "env-split": ({"command": ["env", "-S", "python app.py"]}, "inline"),
+    "node-require": ({"command": ["node", "--require=/srv/hook.js", "app.js"]}, "inline"),
+    "embedded-mount": ({"command": ["perl", "-e", "do '/broker/bridge.pl'"]}, "host-mounted code"),
+    "option-value-mount": ({"command": ["deedkit-gateway", "--plugin=/broker/x"]}, "host-mounted code"),
+    "healthcheck-shell": ({"healthcheck": {"test": ["CMD-SHELL", "true"]}}, "inline"),
+    "healthcheck-script": ({"healthcheck": {"test": ["CMD", "python", "/broker/probe.py"]}}, "host-mounted code"),
+    "healthcheck-inline-mount": ({"healthcheck": {"test": ["CMD", "python", "-c", "exec(open('/broker/x').read())"]}}, "host-mounted code"),
+    "secret-site-packages": ({"secrets": [{"source": "bridge", "target": "/usr/local/lib/python3.13/site-packages/bridge.pth"}]}, "host-mounted code"),
+    "config-default-root": ({"configs": ["bridge"]}, "host-mounted code"),
+    "lifecycle-hook": ({"post_start": [{"command": ["true"], "user": "root"}]}, "lifecycle"),
+    "privileged": ({"privileged": True}, "privileged"),
+    "cap-add": ({"cap_add": ["SYS_PTRACE"]}, "privileged"),
+    "devices": ({"devices": ["/dev/fuse:/dev/fuse"]}, "privileged"),
+    "volumes-from": ({"volumes_from": ["legacy-bridge"]}, "privileged"),
+    "seccomp-unconfined": ({"security_opt": ["no-new-privileges:true", "seccomp=unconfined"]}, "privileged"),
+    "network-host": ({"network_mode": "host"}, "namespaces"),
+    "pid-host": ({"pid": "host"}, "namespaces"),
+    "ipc-host": ({"ipc": "host"}, "namespaces"),
+    "userns-host": ({"userns_mode": "host"}, "namespaces"),
+    "pid-shared": ({"pid": "container:legacy-bridge"}, "namespaces"),
+}
+
+
+@pytest.mark.parametrize("case", BYPASSES, ids=list(BYPASSES))
+def test_runtime_bypasses_prevent_preparation_before_any_build_or_restart(tmp_path, monkeypatch, case):
+    settings, calls, document = fixture(tmp_path, monkeypatch)
+    change, message = BYPASSES[case]
+    unit = document["services"]["api"]
+    for key, value in change.items():
+        if key == "volumes":
+            unit["volumes"] = unit["volumes"] + value
+        elif key == "environment" and isinstance(value, dict):
+            unit["environment"] = {**unit["environment"], **value}
+        else:
+            unit[key] = value
+    Path(settings["projects"][0]["files"][0]).write_text(json.dumps(document))
+    with pytest.raises(p.Refused, match=message):
+        p.prepare(settings, SHA)
+    assert not any(call[:2] == ["docker", "build"] or "stop" in call or "up" in call for call in calls)
+
+
+@pytest.mark.parametrize("unit", [
+    {"command": ["--policy", "/run/deedkit/policy.json", "--public-url", "https://gateway.example.invalid/deedkit",
+                 "--host", "0.0.0.0", "--port", "13240"],
+     "volumes": [{"source": "/srv/policy.json", "target": "/run/deedkit/policy.json"},
+                 {"source": "/srv/keys", "target": "/run/deedkit/keys"}]},
+    {"command": ["python", "-m", "telegram_session_owner", "--config", "/run/secrets/telegram_config"],
+     "volumes": [{"source": "/srv/broker", "target": "/broker"}, {"source": "/srv/session", "target": "/sessions"}]},
+    {"command": ["python", "-X", "dev", "-W", "default", "-m", "messaging_service", "serve"]},
+    {"command": ["family-calendar", "--home=/data", "service", "serve"], "working_dir": "/app"},
+    {"environment": {"PYTHONUNBUFFERED": "1", "PYTHONDONTWRITEBYTECODE": "1", "HOME": "/tmp",
+                     "PATH": "/app/.venv/bin:/usr/local/bin:/usr/bin:/bin", "PROBE_FILES": "/data/files"}},
+    {"healthcheck": {"test": ["CMD", "python", "-c", "import urllib.request", "https://gateway.example.invalid"]}},
+    {"healthcheck": {"test": ["NONE"]}},
+    {"secrets": ["database_url", {"source": "config", "target": "/run/secrets/telegram_config"}]},
+    {"security_opt": ["no-new-privileges:true", "seccomp=/srv/chromium-seccomp.json"], "cap_drop": ["ALL"],
+     "network_mode": "bridge", "ipc": "private"},
+], ids=["gateway", "broker-owner", "interpreter-flags", "data-option", "environment", "healthcheck",
+        "healthcheck-disabled", "secrets", "sandbox"])
+def test_reviewed_runtime_settings_remain_promotable(unit):
+    p.validate_runtime(unit)
+
+
+class ComposeLoader(yaml.SafeLoader):
+    """Read Compose override tags without constructing arbitrary Python objects."""
+
+
+ComposeLoader.add_constructor("!override", lambda loader, node: loader.construct_sequence(node)
+                              if isinstance(node, yaml.SequenceNode) else loader.construct_mapping(node))
+
+
+def resolved(value):
+    # Approximate `compose config` with synthetic values; no Compose or Docker runs.
+    if isinstance(value, str):
+        return re.sub(r"\$\{[^}]*\}", "synthetic", value)
+    if isinstance(value, list):
+        return [resolved(item) for item in value]
+    if isinstance(value, dict):
+        return {key: resolved(item) for key, item in value.items()}
+    return value
+
+
+def test_every_repository_application_service_passes_the_runtime_check():
+    checked = []
+    for path in sorted((ROOT / "deploy").glob("compose*.yaml")):
+        for name, unit in yaml.load(path.read_text(), Loader=ComposeLoader)["services"].items():
+            if name in {"db", "calendar-db", "operator"}:
+                continue  # Never promotion targets: refused by name before any runtime check.
+            unit = resolved(unit)
+            unit["volumes"] = [volume if isinstance(volume, dict)
+                               else dict(zip(("source", "target"), volume.split(":")[:2] if ":" in volume else ("", volume)))
+                               for volume in unit.get("volumes", [])]
+            if path.name == "compose.calls-telegram.yaml":
+                # Existing limitation: /run/telegram-broker is not an approved mount root.
+                with pytest.raises(p.Refused, match="host-mounted code"):
+                    p.validate_runtime(unit)
+                continue
+            p.validate_runtime(unit)
+            checked.append(name)
+    assert {"api", "gateway", "calendar-api", "calendar-worker", "calls", "telegram", "whatsapp1", "whatsapp2",
+            "indexer", "enricher", "enricher-local", "subscriptions"} <= set(checked)
 
 
 def test_ci_becoming_red_after_build_prevents_a_prepared_release(tmp_path, monkeypatch):
