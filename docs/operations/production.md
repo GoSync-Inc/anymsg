@@ -68,6 +68,15 @@ tool accepts mounts under the established data/config roots (`/data`,
 `/processing-locks`, `/broker`, `/voice-broker`); it refuses executable file
 mounts and other roots. It never silently drops a legacy extension.
 
+The messaging `runtime` image includes the existing `telegram_session_owner` and
+`telegram_broker` modules. For an existing broker-enabled collector, use
+`python -m telegram_session_owner --config /run/secrets/telegram_config` from the
+image, preserving its broker socket/token/policy configuration and session/data
+mounts. Remove only the replaced Python file mounts and `PYTHONPATH` override
+from the reviewed candidate; keep the default collector command for installations
+without this extension. CI and preparation import the modules without connecting
+an account or starting a broker.
+
 The state directory and Docker filesystem each need at least **15 GiB free**
 before preparation. A refusal does not authorize pruning shared Docker objects
 or deleting runtime data. Free capacity through a reviewed, targeted operation
