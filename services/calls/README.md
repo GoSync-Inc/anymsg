@@ -1,5 +1,8 @@
 # Голосовые поручения — отдельный сервис Pipecat
 
+Общий бэклог и статусы: **[DeedKit BACKLOG](../../BACKLOG.md)**
+(DK-01, DK-20, DK-21). Этот README описывает текущий контракт и проверки.
+
 Экспериментальный Grok Voice 3.0 для браузера и Twilio phone/SIP, отдельный ключ
 xAI, диагностика готовности для агентов и порядок живой проверки:
 [GROK.md](GROK.md). Синтетические проверки не оценивают качество модели в разговоре.
@@ -72,7 +75,7 @@ Policy v4 сохраняет правила v3: `approval_fields` — явное
 
 Консультант `gemini-3.8-flash` получает `supervisor_notes`, выбранный snapshot и текущий разговор. Максимум 6 запросов на попытку, ожидание одного до 6 секунд, ввод до 100000 символов. `VOICE_SUPERVISOR_MODEL` позволяет сменить текстовую модель. Advice не является owner approval. Timeout/error/unknown refs не дают разрешений; запоздалые советы при изменении условий или закрытии получают `obsolete`. Все запросы/советы сохраняются в журнале.
 
-Уведомления владельцу, постоянный Personal OS controller и внешний callback scheduler ещё не подключены. В браузере очередь — тестовый owner channel. [Три роли, реализованный workflow и следующий этап](../../docs/architecture/VOICE_SUPERVISION.md).
+Уведомления владельцу, постоянный Personal OS controller и внешний callback scheduler ещё не подключены (DK-20 в общем бэклоге). В браузере очередь — тестовый owner channel; workflow реализован в описанных выше состояниях.
 
 Это гарантирует запрос после сохранения отмеченного поля. Понимание речи, вызов `record_answer` и просьбы пересмотреть те же условия всё ещё зависят от Gemini и проверяются живым сценарием. Текстовые backend tests проверяют состояния, не поведение модели на аудио.
 
@@ -112,9 +115,9 @@ Ignored `.local/voice-service/data/voice.sqlite3` содержит поруче�
 
 Ошибки исходных двух браузерных диалогов уже повлияли на policy v2: не выдумывать отправку/повторное согласование/срок ответа, не рассказывать собеседнику про внутренние интерфейсы, уточнять другую валюту. Служебный owner frame исключён из assistant transcript. Нативное закрытие добавлено отдельным tool. Качество этих исправлений проверяется новым разговором; unit/fixture checks не являются успешным live benchmark.
 
-[Данные и границы цикла](../../docs/architecture/VOICE_LEARNING.md).
+Реализация хранения, provenance и draft proposals: [learning.py](learning.py).
 
-Дальше — живые проверки установленных adapters: Twilio телефон/SIP/WhatsApp Business и Telegram private-call signaling + raw audio bridge. LiveKit не подключён; personal WhatsApp native route не реализован. Наличие авторизованной переписки не доказывает доступ к звонкам. [Архитектура и транспортные ограничения](../../docs/architecture/VOICE_ASSISTANT.md).
+Живые проверки установленных adapters (Twilio телефон/SIP/WhatsApp Business и Telegram private-call signaling + raw audio bridge) учитываются как DK-21 в общем бэклоге. LiveKit не подключён; personal WhatsApp native route не реализован. Наличие авторизованной переписки не доказывает доступ к звонкам. [Runtime модулей](../../docs/platform-runtime.md), [границы браузерного Flows](LIVE_FLOWS.md).
 
 ## Диагностика Telegram audio
 

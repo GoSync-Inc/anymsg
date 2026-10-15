@@ -44,7 +44,11 @@ jobs:
           CHECKS_RESULT: ${{ needs.checks.result }}
           NATIVE_RESULT: ${{ needs.native.result }}
           IMAGES_RESULT: ${{ needs.images.result }}
+          SOURCE_REF: ${{ inputs.source_ref || '' }}
+          EXPECTED_SHA: ${{ github.sha }}
         run: |
           test "$CHECKS_RESULT" = success
           test "$NATIVE_RESULT" = success
           test "$IMAGES_RESULT" = success
+          # A manual baseline of another revision must never turn this commit green.
+          test -z "$SOURCE_REF" || test "$SOURCE_REF" = "$EXPECTED_SHA"

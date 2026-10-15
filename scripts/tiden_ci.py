@@ -26,6 +26,8 @@ MODULE_REPORTS = {
     "calls_frontend": ("calls-frontend.xml", "node", "services/calls/frontend"),
 }
 MAX_BYTES = 20 * 1024 * 1024
+# Tiden branch names: lowercase letters, digits, slashes, underscores and hyphens.
+TIDEN_BRANCH_NAME = re.compile(r"[a-z0-9]+(?:[/_-][a-z0-9]+)*")
 
 
 def source_path(value: str, root: Path) -> str:
@@ -134,7 +136,29 @@ def resolve_branch(manifest: dict, mapping: dict) -> str:
     return branch
 
 
-def publish(directory: Path, manifest: dict, branch: str, product: str, cli: str = "tiden") -> dict:
+def route_branch(manifest: dict, mapping: dict) -> tuple[str, bool]:
+    """Return the Tiden branch and whether Tiden itself routes the run.
+
+    An explicit mapping always wins. An unmapped feature branch is reported under
+    its own Git branch name: Tiden attributes the run to the intent branch whose
+    session recorded that Git branch, otherwise to a branch of the same name.
+    """
+    try:
+        return resolve_branch(manifest, mapping), False
+    except ValueError:
+        git_branch = manifest["git_branch"]
+        if git_branch == "main" or not TIDEN_BRANCH_NAME.fullmatch(git_branch):
+            raise ValueError("No Tiden branch mapping and the Git branch is not a valid Tiden branch name; "
+                             "register this Git branch before publishing evidence") from None
+        return git_branch, True
+
+
+def routed_target(name: object, git_branch: str) -> bool:
+    return isinstance(name, str) and (name == git_branch or name.startswith("intent/"))
+
+
+def publish(directory: Path, manifest: dict, branch: str, product: str, cli: str = "tiden",
+            routed: bool = False) -> dict:
     if manifest.get("schema") != 1 or not re.fullmatch(r"[a-f0-9]{40}", manifest.get("sha", "")):
         raise ValueError("invalid evidence manifest")
 
@@ -153,8 +177,17 @@ def publish(directory: Path, manifest: dict, branch: str, product: str, cli: str
 
     branches = call(["branch", "list"], "branches")["branches"]
     expected = next((b["id"] for b in branches if b["name"] == branch), None)
+    if not expected and routed:
+        # Tiden skips live-doc sync for a branch name it does not know, so create it first.
+        try:
+            call(["branch", "create", "--name", branch,
+                  "--description", "CI evidence for Git branch " + branch], "branch-create")
+        except (RuntimeError, ValueError):
+            pass  # A concurrent run may have created it; the listing below decides.
+        branches = call(["branch", "list"], "branches-created")["branches"]
+        expected = next((b["id"] for b in branches if b["name"] == branch), None)
     if not expected:
-        raise ValueError("Mapped Tiden branch does not exist; refusing unassociated results")
+        raise ValueError("Tiden branch does not exist; refusing unassociated results")
     run = call(["run", "create", "--branch", branch, "--intent-session", "none",
                 "--build-sha", manifest["sha"], "--environment", "github-actions-synthetic",
                 "--title", f"GitHub CI {manifest['sha'][:12]}", "--description", manifest["ci_url"],
@@ -163,7 +196,8 @@ def publish(directory: Path, manifest: dict, branch: str, product: str, cli: str
     seq = str(run["seqNum"])
     completed = False
     try:
-        if run["branchName"] != branch or run["buildSha"] != manifest["sha"]:
+        named = routed_target(run["branchName"], branch) if routed else run["branchName"] == branch
+        if not named or run["buildSha"] != manifest["sha"]:
             raise RuntimeError("Tiden rewrote the explicit source association")
         paths = []
         for filename in manifest["reports"]:
@@ -182,8 +216,14 @@ def publish(directory: Path, manifest: dict, branch: str, product: str, cli: str
             if result.get("liveDocStatus") in {"succeeded", "failed", "skipped"}:
                 break
             time.sleep(3)
-        if result.get("liveDocStatus") != "succeeded" or result.get("branchId") != expected:
-            raise RuntimeError("Run recorded, but Tiden did not associate test evidence with the expected branch")
+        if routed and result.get("liveDocStatus") == "succeeded" and result.get("branchId") != expected:
+            # Tiden may attribute the run to an intent branch linked to this Git branch.
+            final = call(["branch", "list"], "branches-final")["branches"]
+            expected = next((b["id"] for b in final if b["id"] == result.get("branchId")
+                             and routed_target(b["name"], branch)), None)
+        if result.get("liveDocStatus") != "succeeded" or not expected or result.get("branchId") != expected:
+            raise RuntimeError("Run recorded, but Tiden did not associate test evidence with the expected branch "
+                               f"(live doc {result.get('liveDocStatus')}, branch {result.get('branchId')})")
         if result.get("status") not in {"passed", "failed"}:
             raise RuntimeError("Tiden run has no terminal test verdict")
         check_count = len(CHECKS) + (len(MODULE_REPORTS) if "module_checks" in manifest else 0)
@@ -214,8 +254,8 @@ def main() -> int:
         print(json.dumps({"test_counts": result["test_counts"], "check_counts": result["check_counts"]}))
         return 0
     manifest = json.loads((directory / "manifest.json").read_text())
-    branch = resolve_branch(manifest, json.loads(os.environ.get("TIDEN_BRANCH_MAP", "{}")))
-    result = publish(directory, manifest, branch, os.environ["TIDEN_PRODUCT_ID"])
+    branch, routed = route_branch(manifest, json.loads(os.environ.get("TIDEN_BRANCH_MAP") or "{}"))
+    result = publish(directory, manifest, branch, os.environ["TIDEN_PRODUCT_ID"], routed=routed)
     print(json.dumps({k: result[k] for k in ("seqNum", "status", "branchName", "branchId", "buildSha", "stats", "liveDocStatus")}))
     return 0 if result["status"] == "passed" else 1
 

@@ -274,6 +274,31 @@ def test_whatsapp_out_of_order_and_aggregate_evidence(seeded):
         assert for_reference(c,'whatsapp-demo-1','100@c.us','true_100@c.us_wa-17','whatsapp')['state']=='unknown'
 
 
+def test_self_chat_receipts_are_normalized_whatever_the_device_ack(seeded):
+    store,_,_=seeded;archive=Archive(store)
+    archive.register('receipt-test','whatsapp','Synthetic WhatsApp',discover=True)
+    epoch=archive.acquire('receipt-test','receipt-worker');state=CollectorState(archive,'receipt-test',('receipt-worker',epoch))
+    # One account's own devices ACK a note to self; another account's never do.
+    acked=outgoing(archive,'true_100@c.us_wa-17',platform='whatsapp',chat='100@c.us',metadata={'is_self_chat':True})
+    silent=outgoing(archive,'true_200@lid_wa-18',platform='whatsapp',chat='200@lid')
+    with store.pool.connection() as c:
+        # The LID self chat is known only from the dialog observation.
+        c.execute('''INSERT INTO chat_read_observations(chat,account,observed_at,basis,is_self_chat)
+            VALUES(%s,'receipt-test',clock_timestamp(),'whatsapp_cached_chat',true)''',
+            (stable_id('chat','receipt-test','200@lid'),))
+    apply_and_publish(state,capture('whatsapp',state='delivered'))
+    proofs=evidence(store,[{'id':acked},{'id':silent}])
+    for proof,raw in [(proofs[acked],'delivered'),(proofs[silent],'unknown')]:
+        assert proof['state']=='not_applicable' and proof['basis']=='self_chat' and proof['audience']=='self'
+        assert proof['recipient_delivery_confirmed'] is False and proof['provider_state']==raw
+    assert statuses(store)==[]  # A note to self has no recipient status to publish.
+    from messaging_service.receipts import for_reference
+    with store.pool.connection() as c:
+        assert for_reference(c,'receipt-test','100@c.us','true_100@c.us_wa-17','whatsapp')['state']=='not_applicable'
+        assert for_reference(c,'receipt-test','200@lid','true_200@lid_wa-18','whatsapp')['state']=='not_applicable'
+        assert for_reference(c,'receipt-test','300@c.us','true_300@c.us_wa-19','whatsapp')['state']=='unknown'
+
+
 def test_restricted_receipt_roles_are_not_credential_access(receipt_state):
     import messaging_service.archive as module
     import psycopg

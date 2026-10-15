@@ -27,11 +27,11 @@ iCloud: сначала скрытый ввод app-specific password в legacy r
 ```sh
 uv run family-calendar connection add-icloud --id apple-parent
 uv run family-calendar pilot icloud discover --connection apple-parent
-uv run family-calendar service import-icloud --connection apple-parent --owner egor
+uv run family-calendar service import-icloud --connection apple-parent --owner egor --timezone Asia/Makassar
 uv run family-calendar service discover --connection apple-parent
 ```
 
-Импорт не изменяет credentials, journals и allowlists пилота. Сервис имеет свой Vault и отдельный write opt-in; каждый аккаунт использует отдельный транспорт.
+`--timezone` — IANA-зона календарей, в которой читаются события на весь день (по умолчанию `Asia/Makassar`). Discover заменяет её зоной из VTIMEZONE календаря, а если её нет, оставляет выбранную при импорте. Импорт не изменяет credentials, journals и allowlists пилота. Сервис имеет свой Vault и отдельный write opt-in; каждый аккаунт использует отдельный транспорт.
 
 ## Семья и разрешения
 
@@ -98,7 +98,7 @@ REST: `POST /v1/{method}`, те же JSON arguments, ключ и policy layer. U
 {"member_ids":["egor","child"],"start":"2026-10-19T08:00:00+08:00","end":"2026-10-19T20:00:00+08:00","duration_minutes":60,"refresh":true}
 ```
 
-До 31 дня, 32 календарей, 500 событий. Google pagination и CalDAV REPORT должны завершиться полностью. Coverage старше пяти минут, ошибки и непривязанные участники дают `unknown`. Verified slots относятся только к **настроенным источникам**; неизвестные календари человека не считаются прочитанными. Неподключённый партнёр не позволяет утверждать доступность всей семьи. Polling выполняется по запросу; это не full background/incremental sync.
+До 31 дня, 32 календарей, 500 событий. Google pagination и CalDAV REPORT должны завершиться полностью. Coverage старше пяти минут, ошибки и непривязанные участники дают `unknown`. `candidate_slots` относятся только к **настроенным и явно выбранным источникам**; неизвестные календари человека не считаются прочитанными. Неподключённый партнёр не позволяет утверждать доступность всей семьи. Polling выполняется по запросу; это не full background/incremental sync.
 
 `family_members` возвращает `availability_calendar_refs` и `availability_sources_status`
 для каждого участника: `configured`, `unbound` или `inaccessible`. Ссылки на недоступные
@@ -137,14 +137,50 @@ REST: `POST /v1/{method}`, те же JSON arguments, ключ и policy layer. U
 {"plan_id":"PLAN_REF","request_id":"stable-user-request-001"}
 ```
 
+Время события в `plan` — ISO 8601 со смещением или `Z`; без смещения (`YYYY-MM-DDTHH:MM[:SS]`) оно читается как местное время в `event.timezone` (IANA). Несуществующее и двойное местное время перехода DST отклоняются как `invalid_local_time` и `ambiguous_local_time`. Окна agenda/slots/assignments требуют смещения. Ошибки времени содержат фиксированный `hint`, а `capabilities.constraints.time_format` описывает формат. `plan` сохраняет только локальный план и не меняет календари, поэтому помечен как недеструктивный; чтения помечены read-only.
+
 Intent и `sending` сохраняются до сети; operation/resource advisory locks защищают от двух workers. После записи обязателен read-back. Повтор apply с тем же request ID возвращает ту же operation; другой plan под этим ID отклоняется. Crash/unknown сверяется по тому же Google ID или CalDAV href и **не отправляет create повторно**. `service reconcile --operation OP_REF` проверяет отправленные неизвестные шаги; если результат не доказан, остаётся `needs_attention`. После ambiguous шага следующие не отправляются. Между провайдерами нет атомарности; partial не означает rollback.
 
 CalDAV create: `If-None-Match`, update/delete: `If-Match`. Google update/delete: `If-Match`; insert: сохранённый client-generated ID, поскольку conditional insert не поддерживается. [Google resource versions](https://developers.google.com/workspace/calendar/api/guides/version-resources).
 
 Сейчас запись — отдельные неповторяющиеся timed события без гостей/специальных Google типов. Незапрошенные поля и ICS свойства/alarms сохраняются. Recurrence/future из harness не включены в MCP. Обязанности `dropoff/pickup/stay_with_child` хранятся отдельно: assigned занимает слот, proposed — нет. Изменять/отменять по `assignment_id` и `expected_version`. Согласие другого человека не утверждается. Автоматической связи с занятием ребёнка и проекций в календари родителей пока нет.
 
+## Покрытие и ошибки чтения
+
+Повторения iCloud разворачиваются лениво: в одном окне календаря не больше 500 экземпляров, как и в ответах agenda/slots (`event_limit`). Перед разворачиванием каждый RRULE оценивается сверху без генерации: dateutil проходит все экземпляры от DTSTART до конца окна. Больше 100 000 на ресурс или 1 000 000 на календарь дают `coverage_incomplete`, например `FREQ=MINUTELY`/`SECONDLY` или ежечасное событие, идущее больше 11 лет. Ежечасное напоминание даёт 744 события за 31 день, поэтому такое окно остаётся `unknown`, а окно до 20 дней читается полностью. Лимит 500 не повышен: его же применяют agenda и slots, так что больший лимит одного worker не дал бы покрытия. При `coverage_incomplete` из-за плотного календаря запросить более короткое окно.
+
+Событие нулевой длины (например, DTSTART без DTEND) публикуется как момент: `instant=true`, `busy=false`, `end` равен `start`; слоты оно не занимает. Событие, которое кончается раньше начала, даёт coverage `invalid_provider_event_time`, а данные, которые нельзя сохранить, — `invalid_provider_data`. Это ошибки данных календаря, а не `provider_unavailable`.
+
+Если worker перезапустился во время чтения, это обновление становится `failed`, а coverage получает `sync_interrupted`. Повторно оно не запускается: чтение, уронившее процесс, иначе блокировало бы все обновления и операции. Для нового чтения агент снова вызывает agenda/slots с `refresh=true`.
+
 ## Эксплуатация
 
 `family-calendar-local status/start/stop` управляет только собственными macOS launch agents; PostgreSQL остаётся отдельным persistent container. Docker daemon должен работать. В argv/env не передаются ключи/пароли; логи приватны. На других ОС запускать вручную либо под своим supervisor.
 
 Credentials и raw source cache зашифрованы, но event details, plans и journal содержат приватные данные в DB. Volume этим сервисом не шифруется. Backup должен включать PostgreSQL, Vault/key, приватные DB профили и ключи агентов. Автоматический backup и restore ещё не установлены/не проверены. Это локальный MVP, не публичный multi-tenant deployment.
+
+## Границы доступности и предпросмотра
+
+`slots` перечисляет `checked_member_sources` и итоговый `source_selection`.
+`availability_scope=configured_bindings` при одних bindings; дополнительные явно
+выбранные источники дают `configured_and_explicit_sources`.
+Binding определяет проверенный источник, но не подтверждает, что перечислены все
+календари человека. Поэтому общая `availability` остаётся `unknown`,
+`member_sources_complete=unknown`, а `required_sources_complete=false`. При свежем
+покрытии всех настроенных источников `configured_bindings_availability=verified`,
+`configured_sources_complete=true`, и `candidate_slots` содержит свободные интервалы
+только внутри итогового `source_selection` (bindings плюс дополнительные источники).
+При pending/failed refresh эти поля сбрасываются в unknown/false/пустой список.
+`verified_slots` остаётся пустым. Подключение аккаунта
+само по себе не создаёт binding и не расширяет grants.
+
+Предпросмотр `plan` возвращает изменения полей `diff` и `overlap_check`: полуоткрытые
+интервалы занятости в доступных для чтения календарях, включая busy-only без названий
+и идентификаторов событий. Переносимые/удаляемые ресурсы исключаются из старого
+расписания; пересечения между предложенными шагами показываются отдельно. Отсутствие
+или просроченность покрытия помечает проверку `incomplete`. Это снимок кэша, не блокировка
+времени и не гарантия отсутствия параллельных правок при выполнении.
+
+Календари сохраняют отдельную идентичность ресурса провайдера (`identity_basis`).
+`primary` и `duplicate_of` равны null до явного определения владельцем: одинаковое
+название или другой часовой пояс не доказывают, что это дубли.

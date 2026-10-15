@@ -10,6 +10,7 @@ from mcp.server.mcpserver.exceptions import ToolError
 from mcp.server.transport_security import TransportSecuritySettings
 from mcp.types import ToolAnnotations
 
+from agent_api import OWNER_NOTICE
 from core import BriefInput, ServiceError
 from outbound import ExternalBrief
 from learning import SemanticReview
@@ -88,7 +89,8 @@ def create_control(service,prepare,start,stop,capabilities,outbound=None,browser
             raise ToolError('invalid_page')
         items=service.decision_inbox(limit,offset)
         return {'items':items,'next_offset':offset+limit if len(items)==limit else None,
-                'notification_channel':'not_connected','external_action_authorized':False}
+                'notification_channel':'not_connected','notification_explanation':OWNER_NOTICE,
+                'external_action_authorized':False}
 
     @mcp.tool(structured_output=True,annotations=ToolAnnotations(readOnlyHint=False,destructiveHint=False,idempotentHint=True,openWorldHint=False))
     async def prepare_followup(call_id:str,decision_id:str)->dict[str,Any]:
@@ -150,7 +152,7 @@ def create_control(service,prepare,start,stop,capabilities,outbound=None,browser
             try:return await outbound.preflight(brief_id)
             except ServiceError as exc:raise ToolError(exc.code) from None
 
-        @mcp.tool(structured_output=True,annotations=ToolAnnotations(readOnlyHint=False,destructiveHint=False,idempotentHint=True,openWorldHint=True))
+        @mcp.tool(structured_output=True,annotations=ToolAnnotations(readOnlyHint=False,destructiveHint=True,idempotentHint=True,openWorldHint=True))
         async def dial_call(brief_id:str,authorization_reference:str)->dict[str,Any]:
             """Place ONE real, potentially paid call for this brief, only after the owner's concrete instruction. Repeats return the same attempt; unknown is NEVER retried. A callback needs a fresh authorized brief."""
             try:return await outbound.dial(brief_id,authorization_reference)

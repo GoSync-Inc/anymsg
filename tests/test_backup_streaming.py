@@ -7,6 +7,7 @@ import sys
 import asyncio
 import os
 import threading
+import time
 
 import pytest
 
@@ -103,7 +104,9 @@ def test_reference_capture_avoids_copy_and_stream_restores_ordinary_bundle(seede
     assert all((store.files/item['digest']).exists() for item in manifest['blobs'])
 
 
-@pytest.mark.parametrize('mode',['ok','encoder_failed','timeout','duplicate','quota'])
+# Changed assertions (name kept as the Tiden identity): adds the worker_exited and
+# late_writer modes and passes the stopped probe, which every mode now receives.
+@pytest.mark.parametrize('mode',['ok','encoder_failed','timeout','duplicate','quota','worker_exited','late_writer'])
 def test_host_streams_fifo_without_ciphertext_staging_and_requires_encoder_success(tmp_path,monkeypatch,mode):
     ssh=tmp_path/'ssh';pid=tmp_path/'ssh.pid'
     script='''import hashlib,json,os,struct,sys,time
@@ -129,29 +132,43 @@ assert footer['bytes']==len(data) and footer['sha256']==hashlib.sha256(data).hex
 assert sys.stdin.buffer.read()==b''
 print(json.dumps({**response,**footer,'status':'stored'}),flush=True)
 '''
-    data=AGE_HEADER+b'fixture payload'*10000
+    # A late writer must fit the pipe buffer: it writes during a probe, before reads.
+    data=AGE_HEADER+b'fixture payload'*(100 if mode=='late_writer' else 10000)
     ssh.write_text('#!'+sys.executable+'\nPID='+repr(str(pid))+'\nMODE='+repr(mode)+'\nDATA='+repr(data)+'\n'+script)
     ssh.chmod(0o700);monkeypatch.setenv('PATH',str(tmp_path)+os.pathsep+os.environ['PATH'])
     monkeypatch.setenv('SSH_AUTH_SOCK','never-forward')
     fifo=tmp_path/'ciphertext.fifo';os.mkfifo(fifo,0o600)
-    threads=[];actions=[]
+    threads=[];actions=[];probes=[]
     def start(encode):
         actions.append(encode)
-        if encode:
+        if encode and mode not in ('worker_exited','late_writer'):
             def writer():
                 with fifo.open('wb',buffering=0) as out:out.write(data)
             thread=threading.Thread(target=writer);thread.start();threads.append(thread)
+    def stopped():
+        probes.append(mode)
+        if mode=='late_writer' and len(probes)==1:
+            # The worker wrote everything and exited between the host's first
+            # EOF read and this probe; its bytes must still be delivered.
+            with fifo.open('wb',buffering=0) as out:out.write(data)
+        return mode in ('worker_exited','late_writer')
     async def completed():
         if mode=='encoder_failed':raise RuntimeError('backup_encryption_failed')
+        if mode=='worker_exited':raise RuntimeError('backup_capture_failed')
         return {'bytes':len(data),'sha256':hashlib.sha256(data).hexdigest()}
     metadata={'v':2,'id':ID,'max_bytes':len(data)+1024,'snapshot_sha256':SNAPSHOT}
     transfer={'host':'fixture.invalid','user':'backup','identity_file':'unused','known_hosts_file':'unused'}
-    if mode in ('ok','duplicate'):
-        receipt=asyncio.run(upload_stream(fifo,metadata,transfer,5,start,completed))
-        assert receipt['status']=='stored' and actions==[mode=='ok']
+    if mode in ('ok','duplicate','late_writer'):
+        receipt=asyncio.run(upload_stream(fifo,metadata,transfer,5,start,completed,stopped))
+        assert receipt['status']=='stored' and actions==[mode!='duplicate']
+        if mode=='late_writer':assert receipt['bytes']==len(data)
     else:
+        # A worker that failed before opening the FIFO ends the wait promptly,
+        # not after the whole (up to two-hour) stream deadline.
+        began=time.monotonic();deadline={'timeout':.2,'worker_exited':30}.get(mode,5)
         with pytest.raises(asyncio.TimeoutError if mode=='timeout' else RuntimeError):
-            asyncio.run(upload_stream(fifo,metadata,transfer,.2 if mode=='timeout' else 5,start,completed))
+            asyncio.run(upload_stream(fifo,metadata,transfer,deadline,start,completed,stopped))
+        if mode=='worker_exited':assert probes and time.monotonic()-began<10
     for thread in threads:thread.join(timeout=2);assert not thread.is_alive()
     assert not (tmp_path/'bundle.tar.age').exists()
     if pid.exists():
@@ -194,7 +211,7 @@ def streaming_runner(tmp_path,send):
 
 def test_stream_runner_retries_consistent_capture_without_stopping_collectors_or_recopying(tmp_path):
     attempts=[]
-    async def send(path,metadata,transfer,timeout,start,completed):
+    async def send(path,metadata,transfer,timeout,start,completed,stopped=None):
         attempts.append(metadata.copy())
         if len(attempts)==1:raise RuntimeError('receiver_quota')
         start(True);result=await completed()
@@ -215,8 +232,28 @@ def test_stream_runner_retries_consistent_capture_without_stopping_collectors_or
     assert not any(path.name=='snapshot' for path in tmp_path.rglob('*'))
 
 
+@pytest.mark.parametrize('outcome',['result','exited'])
+def test_stream_runner_reports_finished_or_failed_worker_to_the_stream_wait(tmp_path,outcome):
+    observed=[]
+    async def send(path,metadata,transfer,timeout,start,completed,stopped=None):
+        observed.append(stopped())  # Worker is running and waiting for admission.
+        if outcome=='exited':
+            docker.containers[runner.journal['container']]['State'].update(Running=False,Status='exited',ExitCode=1)
+        start(True)
+        observed.append(stopped())
+        result=await completed()
+        return {**result,'status':'stored','duplicate':False}
+    runner,docker=streaming_runner(tmp_path,send)
+    if outcome=='result':
+        runner.run()
+        assert read_json(tmp_path/'status.json')['state']=='ok'
+    else:
+        with pytest.raises(RuntimeError,match='backup_capture_failed'):runner.run()
+    assert observed==[False,True]
+
+
 def test_stream_runner_lost_receipt_uses_duplicate_without_reencryption(tmp_path):
-    async def send(path,metadata,transfer,timeout,start,completed):
+    async def send(path,metadata,transfer,timeout,start,completed,stopped=None):
         start(False)
         return {**metadata,'status':'stored','bytes':64,'sha256':'c'*64,'duplicate':True}
     runner,docker=streaming_runner(tmp_path,send);runner.run()
@@ -226,7 +263,7 @@ def test_stream_runner_lost_receipt_uses_duplicate_without_reencryption(tmp_path
 
 def test_stream_runner_recovers_crash_after_receipt_before_owned_capture_cleanup(tmp_path):
     calls=[]
-    async def send(path,metadata,transfer,timeout,start,completed):
+    async def send(path,metadata,transfer,timeout,start,completed,stopped=None):
         calls.append(metadata['id']);start(False)
         return {**metadata,'status':'stored','bytes':64,'sha256':'c'*64,'duplicate':True}
     runner,docker=streaming_runner(tmp_path,send)
@@ -241,7 +278,7 @@ def test_stream_runner_recovers_crash_after_receipt_before_owned_capture_cleanup
 
 @pytest.mark.parametrize('already_resumed',[False,True])
 def test_reboot_before_capture_commit_clears_stale_marker_and_stops_fresh_capture(tmp_path,already_resumed):
-    async def send(path,metadata,transfer,timeout,start,completed):
+    async def send(path,metadata,transfer,timeout,start,completed,stopped=None):
         start(True);result=await completed()
         return {**result,'status':'stored'}
     runner,docker=streaming_runner(tmp_path,send);runner.prepare()

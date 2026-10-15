@@ -1,0 +1,320 @@
+"""Operator-registered signed hints. Hints never ACK events or assert a host turn."""
+from __future__ import annotations
+import hashlib
+import hmac
+import ipaddress
+import json
+import os
+from pathlib import Path
+import re
+import socket
+import ssl
+import stat
+import time
+import threading
+from urllib.parse import urlsplit
+from uuid import UUID, uuid4
+
+from .subscriptions import _owned, _state, _view, _worker_identity
+
+
+_DNS_SLOTS = threading.BoundedSemaphore(4)
+_DNS_TIMEOUT_S = 2
+
+
+def _addresses(host, port):
+    # libc DNS may outlive a socket deadline. Bound response latency and retain
+    # one of four slots until that lookup really ends, without an unbounded queue.
+    if not _DNS_SLOTS.acquire(blocking=False):
+        raise OSError('receiver_dns_busy')
+    finished = threading.Event()
+    result = {}
+    def lookup():
+        try:
+            result['addresses'] = sorted({record[4][0] for record in
+                socket.getaddrinfo(host, port, type=socket.SOCK_STREAM)})
+        except OSError:
+            result['error'] = True
+        finally:
+            _DNS_SLOTS.release()
+            finished.set()
+    try:
+        threading.Thread(target=lookup, daemon=True, name='deedkit-receiver-dns').start()
+    except BaseException:
+        _DNS_SLOTS.release()
+        raise
+    if not finished.wait(_DNS_TIMEOUT_S) or result.get('error'):
+        raise OSError('receiver_dns_unavailable')
+    return result['addresses']
+
+
+def validate_endpoint(endpoint, *, resolver=_addresses):
+    """Validate every returned address; the transport pins one validated address."""
+    try:
+        if not isinstance(endpoint, str) or not 1 <= len(endpoint) <= 2048:
+            raise ValueError
+        if any(ord(ch) < 33 or ord(ch) == 127 for ch in endpoint):
+            raise ValueError
+        parsed = urlsplit(endpoint)
+        if (parsed.scheme != 'https' or not parsed.hostname or parsed.username or parsed.password or
+                parsed.fragment or parsed.query or parsed.port not in (None, 443)):
+            raise ValueError
+        host = parsed.hostname.encode('idna').decode('ascii')
+        # The request line is ASCII-encoded at send time; reject paths that never could be.
+        (parsed.path or '/').encode('ascii')
+        if host.endswith('.'):
+            host = host[:-1]
+        addresses = resolver(host, 443)
+        if not addresses or len(addresses) > 32:
+            raise ValueError
+        addresses = [str(ipaddress.ip_address(address)) for address in addresses]
+        if any(not ipaddress.ip_address(address).is_global for address in addresses):
+            raise ValueError
+        return host, addresses, parsed.path or '/'
+    except (ValueError, UnicodeError, TypeError):
+        raise ValueError('unsafe_receiver') from None
+
+
+def _secret(filename):
+    """Secrets stay in private operator configuration, never in an agent response."""
+    if not isinstance(filename, str) or not Path(filename).is_absolute():
+        raise ValueError('unsafe_receiver_secret')
+    fd = os.open(filename, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK)
+    try:
+        info = os.fstat(fd)
+        if not stat.S_ISREG(info.st_mode) or info.st_mode & 0o077 or not 32 <= info.st_size <= 4096:
+            raise ValueError('unsafe_receiver_secret')
+        value = os.read(fd, 4097)
+        if not 32 <= len(value) <= 4096:
+            raise ValueError('unsafe_receiver_secret')
+        return value
+    finally:
+        os.close(fd)
+
+
+def register_receiver(store, receiver_id, principal, key_id, endpoint, secret_file, *, resolver=_addresses):
+    """Operator API only. Registration cannot be called through agent MCP/HTTP."""
+    receiver_id, key_id = str(UUID(receiver_id)), str(UUID(key_id))
+    validate_endpoint(endpoint, resolver=resolver)
+    _secret(secret_file)
+    with store.pool.connection() as c:
+        from .policy import lock_principal
+        lock_principal(c, principal)
+        owner = c.execute('''SELECT 1 FROM api_keys WHERE id=%s AND principal=%s
+            AND NOT revoked AND expires_at>clock_timestamp()''', (key_id, principal)).fetchone()
+        if owner is None:
+            raise ValueError('invalid_receiver_owner')
+        # IDs identify immutable exact credentials/endpoints. Rotation creates a
+        # new ID, then explicit versioned subscription reconfiguration.
+        c.execute('''INSERT INTO subscription_receivers(id,principal,key_id,endpoint,secret_file)
+            VALUES(%s,%s,%s,%s,%s)''', (receiver_id, principal, key_id, endpoint, secret_file))
+    return {'receiver_id': receiver_id, 'registered': True}
+
+
+
+def disable_receiver(store, receiver_id):
+    """Operator revocation uses the same ACL fence as in-flight delivery."""
+    from .policy import lock_principal
+    receiver_id = str(UUID(receiver_id))
+    with store.pool.connection() as c:
+        owner = c.execute('SELECT principal FROM subscription_receivers WHERE id=%s', (receiver_id,)).fetchone()
+        if owner is None:
+            raise ValueError('invalid_receiver')
+        lock_principal(c, owner['principal'])
+        c.execute('UPDATE subscription_receivers SET enabled=false WHERE id=%s', (receiver_id,))
+        c.execute("""UPDATE subscription_outbox SET state='cancelled',finished_at=clock_timestamp(),
+            error_code='receiver_disabled',lease_token=NULL,lease_until=NULL
+            WHERE receiver=%s AND state IN ('pending','leased')""", (receiver_id,))
+    return {'receiver_id': receiver_id, 'enabled': False}
+
+def configure_subscription_delivery(store, c, p, subscription_id, version, receiver_id):
+    from .store import APIError
+    if 'read' not in p['permissions']:
+        raise APIError('forbidden', 403)
+    if type(version) is not int or not 1 <= version <= 2**53 - 1:
+        raise APIError('invalid_version')
+    row = _owned(c, p, subscription_id)
+    if row['state'] == 'access_changed':
+        raise APIError('subscription_access_changed', 409)
+    if row['state'] not in ('active', 'paused'):
+        raise APIError('subscription_closed', 409)
+    if row['version'] != version:
+        raise APIError('subscription_conflict', 409)
+    if receiver_id is None:
+        c.execute('DELETE FROM subscription_delivery WHERE subscription=%s', (row['id'],))
+    else:
+        try:
+            receiver_id = str(UUID(receiver_id))
+        except (ValueError, TypeError, AttributeError):
+            raise APIError('not_found', 404) from None
+        allowed = c.execute('''SELECT id FROM subscription_receivers WHERE id=%s AND principal=%s
+            AND key_id=%s AND enabled''', (receiver_id, p['id'], p['key_id'])).fetchone()
+        if allowed is None:
+            raise APIError('not_found', 404)
+        c.execute('''INSERT INTO subscription_delivery(subscription,receiver) VALUES(%s,%s)
+            ON CONFLICT(subscription) DO UPDATE SET receiver=excluded.receiver,configured_at=clock_timestamp()''',
+            (row['id'], receiver_id))
+    row = c.execute('''UPDATE subscriptions SET version=version+1,updated_at=clock_timestamp()
+        WHERE id=%s RETURNING *''', (row['id'],)).fetchone()
+    c.execute("""UPDATE subscription_outbox SET state='cancelled',finished_at=clock_timestamp(),
+        error_code='configuration_changed' WHERE subscription=%s AND state IN ('pending','leased')""", (row['id'],))
+    result = _view(c, row)
+    result['delivery'] = {'passive_read': True, 'ack': True, 'push': receiver_id is not None,
+        'receiver_id': receiver_id, 'host_wakeup': 'unverified', 'host_turn_verified': False}
+    return result
+
+
+def enqueue_hint(c, row, through, *, kind='events', request_id=''):
+    binding = c.execute('SELECT receiver FROM subscription_delivery WHERE subscription=%s', (row['id'],)).fetchone()
+    if binding is None:
+        return None
+    return c.execute('''INSERT INTO subscription_outbox(subscription,subscription_version,receiver,
+        through_position,kind,request_id) VALUES(%s,%s,%s,%s,%s,%s)
+        ON CONFLICT(subscription,subscription_version,kind,through_position,request_id)
+        DO NOTHING RETURNING *''',
+        (row['id'], row['version'], binding['receiver'], through, kind, request_id)).fetchone()
+
+
+def _probe_view(row):
+    return {'hint_id': str(row['id']), 'subscription_id': str(row['subscription']), 'kind': 'test',
+        'status': 'queued', 'host_turn_verified': False, 'event_acknowledged': False}
+
+
+def test_subscription(store, c, p, subscription_id, request_id):
+    from .store import APIError
+    if 'read' not in p['permissions']:
+        raise APIError('forbidden', 403)
+    if not isinstance(request_id, str) or not re.fullmatch(r'[a-zA-Z0-9_.:-]{8,128}', request_id):
+        raise APIError('invalid_request_id')
+    row = _owned(c, p, subscription_id)
+    if row['state'] == 'access_changed':
+        raise APIError('subscription_access_changed', 409)
+    if row['state'] != 'active':
+        raise APIError('subscription_closed', 409)
+    existing = c.execute('''SELECT * FROM subscription_outbox WHERE subscription=%s AND kind='test'
+        AND request_id=%s ORDER BY created_at LIMIT 1''', (row['id'], request_id)).fetchone()
+    if existing:
+        return _probe_view(existing)
+    if c.execute('''SELECT 1 FROM subscription_outbox WHERE subscription=%s AND kind='test'
+        AND created_at>clock_timestamp()-interval '1 minute' LIMIT 1''', (row['id'],)).fetchone():
+        raise APIError('rate_limited', 429)
+    hint = enqueue_hint(c, row, row['matched_through'], kind='test', request_id=request_id)
+    if hint is None:
+        raise APIError('delivery_not_configured', 409)
+    return _probe_view(hint)
+
+
+def _transport(endpoint, body, headers, *, resolved, timeout=5):
+    """Pinned TLS socket; no proxies, redirects, URL credentials or second DNS lookup."""
+    host, addresses, path = resolved
+    deadline = time.monotonic() + timeout
+    def remaining():
+        value = deadline - time.monotonic()
+        if value <= 0:
+            raise TimeoutError
+        return value
+    with socket.create_connection((addresses[0], 443), timeout=remaining()) as raw:
+        raw.settimeout(remaining())
+        with ssl.create_default_context().wrap_socket(raw, server_hostname=host) as connection:
+            connection.settimeout(remaining())
+            request = ('POST ' + path + ' HTTP/1.1\r\nHost: ' + ('[' + host + ']' if ':' in host else host) + '\r\nConnection: close\r\n' +
+                'Content-Length: ' + str(len(body)) + '\r\n' +
+                ''.join(key + ': ' + value + '\r\n' for key, value in headers.items()) + '\r\n').encode('ascii')
+            connection.sendall(request + body)
+            status = b''
+            while b'\r\n' not in status:
+                connection.settimeout(remaining())
+                part = connection.recv(256)
+                if not part or len(status) + len(part) > 1024:
+                    raise ValueError('invalid_receiver_response')
+                status += part
+            line = status.split(b'\r\n', 1)[0]
+            match = re.fullmatch(rb'HTTP/1\.[01] ([0-9]{3})(?: [\x20-\x7e]*)?', line)
+            if match is None:
+                raise ValueError('invalid_receiver_response')
+            return int(match[1])
+
+
+def dispatch_hints(store, *, limit=16, transport=_transport, resolver=_addresses):
+    """Leased at-least-once hints, independently reauthorized before each send."""
+    from .store import bounded
+    bounded(limit, 100)
+    stats = dict(delivered=0, retried=0, dead_letter=0, cancelled=0)
+    for _ in range(limit):
+        lease = uuid4()
+        with store.pool.connection() as c:
+            hint = c.execute('''SELECT * FROM subscription_outbox WHERE
+                (state='pending' AND next_attempt_at<=clock_timestamp() OR
+                 state='leased' AND lease_until<=clock_timestamp())
+                ORDER BY next_attempt_at,created_at,id LIMIT 1 FOR UPDATE SKIP LOCKED''').fetchone()
+            if hint is None:
+                break
+            if hint['attempts'] >= 8:
+                c.execute("""UPDATE subscription_outbox SET state='dead_letter',
+                    finished_at=clock_timestamp(),error_code='delivery_budget_exhausted',
+                    lease_token=NULL,lease_until=NULL WHERE id=%s""", (hint['id'],))
+                stats['dead_letter'] += 1
+                continue
+            # Commit the reservation before any external I/O. A process crash
+            # after POST can lose the result, never the consumed attempt slot.
+            c.execute("""UPDATE subscription_outbox SET state='leased',lease_token=%s,
+                attempts=attempts+1,lease_until=clock_timestamp()+interval '1 minute' WHERE id=%s""", (lease, hint['id']))
+        state, error = 'pending', 'receiver_unavailable'
+        with store.pool.connection() as c:
+            # Principal lock precedes subscription lock, matching gateway ACL
+            # order. The bounded TLS exchange holds this shared ACL fence so a
+            # concurrent revocation cannot commit between authorization and send.
+            owner = c.execute('SELECT principal,key_id FROM subscriptions WHERE id=%s',
+                (hint['subscription'],)).fetchone()
+            p = _worker_identity(c, owner) if owner else None
+            row = c.execute('SELECT * FROM subscriptions WHERE id=%s FOR UPDATE',
+                (hint['subscription'],)).fetchone()
+            receiver = c.execute('''SELECT r.* FROM subscription_receivers r JOIN subscription_delivery d
+                ON d.receiver=r.id WHERE d.subscription=%s AND r.id=%s AND r.enabled''',
+                (hint['subscription'], hint['receiver'])).fetchone()
+            if p is not None and row is not None:
+                row = _state(c, row, p)
+            eligible = (p is not None and row is not None and row['state'] == 'active' and
+                row['version'] == hint['subscription_version'] and receiver is not None and
+                receiver['principal'] == p['id'] and receiver['key_id'] == p['key_id'])
+            live = c.execute("""SELECT 1 FROM subscription_outbox WHERE id=%s AND state='leased'
+                AND lease_token=%s AND lease_until>clock_timestamp() FOR UPDATE""", (hint['id'], lease)).fetchone()
+            if not live:
+                continue
+            if not eligible:
+                state, error = 'cancelled', 'access_or_configuration_changed'
+            elif hint['attempts'] >= 8 or c.execute("SELECT %s<clock_timestamp()-interval '7 days' AS expired",
+                    (hint['created_at'],)).fetchone()['expired']:
+                state, error = 'dead_letter', 'delivery_budget_exhausted'
+            else:
+                try:
+                    resolved = validate_endpoint(receiver['endpoint'], resolver=resolver)
+                    secret = _secret(receiver['secret_file'])
+                    body = json.dumps(dict(hint_id=str(hint['id']), subscription_id=str(row['id']),
+                        subscription_version=row['version'], through=hint['through_position'], kind=hint['kind'],
+                        host_turn_verified=False), sort_keys=True, separators=(',', ':')).encode()
+                    timestamp = str(int(time.time()))
+                    headers = {'Content-Type': 'application/json', 'X-DeedKit-Hint-ID': str(hint['id']),
+                        'X-DeedKit-Timestamp': timestamp, 'X-DeedKit-Signature': 'sha256=' +
+                        hmac.new(secret, timestamp.encode() + b'.' + body, hashlib.sha256).hexdigest()}
+                    status = transport(receiver['endpoint'], body, headers, resolved=resolved, timeout=5)
+                    if type(status) is int and 200 <= status < 300:
+                        state, error = 'delivered', None
+                    elif type(status) is int and 300 <= status < 400:
+                        state, error = 'dead_letter', 'redirect_rejected'
+                except (OSError, TimeoutError):
+                    # Includes ssl.SSLCertVerificationError, which is also a ValueError:
+                    # a certificate problem can be transient and keeps the bounded retry budget.
+                    pass
+                except ValueError:
+                    state, error = 'dead_letter', 'unsafe_receiver_configuration'
+                if state == 'pending' and hint['attempts'] + 1 >= 8:
+                    state, error = 'dead_letter', 'delivery_budget_exhausted'
+            c.execute('''UPDATE subscription_outbox SET state=%s,
+                error_code=%s,lease_token=NULL,lease_until=NULL,
+                next_attempt_at=clock_timestamp()+(%s*interval '1 second'),
+                finished_at=CASE WHEN %s='pending' THEN NULL ELSE clock_timestamp() END
+                WHERE id=%s AND state='leased' AND lease_token=%s''',
+                (state, error, min(3600, 2**(hint['attempts'] + 1)), state, hint['id'], lease))
+        stats['retried' if state == 'pending' else state] += 1
+    return stats

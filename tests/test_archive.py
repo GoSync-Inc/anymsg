@@ -52,6 +52,24 @@ def test_same_version_conflict_is_explicit_no_overwrite(archive):
     assert s.capabilities(key)['sources'][0]['detail_code']=='version_conflict'
 
 
+def test_sync_conflict_alert_follows_unresolved_conflicts_not_the_sticky_code(archive):
+    from messaging_service.sync_status import get_sync_status
+    ar,s,key,_=archive
+    def status():
+        with s.pool.connection() as c:
+            return get_sync_status(c,{'accounts':['archive-test'],'chat_ids':None})['sources'][0]
+    ar.ingest(event());ar.ingest(event(body='contradiction'))
+    row=status()
+    assert row['active_conflicts']==1 and 'archive_version_conflicts' in row['alerts']
+    assert row['archive_detail_code']=='version_conflict'
+    # Later provider evidence resolves it; the stored code stays, the alert does not.
+    assert ar.ingest(event(body='Вторая версия',updated_at='2026-10-01T12:01:00Z'))['outcome']=='edited'
+    row=status()
+    assert row['active_conflicts']==0 and row['historical_conflicts']==1
+    assert 'archive_version_conflicts' not in row['alerts']
+    assert row['archive_detail_code']=='coverage_not_reconciled'
+
+
 def test_message_identity_cannot_change_on_edit(archive):
     ar,s,key,_=archive
     ar.ingest(event())
@@ -243,7 +261,9 @@ def test_blob_limits_integrity_and_interrupted_stream(tmp_path):
     assert list(writer.root.iterdir())==[]
     blob=writer.write([b'ab',b'cd']); assert writer.write([b'abcd'])==blob
     (writer.root/blob.digest).write_bytes(b'xxxx')
-    with pytest.raises(RuntimeError,match='corrupt'): writer.write([b'abcd'])
+    with pytest.raises(RuntimeError,match='corrupt'): writer.verify(blob)
+    # A verified download of the same digest repairs the damaged copy.
+    assert writer.write([b'abcd'])==blob and writer.verify(blob).read_bytes()==b'abcd'
 
 
 def test_blob_disk_reserve(tmp_path,monkeypatch):
@@ -270,7 +290,7 @@ def test_migration_checksum_and_restart_preserve_revisions(archive):
     ar.ingest(event()); s.migrate(); s.migrate()
     assert len(s.get_updates(key,'main')['items'])==1
     with s.pool.connection() as c:
-        assert c.execute("SELECT value FROM probe_metadata WHERE name='schema_version'").fetchone()['value']=='31'
+        assert c.execute("SELECT value FROM probe_metadata WHERE name='schema_version'").fetchone()['value']=='32'
         saved=c.execute('SELECT sha256 FROM archive_migrations WHERE version=2').fetchone()['sha256']
         c.execute("UPDATE archive_migrations SET sha256='wrong' WHERE version=2")
     try:

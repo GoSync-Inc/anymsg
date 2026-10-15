@@ -38,11 +38,41 @@ export function ownerAttention(message,ownerIds=[]) {
   return {mentionsOwner:hits===null?null:hits.includes(true)?true:hits.includes(null)?null:false,
     replyToOwner:typeof raw.quotedStanzaID==='string'?isOwner(raw.quotedParticipant):null};
 }
+// Archive envelope bounds (services/messaging envelope.validate). Python counts
+// code points, rejects NUL and cannot encode lone surrogates. Sender-controlled
+// display fields are sanitized; references are omitted, never shortened.
+const MAX_BODY=65536,MAX_NAME=512,MAX_FILENAME=255,MAX_REFERENCE=256,MAX_SENDER=160;
+const MAX_MEDIA_BYTES=8*1024**3,MAX_UNIX=253402300799;
+export function envelopeText(value,limit) {
+  const text=value.toWellFormed();
+  if(text===value && text.length<=limit && !text.includes('\0'))return text;
+  let result='',count=0;
+  for(const char of text) {
+    if(count>=limit)break;
+    if(char==='\0')continue;
+    result+=char;count++;
+  }
+  return result;
+}
+function envelopeReference(value,limit=MAX_REFERENCE) {
+  return typeof value==='string' && value.length>0 && value.length<=limit && value.isWellFormed() && !value.includes('\0');
+}
+function envelopeMime(value) {
+  if(!value)return null;
+  if(typeof value!=='string' || /[\x00-\x1f\x7f]/.test(value))return 'application/octet-stream';
+  const mime=value.split(';',1)[0].trim().toLowerCase();
+  return mime.length<=127 && /^[a-z0-9_.+-]+\/[a-z0-9_.+-]+$/.test(mime)?mime:'application/octet-stream';
+}
+function envelopeFilename(value) {
+  if(typeof value!=='string' || !value)return null;
+  const name=value.toWellFormed().replace(/[\x00-\x1f\x7f/\\]/g,'_');
+  if(name.length<=MAX_FILENAME)return name;
+  const dot=name.lastIndexOf('.'),ext=dot>0 && [...name.slice(dot)].length<=16?name.slice(dot):'';
+  return envelopeText(name.slice(0,name.length-ext.length),MAX_FILENAME-[...ext].length)+ext;
+}
 export function event(message, body=undefined, ownerIds=[]) {
   const raw=message._data || message;
-  if(raw.mimetype && (typeof raw.mimetype!=='string' || /[\x00-\x1f\x7f]/.test(raw.mimetype)))
-    throw new Error('invalid_provider_mime');
-  const mime=raw.mimetype ? raw.mimetype.split(';',1)[0].trim().toLowerCase() : null;
+  const mime=envelopeMime(raw.mimetype);
   const chat=chatId(message);
   const own=new Set(ownerIds.map(personalId).filter(Boolean));
   const peer=personalId(chat);
@@ -62,23 +92,32 @@ export function event(message, body=undefined, ownerIds=[]) {
     isService:['notification','e2e_notification','call_log','gp2','protocol','ciphertext','revoked'].includes(type),
     isSelfChat:self,
     chatName:chatId(message),senderId:message.author || message.from || '',
-    senderName:typeof raw.notifyName==='string'?raw.notifyName.slice(0,512):'',
+    senderName:typeof raw.notifyName==='string'?envelopeText(raw.notifyName,MAX_NAME):'',
     body:body===undefined ? message.body || '' : body,timestamp:message.timestamp,
     fromMe:Boolean(message.fromMe),hasMedia:Boolean(message.hasMedia),
-    filename:raw.filename || null,mimetype:mime,
+    filename:envelopeFilename(raw.filename),mimetype:mime,
     // Only cached metadata: never fetch a quoted message/contact during capture.
-    replyToId:typeof raw.quotedStanzaID==='string'?raw.quotedStanzaID:null,
+    replyToId:envelopeReference(raw.quotedStanzaID)?raw.quotedStanzaID:null,
     ...ownerAttention(message,ownerIds),
     forwarded:typeof message.isForwarded==='boolean'?message.isForwarded:null,
     mediaKind:({image:'photo',video:'video',audio:'audio',ptt:'voice',document:'document',sticker:'sticker',gif:'animation'})[message.type] || (message.hasMedia?'other':null),
-    filesize:Number.isSafeInteger(raw.size)?raw.size:null,
+    filesize:Number.isSafeInteger(raw.size) && raw.size>=0 && raw.size<=MAX_MEDIA_BYTES?raw.size:null,
     editedTimestampMs:message.latestEditSenderTimestampMs || raw.latestEditSenderTimestampMs || null};
-  if (!Number.isSafeInteger(value.timestamp) || value.timestamp<=0) throw new Error('invalid_provider_time');
-  if (typeof value.senderId!=='string' || typeof value.body!=='string' || value.body.length>65536)
+  if (!Number.isSafeInteger(value.timestamp) || value.timestamp<=0 || value.timestamp>MAX_UNIX)
+    throw new Error('invalid_provider_time');
+  if (!envelopeReference(value.messageId) || (value.senderId!=='' && !envelopeReference(value.senderId,MAX_SENDER)) ||
+      typeof value.body!=='string')
     throw new Error('invalid_provider_message');
+  if (value.replyToId===null) value.replyToOwner=null;
+  const edited=value.editedTimestampMs;
+  // Sender-controlled edit time must not precede the send or exceed archive time.
+  if (!Number.isSafeInteger(edited) || edited<value.timestamp*1000 || edited>MAX_UNIX*1000) value.editedTimestampMs=null;
+  const wire=value.body;
+  value.body=envelopeText(wire,MAX_BODY);
   // Public cached body is native wire evidence; no inferred entity parse or
   // undocumented private formatting fields are treated as reliable metadata.
-  const observed=typeof (body===undefined?message.body:body)==='string';
+  // A sanitized body is no longer the exact wire and makes no digest claim.
+  const observed=typeof (body===undefined?message.body:body)==='string' && value.body===wire;
   value.formatting={version:1,state:observed?'wire_observed':'unknown',
     basis:observed?'whatsapp_native_wire':null,
     wire_sha256:observed?createHash('sha256').update(value.body,'utf8').digest('hex'):null,

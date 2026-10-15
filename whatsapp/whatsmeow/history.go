@@ -18,6 +18,10 @@ import (
 )
 
 const maxHistoryAttempts = 3
+
+// Archive backpressure is retried after this delay without consuming one of
+// the bounded download attempts; it resolves when the consumer drains.
+const historyBackpressureDelay = 5 * time.Minute
 const maxCompressedHistory = 32 << 20
 const maxDecodedHistory = 64 << 20
 
@@ -120,21 +124,40 @@ func (s *CaptureStore) historyFailure(job *historyJob, reason string) error {
 	return s.historyStatus(status, reason, job.Attempt, next)
 }
 
+// historyBackpressure reports local capacity limits, not a failed download:
+// a full export spool, the disk reserve or the bounded unconsumed journal.
+func historyBackpressure(err error) bool {
+	return err != nil && (err.Error() == "spool_full" || err.Error() == "disk_reserve" || err.Error() == "capture_overload")
+}
+
+// historyDeferred returns the attempt reserved by claimHistory and schedules
+// the job after a backoff. The persisted status keeps the attempt number that
+// ran, which is always within the reported 1..max_attempts range.
+func (s *CaptureStore) historyDeferred(job *historyJob, reason string, now time.Time) error {
+	next := now.Add(historyBackpressureDelay).UnixMilli()
+	if _, err := s.db.Exec("UPDATE history_jobs SET state='attempted',attempts=?,error=?,next_attempt_ms=? WHERE stanza=?", job.Attempt-1, reason, next, job.Stanza); err != nil {
+		return err
+	}
+	return s.historyStatus("retrying", reason, job.Attempt, next)
+}
+
 func (s *CaptureStore) EnqueueHistory(e *events.Message) error {
 	e = unwrap(e)
 	notif := e.Message.GetProtocolMessage().GetHistorySyncNotification()
 	if notif == nil {
 		return nil
 	}
+	// A notification outside the bounded history contract is permanently
+	// invalid; only a full job queue below is (recoverable) overload.
 	if (len(notif.GetInitialHistBootstrapInlinePayload()) == 0 && notif.GetFileLength() == 0) || notif.GetFileLength() > maxCompressedHistory || len(notif.GetInitialHistBootstrapInlinePayload()) > maxCompressedHistory {
-		return errors.New("capture_overload")
+		return errors.New("invalid_history_notification")
 	}
 	wire, err := proto.Marshal(e.RawMessage)
 	if err != nil {
 		return err
 	}
 	if len(wire) > 512<<10 {
-		return errors.New("capture_overload")
+		return errors.New("invalid_history_notification")
 	}
 	var n int
 	if err = s.db.QueryRow("SELECT COUNT(*) FROM history_jobs").Scan(&n); err != nil {
@@ -183,7 +206,11 @@ func (p *Provider) downloadHistory(ctx context.Context, notif *waE2E.HistorySync
 		if err := p.Capture.checkDisk(int64(notif.GetFileLength()) + 32); err != nil {
 			return nil, err
 		}
-		file, err := os.CreateTemp(p.Config.SessionDirectory, ".history-download-*")
+		dir, err := nativeTempRoot(p.Config.SessionDirectory)
+		if err != nil {
+			return nil, err
+		}
+		file, err := os.CreateTemp(dir, ".history-download-*")
 		if err != nil {
 			return nil, err
 		}
@@ -224,7 +251,10 @@ func (p *Provider) captureHistory(data *waHistorySync.HistorySync) error {
 	for _, conv := range data.GetConversations() {
 		chat, err := types.ParseJID(conv.GetID())
 		if err != nil {
-			return errors.New("invalid_history_chat")
+			if err = p.Capture.skip(errors.New("invalid_history_chat")); err != nil {
+				return err
+			}
+			continue
 		}
 		policy, err := p.policy()
 		if err != nil {
@@ -247,8 +277,11 @@ func (p *Provider) captureHistory(data *waHistorySync.HistorySync) error {
 				break
 			}
 			wm := item.GetMessage()
-			if wm == nil || wm.GetKey().GetID() == "" || wm.GetMessageTimestamp() == 0 {
-				return errors.New("invalid_history_message")
+			if wm == nil || wm.GetKey().GetID() == "" || wm.GetMessageTimestamp() == 0 || wm.GetMessageTimestamp() > maxEnvelopeUnix {
+				if err = p.Capture.skip(errors.New("invalid_history_message")); err != nil {
+					return err
+				}
+				continue
 			}
 			var message *events.Message
 			if wm.GetMessage() == nil && wm.GetMessageStubType() != 0 {
@@ -256,10 +289,13 @@ func (p *Provider) captureHistory(data *waHistorySync.HistorySync) error {
 			} else {
 				message, err = p.Client.ParseWebMessage(chat, wm)
 				if err != nil {
-					return errors.New("invalid_history_message")
+					if err = p.Capture.skip(errors.New("invalid_history_message")); err != nil {
+						return err
+					}
+					continue
 				}
 			}
-			if err = p.Capture.Put(message, "history"); err != nil {
+			if err = p.Capture.putOrSkip(message, "history"); err != nil {
 				return err
 			}
 		}
@@ -305,20 +341,31 @@ func (p *Provider) historyWorker(ctx context.Context) {
 		data, err := p.downloadHistory(fetch, notif)
 		done()
 		if err != nil {
-			if err = p.Capture.historyFailure(job, "history_download_failed"); err != nil {
+			if historyBackpressure(err) {
+				err = p.Capture.historyDeferred(job, "history_download_failed", time.Now())
+			} else {
+				err = p.Capture.historyFailure(job, "history_download_failed")
+			}
+			if err != nil {
 				p.fail("durable_capture_failed")
 				return
 			}
 			continue
 		}
 		if err = p.captureHistory(data); err != nil {
-			_ = p.Capture.historyFailure(job, "history_capture_failed")
+			if !historyBackpressure(err) {
+				_ = p.Capture.historyFailure(job, "history_capture_failed")
+			} else if e := p.Capture.historyDeferred(job, "history_capture_failed", time.Now()); e != nil {
+				p.fail("durable_capture_failed")
+				return
+			}
+			// Rows already journaled stay pending for the replay worker and are
+			// skipped on retry. A full spool keeps readiness; local disk or
+			// journal limits still surface as a provider failure.
+			p.captureFailure(err)
 			if spoolBackpressure(err) {
-				// The replay worker can export the durable prefix once the
-				// archive consumer drains; keep readiness and bounded retry.
 				continue
 			}
-			p.captureFailure(err)
 			return
 		}
 		if _, err = p.Capture.db.Exec("UPDATE history_jobs SET state='captured',error='',next_attempt_ms=0 WHERE stanza=?", job.Stanza); err != nil {

@@ -327,6 +327,87 @@ def test_authenticated_boundary_rate_limit_is_scoped_and_does_not_dispatch_exces
     assert len(called) == 181
 
 
+def _shared_peer_boundary():
+    """Synthetic agents behind one gateway address; 'revoked' keys fail authentication."""
+    authenticated, called = [], []
+    class Store:
+        public_url = 'http://testserver'
+        def authenticate(self, token):
+            authenticated.append(token)
+            if token.startswith('revoked'): raise APIError('unauthorized', 401)
+            return token
+        def audit_boundary(self, code): pass
+    async def handler(scope, receive, send):
+        called.append(scope['path'])
+        await send({'type': 'http.response.start', 'status': 200, 'headers': []})
+        await send({'type': 'http.response.body', 'body': b'{}'})
+    boundary = Boundary(handler, Store(), ['testserver'])
+    async def request(token, path='/v1/search', body=b'{}', method='POST'):
+        sent = []
+        scope = {**_scope(), 'method': method, 'path': path, 'raw_path': path.encode()}
+        scope['headers'] = [(b'host', b'testserver')]
+        if token: scope['headers'].append((b'authorization', b'Bearer ' + token.encode()))
+        async def receive(): return {'type': 'http.request', 'body': body, 'more_body': False}
+        async def send(message): sent.append(message)
+        await boundary(scope, receive, send)
+        return sent[0]['status']
+    return request, authenticated, called
+
+
+def test_agents_behind_one_gateway_address_have_separate_budgets():
+    request, authenticated, called = _shared_peer_boundary()
+    async def run():
+        # More than the old shared 600/min peer budget, from one address.
+        statuses = [await request(f'agent-{n}') for n in range(4) for _ in range(180)]
+        assert statuses == [200]*720
+        assert await request('agent-0') == 429
+        assert await request('agent-4') == 200
+    asyncio.run(run())
+    assert len(called) == 721
+
+
+def test_gateway_upload_with_capability_prechecks_fits_principal_budget():
+    request, _, called = _shared_peer_boundary()
+    chunk = json.dumps({'jsonrpc': '2.0', 'id': 1, 'method': 'tools/call',
+                        'params': {'name': 'upload_file_chunk', 'arguments': {}}}).encode()
+    async def run():
+        # A 32 MiB upload through the gateway: a capabilities pre-check before
+        # prepare, each of 128 chunks and the final status read.
+        statuses = []
+        for path in ['/v1/prepare_file_upload'] + ['/v1/upload_file_chunk']*128 + ['/v1/get_file_upload']:
+            statuses.append(await request('uploader', '/v1/capabilities'))
+            statuses.append(await request('uploader', path))
+        assert statuses == [200]*260
+        # The general budget is untouched: 2 of 180 used.
+        assert [await request('uploader') for _ in range(178)] == [200]*178
+        assert await request('uploader') == 429
+        # Chunk calls share one budget across REST and MCP: two full uploads a minute.
+        assert [await request('uploader', '/v1/upload_file_chunk') for _ in range(127)] == [200]*127
+        assert await request('uploader', '/mcp', chunk) == 200
+        assert await request('uploader', '/mcp', chunk) == 429
+        assert await request('uploader', '/v1/upload_file_chunk') == 429
+        assert await request('uploader', '/v1/capabilities') == 200
+    asyncio.run(run())
+
+
+def test_unauthenticated_work_remains_bounded_per_peer_before_database_access():
+    request, authenticated, called = _shared_peer_boundary()
+    async def run():
+        statuses = [await request('revoked-synthetic-key') for _ in range(590)]
+        statuses += [await request('') for _ in range(5)]
+        statuses += [await request(None, '/v1/download/' + 'a'*43, b'', 'GET') for _ in range(5)]
+        assert statuses == [401]*595 + [200]*5
+        authenticated.clear()
+        assert await request('revoked-synthetic-key') == 429
+        assert await request(None, '/v1/download/' + 'a'*43, b'', 'GET') == 429
+        # Rejected traffic from this peer also blocks its valid agents until the
+        # window resets: bounding unauthenticated work requires a peer limit.
+        assert await request('agent-0') == 429
+        assert authenticated == []
+    asyncio.run(run())
+    assert called == ['/v1/download/' + 'a'*43]*5
+
+
 @pytest.mark.parametrize('request_id', ['', 'short', 'x'*129, 'bad/request', True])
 def test_command_action_id_is_bounded_before_persistence(operator, request_id):
     store, _, token, _ = operator
@@ -438,11 +519,11 @@ def test_missing_send_receipt_is_unknown_and_has_no_second_attempt(receipt, monk
             return {'id': 'synthetic-send'}
         def preflight(self, job): return job
         def finish(self, job, status, provider_id=None, code=None): finishes.append((status, code))
-    original = asyncio.wait_for
-    async def observe(task, timeout):
-        timeouts.append(timeout)
-        return await original(task, timeout)
-    monkeypatch.setattr(asyncio, 'wait_for', observe)
+    original = asyncio.timeout
+    def observe(delay):
+        timeouts.append(delay)
+        return original(delay)
+    monkeypatch.setattr(asyncio, 'timeout', observe)
     async def provider(job):
         calls.append('native-send')
         return receipt

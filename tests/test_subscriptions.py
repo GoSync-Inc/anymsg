@@ -347,8 +347,11 @@ def test_processing_refs_are_independent_of_message_readiness(seeded):
 
 
 def test_no_push_or_reply_preset_claimed(seeded):
+    # Preserve the historical case identity. The refined contract advertises
+    # native evidence and operator hints while leaving host execution unverified.
     store, _, _ = seeded
     capabilities = store.capabilities(key(store))['subscriptions']
     assert capabilities['implemented'] and capabilities['passive_events']
-    assert not capabilities['ack'] and not capabilities['push']
-    assert not capabilities['verified_host'] and not capabilities['native_reply_preset']
+    assert capabilities['ack'] and capabilities['ack_permission'] == 'subscription-ack'
+    assert capabilities['push'] == 'operator_registered_signed_hints'
+    assert capabilities['native_reply_preset'] and not capabilities['verified_host']

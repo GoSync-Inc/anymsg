@@ -6,6 +6,8 @@ import re
 from pathlib import Path
 import secrets
 import shutil
+import stat
+import time
 
 from .spool import fsync_dir
 
@@ -34,6 +36,26 @@ class BlobWriter:
                 sink.push(chunk)
                 await asyncio.sleep(0)  # Heartbeats run even with an in-memory provider fixture.
             return sink.finish()
+
+    def sweep_abandoned(self,*,max_age=86400,limit=1000):
+        """Remove temporary files left behind by a killed writer.
+
+        Only this writer's strict namespace at the top level qualifies, and
+        only files untouched for a day: live writers write every chunk and no
+        transfer is allowed to run that long. Upload folders are never visited.
+        """
+        cutoff=time.time()-max_age; removed=0
+        with os.scandir(self.root) as entries:
+            for entry in entries:
+                if removed>=limit:break
+                if not re.fullmatch(r'\.pending-[a-f0-9]{32}',entry.name):continue
+                try:
+                    info=entry.stat(follow_symlinks=False)
+                    if not stat.S_ISREG(info.st_mode) or info.st_mtime>=cutoff:continue
+                    os.unlink(entry.path); removed+=1
+                except FileNotFoundError:continue
+        if removed:fsync_dir(self.root)
+        return removed
 
     def verify(self,blob):
         if not re.fullmatch(r'[a-f0-9]{64}',blob.digest) or type(blob.bytes) is not int or blob.bytes<0:
@@ -80,7 +102,12 @@ class BlobSink:
         target=self.writer.root/digest
         try: os.link(self.temporary,target)
         except FileExistsError:
-            self.writer.verify(Blob(digest,self.count))
+            try:self.writer.verify(Blob(digest,self.count))
+            except RuntimeError:
+                # The stored copy is damaged; this one was just verified against
+                # the same digest. Replacing it is the only repair path.
+                if target.is_dir():raise
+                os.replace(self.temporary,target)
         fsync_dir(self.writer.root)
         return Blob(digest,self.count)
 

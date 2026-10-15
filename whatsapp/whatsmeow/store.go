@@ -84,10 +84,45 @@ func OpenCapture(c Config) (*CaptureStore, error) {
 		db.Close()
 		return nil, e
 	}
+	// Content-free counters only: one row per fixed reason code.
+	if _, e = db.Exec(`CREATE TABLE IF NOT EXISTS capture_skips(code TEXT PRIMARY KEY,count INTEGER NOT NULL,last_ms INTEGER NOT NULL)`); e != nil {
+		db.Close()
+		return nil, e
+	}
 	s := &CaptureStore{db: db, Config: c, MaxEntries: 200000, MaxSpoolBytes: 256 << 20, MaxSpoolEntries: 10000}
 	return s, nil
 }
 func (s *CaptureStore) Close() error { return s.db.Close() }
+
+// Provider data that can never satisfy the archive contract. Such a message is
+// acknowledged and counted under its fixed code instead of stopping capture of
+// the whole account and being redelivered forever. Store, disk, spool and
+// identity failures are never in this set.
+var skippedCaptureCodes = map[string]bool{"invalid_provider_message": true, "unsupported_chat": true, "invalid_provider_media": true, "invalid_history_notification": true, "invalid_history_chat": true, "invalid_history_message": true}
+
+func skippableCapture(err error) bool { return err != nil && skippedCaptureCodes[err.Error()] }
+
+// skip records only the reason code; no message content, ID or chat is kept.
+func (s *CaptureStore) skip(err error) error {
+	code := err.Error()
+	if !skippedCaptureCodes[code] {
+		return err
+	}
+	if _, e := s.db.Exec("INSERT INTO capture_skips(code,count,last_ms)VALUES(?,1,?)ON CONFLICT(code)DO UPDATE SET count=count+1,last_ms=excluded.last_ms", code, time.Now().UnixMilli()); e != nil {
+		return e
+	}
+	_ = json.NewEncoder(os.Stderr).Encode(map[string]any{"state": "capture_skipped", "reason": code})
+	return nil
+}
+
+// putOrSkip durably captures a message or counts a permanently invalid one.
+func (s *CaptureStore) putOrSkip(e *events.Message, origin string) error {
+	err := s.Put(e, origin)
+	if skippableCapture(err) {
+		return s.skip(err)
+	}
+	return err
+}
 
 const maxOutgoingRetryBytes = 32 << 20
 const maxOutgoingRetryMessages = 1000
@@ -228,9 +263,13 @@ func (s *CaptureStore) Put(e *events.Message, origin string) error {
 		id = envelope["ids"].([]string)[0]
 		raw = nil
 	}
-	return s.append(LegacyChatID(e.Info.Chat), id, e.Info.Timestamp.Unix(), raw, envelope)
+	return s.append(LegacyChatID(e.Info.Chat), id, e.Info.Timestamp.Unix(), raw, envelope, origin == "history")
 }
-func (s *CaptureStore) append(chat, id string, stamp int64, raw []byte, envelope map[string]any) error {
+
+// deferExport (history backfill): a durably journaled row that cannot be
+// exported now is left to the replay worker instead of failing the batch. A
+// retried batch therefore skips rows it already stored and keeps going.
+func (s *CaptureStore) append(chat, id string, stamp int64, raw []byte, envelope map[string]any, deferExport bool) error {
 	if raw == nil {
 		raw = []byte{}
 	}
@@ -238,8 +277,14 @@ func (s *CaptureStore) append(chat, id string, stamp int64, raw []byte, envelope
 	if err != nil {
 		return err
 	}
-	if len(data)+len(raw) > 512<<10 {
+	if len(data) > maxCaptureEnvelopeBytes {
 		return errors.New("capture_too_large")
+	}
+	if len(data)+len(raw) > maxCaptureEnvelopeBytes {
+		// The bounded archive envelope always fits; oversized native evidence
+		// (e.g. a long quoted message) is not retained locally. The capture is
+		// still exported, but cannot later serve pages, media or edit lookups.
+		raw = []byte{}
 	}
 	// Observation time/origin do not turn a history replay into a new revision.
 	canonical := map[string]any{}
@@ -269,7 +314,7 @@ func (s *CaptureStore) append(chat, id string, stamp int64, raw []byte, envelope
 	var storedData []byte
 	err = s.db.QueryRow("SELECT published,envelope FROM capture WHERE digest=?", digest).Scan(&published, &storedData)
 	if err == nil {
-		if published == 1 {
+		if published == 1 || deferExport {
 			return nil
 		}
 		return s.publish(digest, storedData)
@@ -337,7 +382,11 @@ func (s *CaptureStore) append(chat, id string, stamp int64, raw []byte, envelope
 			return err
 		}
 	}
-	return s.publish(digest, data)
+	err = s.publish(digest, data)
+	if deferExport && spoolBackpressure(err) {
+		return nil
+	}
+	return err
 }
 func (s *CaptureStore) checkDisk(extra int64) error {
 	var stat syscall.Statfs_t
@@ -602,6 +651,9 @@ func (s *CaptureStore) Dialogs(limit int, policy Policy) ([]any, error) {
 			self = false
 		} else if j, e := ParseChatID(chat); e == nil && j.Server == s.Owner.Server {
 			self = j == s.Owner.ToNonAD()
+		} else if e == nil && j.Server == types.HiddenUserServer && !s.OwnerLID.IsEmpty() {
+			// The owner's own chat may be addressed by LID instead of phone number.
+			self = j == s.OwnerLID.ToNonAD()
 		}
 		out = append(out, []any{chat, kind, title, typ, map[string]any{"observed_at": at, "unread_count": nil, "basis": "whatsmeow_captured_chat", "is_self_chat": self}})
 		if len(out) >= limit {
@@ -650,7 +702,7 @@ func (s *CaptureStore) StoreReceipt(e *events.Receipt) error {
 			continue
 		}
 		value := map[string]any{"kind": "message_receipt", "account": s.Config.Account, "platform": "whatsapp", "chat": chat, "provider_id": found, "max_id": nil, "state": state, "basis": "whatsapp_message_ack", "audience": audience, "observed_at": time.Now().UTC().Format(time.RFC3339Nano), "provider_at": nil}
-		if err = s.append(chat, fmt.Sprintf("receipt:%s:%s", found, state), e.Timestamp.Unix(), nil, value); err != nil {
+		if err = s.append(chat, fmt.Sprintf("receipt:%s:%s", found, state), e.Timestamp.Unix(), nil, value, false); err != nil {
 			return err
 		}
 	}

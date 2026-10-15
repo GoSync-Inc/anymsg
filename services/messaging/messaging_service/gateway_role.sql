@@ -46,3 +46,12 @@ GRANT SELECT,INSERT,UPDATE ON file_uploads TO messaging_gateway;
 GRANT SELECT ON media_reservations TO messaging_gateway;
 -- Schedule only existing originals; no state, source, attempt or lease mutation.
 GRANT UPDATE(requested_until,request_key_digest) ON media_jobs TO messaging_gateway;
+
+-- Separate subscription consumption, local feedback and opaque receiver binding.
+GRANT SELECT,INSERT,UPDATE ON subscription_consumption TO messaging_gateway;
+GRANT SELECT,INSERT,UPDATE,DELETE ON subscription_receipts TO messaging_gateway;
+GRANT SELECT(id,principal,key_id,enabled) ON subscription_receivers TO messaging_gateway;
+GRANT SELECT,INSERT,UPDATE,DELETE ON subscription_delivery TO messaging_gateway;
+GRANT SELECT,INSERT ON subscription_outbox TO messaging_gateway;
+GRANT UPDATE(state,finished_at,error_code) ON subscription_outbox TO messaging_gateway;
+GRANT SELECT,INSERT ON agent_feedback TO messaging_gateway;

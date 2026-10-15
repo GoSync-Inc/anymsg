@@ -107,7 +107,8 @@ def decorate_messages(c,p,rows,*,include_system=False):
     siblings=c.execute('''SELECT s.account,s.chat,s.sent_at,a.platform,count(*) AS n,
         bool_and(s.provider_id ~ '^[0-9]{1,18}$') AS numeric_ids
         FROM messages s JOIN accounts a ON a.id=s.account
-        LEFT JOIN message_metadata md ON md.message=s.id AND md.revision=s.revision
+        LEFT JOIN LATERAL (SELECT current.metadata FROM message_metadata current
+          WHERE current.message=s.id AND current.revision=s.revision OFFSET 0) md ON true
         WHERE NOT s.deleted AND '''+scope+' AND '+('true' if include_system else visible_sql('s','md'))+'''
           AND (s.account,s.chat,s.sent_at) IN(SELECT account,chat,sent_at FROM messages WHERE id=ANY(%s))
         GROUP BY s.account,s.chat,s.sent_at,a.platform''',[*args,ids]).fetchall()
@@ -144,7 +145,8 @@ def presentation(rows,*,order='asc',include_system=False):
         sender=row.get('sender_name') or row.get('username') or row.get('sender')
         stamp=row.get('sent_at');stamp=stamp.isoformat() if hasattr(stamp,'isoformat') else str(stamp or '')
         scope_label=(f" · аккаунт {row.get('account','')} · чат {row.get('chat_title') or row.get('chat','')} ({row.get('chat','')})" if mixed_scope else '')
-        lines.append(f"{row['position']}. {actor}"+(f' ({sender})' if sender else '')+scope_label+f" · {stamp} · {row['id']}\n{row['display_text']}")
+        text=row['display_text']+(' […]' if row.get('display_text_truncated') else '')
+        lines.append(f"{row['position']}. {actor}"+(f' ({sender})' if sender else '')+scope_label+f" · {stamp} · {row['id']}\n{text}")
     if warnings:lines.extend('⚠ '+warning['message'] for warning in warnings)
     return {'view':'conversation','contract_version':1,'order':order,
         'position_scope':'returned_view','system_filter':'included' if include_system else 'known_system_hidden',

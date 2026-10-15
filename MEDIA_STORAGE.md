@@ -60,15 +60,33 @@ have already consumed some disk space. It is conservative, not a promise of
 exact available capacity. It cannot protect against unrelated software filling
 the same disk: the writer rechecks the media floor on every chunk and cleans up
 its own pending file after interruption. No original is deleted or evicted by
-this feature.
+this feature. A writer killed outright (SIGKILL, power loss) leaves a
+`.pending-*` file; collectors remove such top-level files untouched for a day
+at startup. If a stored original fails verification, the next verified download
+of the same digest replaces it instead of failing with `blob_corrupt`.
+
+Telegram original transfers get a deadline sized for paced 512 KiB requests
+(at least one hour, at most six), so files above about 1.7 GiB can finish.
 
 If there is insufficient capacity, the job stays `queued` with
 `error_code=paused_storage`, retries after 60 seconds, and does not increment
 provider attempts. A transfer interrupted by the local disk reserve returns to
 the same state and rolls back its claimed attempt. Per-account/per-chat sync
 diagnostics expose the reason; account media operations also expose
-`storage_paused_jobs`. Other smaller eligible jobs can proceed on later passes.
+`storage_paused_jobs`. Terminal failures and queued retries have independent
+counts and state-specific diagnostics: a terminal network failure never promises
+another automatic retry. `needs_attention` remains true when other jobs are
+simultaneously paused for storage. Other smaller eligible jobs can proceed on later passes.
 Normal capture and metadata/text search remain independent of this pause.
+
+A local write failure that is not a capacity limit (missing directory,
+permissions, read-only mount, or the native adapter's temporary media directory)
+is `error_code=storage_unavailable`, not `network_error`. Like a capacity pause it
+does not consume a provider attempt and never fails the job terminally; it
+retries every 5 minutes, and account media operations report
+`state=storage_unavailable` and `storage_unavailable_jobs`. Fix the storage path,
+then downloads resume on their own. Jobs recorded as `network_error` before this
+classification keep their recorded code.
 
 Media reservation expiry follows the media lease and is renewed with it.
 Expiry, edit/delete supersession, successful completion and failure release
@@ -108,3 +126,13 @@ The seven-day prefetch window is **not** an eviction TTL. Already stored origina
 are retained. A future cold-storage lifecycle must verify a durable copy before
 eviction, retain independently readable text/analysis, and test rehydration.
 Provider history/CDN availability alone is not a durable backup.
+
+Sync status (`get_sync_status`, chat `resolve_reference.sync`, file search evidence)
+counts each current file occurrence of a non-deleted message in exactly one
+`download` state, using the same rule as each attachment's `download_status`:
+a registered original is `ready` even if an edit re-queued its job, a legacy
+original without a job is `ready`, and a `ready` job without a registered original
+is `unavailable`. `download.ready` therefore equals `stored_files`.
+`current_files` sums every state except `superseded` (replaced older revisions);
+`download_basis: current_file_occurrences` names this rule. Queued originals
+outside the prefetch window are known occurrences that are not stored yet.

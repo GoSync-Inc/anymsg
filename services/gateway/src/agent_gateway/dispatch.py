@@ -4,10 +4,12 @@ from platform_contracts import Capability, safe_error
 from .adapters.calls import receipt_reference
 
 from .catalog import arguments, CATALOG
+from .diagnostics import FAILURE_FIELDS, discovery, manifest_summary, unavailable
 from .policy import Denied, key_from_file
 
 CALENDAR_CONSTRAINTS = {
     "event_write",
+    "time_format",
     "recurrence_write",
     "future_split",
     "invitations",
@@ -47,6 +49,32 @@ class Dispatch:
                 supported.update(values)
         return sorted(allowed & supported)
 
+    def usable_actions(self, snapshot, agent, caps):
+        """Advertise only actions usable now; the call ceiling stays `actions`.
+
+        An action is listed for an account when it is granted, supported and
+        reported by the backend as available (key permitted and account opt-in).
+        Excluded ceiling actions are counted per reason, never listed. A backend
+        without an availability report advertises none rather than guessing.
+        """
+        operations = caps.get("messenger_operations")
+        accounts = operations.get("supported_by_account") if isinstance(operations, dict) else None
+        usable, excluded = {}, {}
+        for account, row in (accounts.items() if isinstance(accounts, dict) else ()):
+            ceiling = self.actions(snapshot, agent, caps, account)
+            available = row.get("available_operations") if isinstance(row, dict) else None
+            reported = isinstance(available, list) and all(isinstance(value, str) for value in available)
+            usable[account] = sorted(set(ceiling) & set(available)) if reported else []
+            if len(ceiling) > len(usable[account]):
+                reason = "not_available_for_account" if reported else "availability_not_reported"
+                excluded[account] = {reason: len(ceiling) - len(usable[account])}
+        return {
+            "gateway_actions": sorted(set().union(*usable.values())),
+            "gateway_actions_by_account": usable,
+            "gateway_actions_excluded_by_account": excluded,
+            "gateway_actions_basis": "granted_supported_and_available_for_account",
+        }
+
     def implemented(self, tool, snapshot, agent, caps, account=None):
         if tool.get("required_manifest"):
             manifest = caps.get("tool_manifest")
@@ -58,17 +86,19 @@ class Dispatch:
         action = tool.get("required_action")
         return not action or action in self.actions(snapshot, agent, caps, account)
 
-    async def backend_capabilities(self, snapshot, agent, module):
+    async def backend_capabilities(self, snapshot, agent, module, timeout=2):
         target = snapshot["deployment"]["backends"].get(module)
         if target != self.clients.deployment["backends"].get(module):
             raise Denied("backend_configuration_requires_restart", 503)
         binding = agent["credentials"][module]
         credential = key_from_file(binding["key_file"], binding["key_sha256"])
         try:
-            async with asyncio.timeout(2):
+            async with asyncio.timeout(timeout):
                 result = await self.clients.call(module, "capabilities", credential, {})
         except TimeoutError:
-            raise Denied("backend_unavailable", 503) from None
+            error = Denied("backend_unavailable", 503)
+            error.detail = {"error": "backend_unavailable", "reason": "capabilities_timeout"}
+            raise error from None
         permissions = result.get("permissions")
         if not isinstance(permissions, list) or not all(isinstance(p, str) for p in permissions):
             raise Denied("backend_capability_contract_unavailable", 503)
@@ -115,7 +145,13 @@ class Dispatch:
                 )
             )
         ]
-        return current, principal, visible, {"states": states, "scopes": scopes, "actions": actions}
+        manifests = {module: summary for module, caps, _ in results
+                     if (summary := manifest_summary(caps)) is not None}
+        return current, principal, visible, {
+            "states": states, "scopes": scopes, "actions": actions,
+            "discovery": discovery(visible, actions, current["revision"]),
+            "backend_tool_manifests": manifests,
+        }
 
     async def call(self, key, name, values):
         snapshot, agent, tool = self.policy.authorize(key, name)
@@ -129,6 +165,9 @@ class Dispatch:
                 "service": "deedkit",
                 "version": "0.1.0",
                 "principal": agent["id"],
+                "gateway_principal": agent["id"],
+                "discovery": states["discovery"],
+                "backend_tool_manifests": states["backend_tool_manifests"],
                 "policy_revision": snapshot["revision"],
                 "tools": visible,
                 "modules": sorted({CATALOG[n]["module"] for n in visible} - {"gateway"}),
@@ -147,8 +186,20 @@ class Dispatch:
             raise Denied("backend_configuration_requires_restart", 503)
         binding = agent["credentials"][module]
         credential = key_from_file(binding["key_file"], binding["key_sha256"])
-        caps = await self.backend_capabilities(snapshot, agent, module)
+        read_only = tool.get("annotations", {}).get("readOnlyHint", False)
+        try:
+            # Discovery keeps a short bound; one call may wait for a busy pool.
+            caps = await self.backend_capabilities(snapshot, agent, module, timeout=6)
+        except Denied as error:
+            if error.code == "backend_unavailable":
+                error.detail = unavailable(tool["operation"], getattr(error, "detail", None),
+                                           phase="capabilities", read_only=read_only)
+            raise
         if not set(tool["scopes"]) <= set(caps["permissions"]):
+            raise Denied()
+        if (module == "messaging" and tool["operation"] == "get_updates"
+                and args.get("start_from") == "now"
+                and "cursor-write" not in (set(agent["grants"].get(module, [])) & set(caps["permissions"]))):
             raise Denied()
         if not self.implemented(tool, snapshot, agent, caps, args.get("account")):
             raise Denied()
@@ -176,10 +227,15 @@ class Dispatch:
                 else await self.clients.call(module, tool["operation"], credential, args)
             )
         except Denied as error:
-            if error.code in {"backend_unavailable", "backend_response_too_large"} and not tool.get(
-                "annotations", {}
-            ).get("readOnlyHint", False):
-                error.detail = safe_error("mutation_outcome_unknown", unknown_outcome=True)
+            if error.code in {"backend_unavailable", "backend_response_too_large"} and not read_only:
+                diagnostics = getattr(error, "detail", {})
+                error.detail = {
+                    **safe_error("mutation_outcome_unknown", unknown_outcome=True),
+                    **{key: diagnostics[key] for key in FAILURE_FIELDS if key in diagnostics},
+                }
+            elif error.code == "backend_unavailable":
+                error.detail = unavailable(tool["operation"], getattr(error, "detail", None),
+                                           phase="operation", read_only=True)
             raise
         if module == "calls":
             receipt_reference(tool["operation"], result)
@@ -252,14 +308,14 @@ class Dispatch:
             ):
                 result.pop(field, None)
             result["gateway_tools"] = visible
+            result["gateway_principal"] = agent["id"]
+            result["backend_principal"] = result.get("principal")
             result["gateway_actions"] = allowed_actions
+            result["gateway_actions_scope"] = "messenger_operations"
+            manifest = manifest_summary(caps)
+            if manifest is not None:
+                result["backend_tool_manifest"] = manifest
             if module == "messaging":
-                reports = caps.get("messenger_operations", {})
-                accounts = reports.get("supported_by_account", {}) if isinstance(reports, dict) else {}
-                result["gateway_actions_by_account"] = (
-                    {account: self.actions(snapshot, agent, caps, account) for account in accounts}
-                    if isinstance(accounts, dict)
-                    else {}
-                )
+                result.update(self.usable_actions(snapshot, agent, caps))
             result["gateway_policy_revision"] = snapshot["revision"]
         return result

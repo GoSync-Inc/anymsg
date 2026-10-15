@@ -234,8 +234,10 @@ def test_page_failure_leaves_checkpoint_and_durable_captures_for_replay(worker):
     w.state.apply=fail_second
     with pytest.raises(RuntimeError,match='database_down'): asyncio.run(w.sync_once())
     assert not w.state.chat('100','user')['initialized']
-    assert len(list(w.spool.path.glob('*.json')))==2
-    w.state.apply=original; w.spool.drain(w.state.apply)
+    # Committed history leaves its spool; failed history stays outside live capture.
+    assert not list(w.spool.path.glob('*.json'))
+    assert len(list(w.history_spool.path.glob('*.json')))==1
+    w.state.apply=original; w.history_spool.drain(w.state.apply)
     asyncio.run(w.sync_once())
     assert len(s.search(key)['items'])==2 and w.state.chat('100','user')['high_water']==5
 
@@ -499,7 +501,7 @@ def test_backup_covers_collector_positions_and_pending_deletions(worker,tmp_path
     directory=tmp_path/'snapshot'
     create_snapshot(s,directory,[sys.executable,'-c','print("unit-dump-stub")'])
     manifest=json.loads((directory/'manifest.json').read_text())
-    assert manifest['schema_version']==31
+    assert manifest['schema_version']==32
     assert manifest['tables']['collector_chats']['rows']==1
     assert manifest['tables']['provider_tombstones']['rows']==1
     assert verify_snapshot(s,directory)['status']=='verified'

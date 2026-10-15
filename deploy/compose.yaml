@@ -40,6 +40,30 @@ services:
       - file_uploads:/data/files/.uploads
     ports:
       - "127.0.0.1:18940:8080"
+    # Liveness only: unauthenticated /healthz with an allowed Host (no database
+    # write, proxy, credentials or output), from the same PROBE_* settings.
+    healthcheck:
+      test:
+        - CMD
+        - python
+        - -c
+        - |
+          import os, sys, urllib.request
+          try:
+              bind = os.environ.get("PROBE_BIND", "127.0.0.1")
+              address = "127.0.0.1" if bind in ("", "0.0.0.0", "::") else f"[{bind}]" if ":" in bind else bind
+              port = int(os.environ.get("PROBE_PORT", "18940"))
+              host = os.environ.get("PROBE_ALLOWED_HOSTS", "127.0.0.1:18940,localhost:18940").split(",")[0]
+              request = urllib.request.Request(f"http://{address}:{port}/healthz", headers={"Host": host})
+              with urllib.request.build_opener(urllib.request.ProxyHandler({})).open(request, timeout=8) as response:
+                  healthy = response.status == 200
+          except Exception:
+              healthy = False
+          sys.exit(0 if healthy else 1)
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 40s
     networks:
       backend: {}
       frontend:

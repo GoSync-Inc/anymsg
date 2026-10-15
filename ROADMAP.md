@@ -1,68 +1,23 @@
 # Roadmap
 
-This library stays focused on messenger collection and an agent interface.
-Version 0.9.15 adds an allowlisted live messenger-operation interface, independent
-key ceilings and account opt-in. See [MESSENGER_OPERATIONS.md](MESSENGER_OPERATIONS.md)
-and the [provider coverage audit](MESSENGER_CAPABILITY_AUDIT.md). This is an expanded
-first catalog, not full parity with every upstream method.
-Task/project management is outside the archive. Version 0.9.14 adds passive formatting previews, reviewed rich-text sends and
-versioned incoming formatting evidence ([FORMATTING.md](FORMATTING.md)).
-Version 0.9.13 adds passive
-delivery/read observations and bounded status updates ([RECEIPTS.md](RECEIPTS.md)).
-Version 0.9.12 completes missing
-Telegram private-send identities and exposes confirmed agent-send provenance.
-[MESSAGE_ACTIONS.md](MESSAGE_ACTIONS.md) tracks receipt/reaction/action follow-up,
-including discovery compatibility. [FORMATTING.md](FORMATTING.md) defines the implemented rich-text contract;
-native visual acceptance requires separately approved provider sends.
-Version 0.9.11 separates the
-WhatsApp sending lane from background history/media in the same authenticated
-collector. Version 0.9.10 adds opt-in text
-sending as a separate, explicitly approved action boundary.
+The current platform-wide queue, priorities, completion criteria and delivered
+increments are maintained in **[BACKLOG.md](BACKLOG.md)**. This path remains as a
+compatibility entry point; do not add a second queue here.
 
-The 0.9.9 baseline already includes per-chat evidence, explicit collector errors,
-verified WhatsApp identity observations, file-text indexing, morphology search,
-bounded downloads, byte-level deduplication and optional enrichment adapters.
-These capabilities do not imply that every source history or file is available.
+DeedKit includes independent messaging, calendar, calls and gateway modules.
+The AnyMsg messaging module remains focused on collection, retrieval and scoped
+messenger operations; task/project management is outside that module.
 
-Version 0.9.16 implements the [durable subscription core](SUBSCRIPTIONS.md):
-explicit chat/channel sets and account-scoped senders, persistent lifecycle,
-restart-safe matching, passive event pages and independent file readiness.
-Next: scoped subscription ACKs, dispatch/batching, reply/mention presets and a
-verified host receiver with notification transport. Push and agent wake-up are
-not available in this slice. Existing history, storage and file-understanding
-work remains below.
+Implemented contracts and their limits:
 
-Next work, in order:
+- [Conversation views and last known turn](CONVERSATION.md).
+- [Opt-in sends](SENDING.md), [formatting](FORMATTING.md),
+  [delivery/read observations](RECEIPTS.md) and [live operation catalog](MESSENGER_OPERATIONS.md).
+- [Passive durable subscriptions](SUBSCRIPTIONS.md).
+- [Native WhatsApp provider](docs/whatsapp-native.md).
+- [Storage admission](MEDIA_STORAGE.md) and [history-depth preview](HISTORY_POLICY.md).
+- [Module runtime](docs/platform-runtime.md) and [verification boundaries](ARCHITECTURE.md).
 
-1. **History recovery:** durable fair scheduling across chats, selectable setup
-   depth (new only or a historical period), and waves from a week through a month,
-   quarter and year. The current planner is a preview; execution, checkpoint
-   recovery and provider backoff still need implementation and live acceptance.
-2. **Storage lifecycle:** retain extracted text/evidence while optionally evicting
-   cold originals; configurable pin/recent/frequent-access rules and byte budgets.
-   Demand re-download must verify the original digest and explicitly report
-   expired or unavailable provider references. Never promise rehydration of a
-   source that no longer exists. SHA-256 blob deduplication is already implemented.
-3. **File understanding:** preserve full text/segments and separate descriptions,
-   titles and structured analysis as versioned artifacts. Reuse analysis for exact
-   duplicates with matching model/profile/version, keep source links and expose
-   partial/truncated results. Local CPU and API adapters remain configurable;
-   Codex CLI is optional, must be explicitly authorized and is not activated by
-   installing the package. Measure cost/quality on synthetic or owner-approved files.
-4. **Connector evaluation:** test whatsmeow separately before considering a
-   WhatsApp transport replacement. No session migration or production switch is
-   implied. Continue testing identity mappings, reconnect and history gaps.
-5. **Retrieval and performance:** benchmark a bounded hybrid search experiment
-   against the existing PostgreSQL baseline, including Russian queries, people
-   and file descriptions. Measure SQL, REST/MCP and client-connector latency
-   separately; improve only demonstrated bottlenecks.
-6. **Sending:** opt-in text/reply outbox with idempotency is implemented (SENDING.md).
-   Next: reaction reads,
-   then attachments/edit/delete/reaction/read actions. A scoped server draft/approval
-   path is optional and follows explicit owner configuration. Ambiguous sends
-   must never be blindly retried; formatted text must not be silently split.
-
-Every stage needs regression tests, resource/coverage diagnostics and explicit
-release notes. Separate owners should use separate deployments; true tenancy is
-not part of the present security model. The package is experimental, with source
-and installation guides intended for operator-managed deployments.
+Source implementation, published packages and operational acceptance have separate
+states. Consult [README.md](README.md) for versions and the central backlog for
+remaining work; old version-specific plans do not override them.

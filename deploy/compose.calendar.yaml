@@ -29,6 +29,32 @@ services:
         aliases: [calendar-api]
     ports: ["127.0.0.1:13232:13232"]
     restart: unless-stopped
+    # Liveness only: unauthenticated /health with a configured allowed Host.
+    # Reads port/bind/hosts from the service's own config; prints nothing.
+    healthcheck:
+      test:
+        - CMD
+        - python
+        - -c
+        - |
+          import json, os, sys, urllib.request
+          try:
+              with open(os.path.join(os.environ["FCS_DATA_DIR"], "service", "gateway.json")) as file:
+                  config = json.load(file)
+              port = int(config["port"])
+              host = (config.get("allowed_hosts") or [f"127.0.0.1:{port}"])[0]
+              bind = config.get("bind", "127.0.0.1")
+              address = "127.0.0.1" if bind in ("", "0.0.0.0", "::") else f"[{bind}]" if ":" in bind else bind
+              request = urllib.request.Request(f"http://{address}:{port}/health", headers={"Host": host})
+              with urllib.request.build_opener(urllib.request.ProxyHandler({})).open(request, timeout=8) as response:
+                  healthy = response.status == 200
+          except Exception:
+              healthy = False
+          sys.exit(0 if healthy else 1)
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 40s
     read_only: true
     user: "10001:10001"
     cpu_shares: 512

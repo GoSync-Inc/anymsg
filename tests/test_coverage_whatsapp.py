@@ -161,7 +161,8 @@ def test_history_pass_status_names_distinguish_gaps_missing_chats_and_discovery_
             return kind == 'gap'
         worker.sync_chat = sync_chat
         await worker.sync_once()
-        assert statuses == [('degraded' if kind in ('gap', 'missing', 'unavailable') else 'receiving', expected)]
+        # A catch-up gap is history evidence; live collection keeps receiving.
+        assert statuses == [('degraded' if kind in ('missing', 'unavailable') else 'receiving', expected)]
         assert phases == [('history', 'scanning', 'history_scan'), ('history', 'waiting', 'history_scan_finished')]
         assert failures == ([('123@c.us', 'provider_unavailable')] if kind == 'unavailable' else [])
     asyncio.run(run())
@@ -181,7 +182,7 @@ def test_event_and_page_spools_are_drained_together_before_next_poll(monkeypatch
         worker.send_receipts=ReceiptSpool()
         monkeypatch.setattr(outgoing,'reconcile_send_receipt',
             lambda state,item:actions.append(('receipt',state,item)))
-        async def drain(spools): actions.append(('drain', spools))
+        async def drain(spools, history_spools): actions.append(('drain', spools, history_spools))
         worker.drain_captures = drain
         worker.state = SimpleNamespace(apply_tombstones=lambda: actions.append(('tombstones',)))
         async def stop_after_cycle(seconds):
@@ -190,8 +191,29 @@ def test_event_and_page_spools_are_drained_together_before_next_poll(monkeypatch
         monkeypatch.setattr(wa.asyncio, 'sleep', stop_after_cycle)
         with pytest.raises(RuntimeError, match='end synthetic cycle'): await worker.drain_loop()
         assert actions == [('receipt_spool',100),('receipt',worker.state,receipt),
-            ('drain', [worker.events_spool, worker.spool]), ('tombstones',)]
+            ('drain', [worker.events_spool], [worker.spool]), ('tombstones',)]
     asyncio.run(run())
+
+
+def test_pending_history_pages_are_not_counted_as_live_capture_backlog(tmp_path):
+    class Spool:
+        def __init__(self, name, files):
+            self.path = tmp_path / name; self.path.mkdir()
+            for i in range(files): (self.path / f'{i:020d}-synthetic.json').write_text('{}')
+            self.drained = []
+        def drain(self, apply, limit): self.drained.append(limit); return 0
+        def quarantined(self): return 1
+    progress = []
+    worker = wa.WhatsAppCollector.__new__(wa.WhatsAppCollector)
+    worker.invalid_messages = 3
+    worker.state = SimpleNamespace(apply=lambda item: None,
+        capture_progress=lambda *args, **kwargs: progress.append((args, kwargs)))
+    events, pages = Spool('events', 2), Spool('pages', 40)
+    asyncio.run(worker.drain_captures([events], [pages]))
+    assert events.drained == [100] and pages.drained == [100]
+    # Live lag counts only callback captures; replayable history is separate.
+    assert progress == [((None, 0, 2), {'history_pending': 40, 'quarantined': 2, 'invalid': 3})]
+    assert worker.invalid_messages == 0
 
 
 @pytest.mark.parametrize('outcome,records', [

@@ -27,6 +27,14 @@ from .media_policy import MEDIA_POLICY_FIELDS,configure_media_policy,validate_pr
 class ProviderUnavailable(Exception): pass
 
 
+def database_errors():
+    # Transient archive faults: statement timeouts, lost connections and a
+    # saturated pool. Lease loss is a RuntimeError and still stops the collector.
+    import psycopg
+    from psycopg_pool import PoolTimeout
+    return (psycopg.OperationalError,PoolTimeout)
+
+
 def private_json(path):
     fd=os.open(path,os.O_RDONLY|os.O_NOFOLLOW)
     with os.fdopen(fd,'rb') as source:
@@ -138,6 +146,10 @@ class TelethonProvider:
     async def send_text(self,job):
         from .outgoing import SendRejected,dispatch_payload
         from telethon import types
+        from telethon.errors import FloodError
+        report=job.get('_provider_phase')
+        # The shared rate gate may hold this send behind history or media.
+        if report is not None:report('waiting')
         payload=dispatch_payload(job,'telegram')
         options={'parse_mode':None,'link_preview':payload['link_preview'],
             'reply_to':int(job['reply_provider_id']) if job.get('reply_provider_id') else None,
@@ -160,7 +172,12 @@ class TelethonProvider:
             if datetime.now(timezone.utc).timestamp()>=job['expires_at']:
                 raise SendRejected('send_expired')
             if job.get('_preflight') is not None:await job['_preflight']()
-            message=await self.client.send_message(int(job['provider_chat']),payload['text'],**options)
+            if report is not None:report('started')
+            try:message=await self.client.send_message(int(job['provider_chat']),payload['text'],**options)
+            except FloodError:
+                # 420 FLOOD answers reject the request before Telegram acts on it.
+                if report is not None:report('refused')
+                raise
             if not message or str(message.chat_id)!=job['provider_chat']:
                 raise RuntimeError('send_receipt_mismatch')
             return {'provider_message_id':str(message.id),'message':message}
@@ -256,11 +273,19 @@ class TelethonProvider:
             raise OSError('media_reference_expired') from None
 
 
+def media_deadline(size):
+    """Whole-transfer bound that still lets a large original finish on a paced session."""
+    # 512 KiB chunks at most one paced request per second, shared with history.
+    expected=(size or 0)/(256*1024)
+    return max(3600,min(6*3600,int(expected*1.5)+600))
+
+
 class TelegramCollector:
     state_class=CollectorState
     coverage_code='telegram_history_partial'
     connect_timeout=60
     retry_connect=False
+    database_retry=2
     def __init__(self,archive,account,provider,spool,*,batch_size=100,interval=60,max_dialogs=None,
                  writer=None,owner=None,lease_ttl=60,heartbeat_interval=15,history_since=None,
                  live_writer=None,live_window_seconds=86400,media_prefetch_days=None):
@@ -274,7 +299,19 @@ class TelegramCollector:
         self.lease_ttl,self.heartbeat_interval=lease_ttl,heartbeat_interval
         self.state=None; self.stopping=asyncio.Event(); self.failed=asyncio.Event()
         self.capture_count=0; self.failure_code=None; self.policy=None
-        self._dialog_cache=None; self._next_discovery=0
+        self._dialog_cache=None; self._next_discovery=0; self._history_spool=None
+        self.invalid_messages=0; self._lease_valid_until=None
+
+    @property
+    def history_spool(self):
+        # Replayed history pages keep capture durability, but a pending page is
+        # not live capture lag. Created lazily beside the live spool.
+        if getattr(self,'_history_spool',None) is None:
+            from .spool import DurableSpool
+            live=self.spool
+            self._history_spool=DurableSpool(live.path/'history',validator=live.validator,
+                max_bytes=live.max_bytes,max_entries=live.max_entries,reserve_bytes=live.reserve_bytes)
+        return self._history_spool
 
     def fail(self,code):
         self.failure_code=code; self.failed.set()
@@ -286,7 +323,10 @@ class TelegramCollector:
         if self.capture_count>=16: self.fail('capture_overload'); return
         self.capture_count+=1
         try:
-            e=telegram_message(self.account,event.message,verified_self=getattr(self.provider,'verified_self',None))
+            try:e=telegram_message(self.account,event.message,verified_self=getattr(self.provider,'verified_self',None))
+            except ValueError:
+                # Deterministically unstorable; reconciliation skips it the same way.
+                self.invalid_messages+=1; return
             if not self.state.allows(self.policy,e['chat']): return
             await asyncio.to_thread(self.spool.put,{'kind':'message','peer_kind':peer_kind(event.message),'envelope':e,
                 'captured_at':datetime.now(timezone.utc).isoformat()})
@@ -344,11 +384,17 @@ class TelegramCollector:
         ids=[]
         for message in messages:
             if str(message.chat_id)!=chat: raise RuntimeError('provider_chat_mismatch')
-            e=telegram_message(self.account,message,chat_title=title,origin=origin,
-                verified_self=getattr(self.provider,'verified_self',None))
+            try:
+                e=telegram_message(self.account,message,chat_title=title,origin=origin,
+                    verified_self=getattr(self.provider,'verified_self',None))
+            except ValueError:
+                # One unstorable message must not stop history for the chat or account.
+                self.invalid_messages+=1; ids.append(message.id); continue
             item={'kind':'message','peer_kind':kind,'envelope':e}
-            await asyncio.to_thread(self.spool.put,item)
+            name=await asyncio.to_thread(self.history_spool.put,item)
             await asyncio.to_thread(self.state.apply,item)
+            # Committed directly; draining the same bytes again would only repeat the work.
+            await asyncio.to_thread(self.history_spool.discard,name)
             ids.append(message.id)
         return ids
 
@@ -436,6 +482,7 @@ class TelegramCollector:
         from .telegram_identity import repair_sent_senders
         await asyncio.to_thread(repair_sent_senders,self.archive,self.account,self.state.lease,
             getattr(self.provider,'verified_self',None))
+        delay=self.database_retry
         while True:
             try: await self.sync_once()
             except (FloodWaitError,ProviderRateLimited) as exc:
@@ -445,6 +492,10 @@ class TelegramCollector:
                 if governor:await governor.wait()
                 else:await asyncio.sleep(max(exc.seconds,1))
                 continue
+            except database_errors():
+                # Checkpoints are committed per page; retry instead of reconnecting the provider.
+                await asyncio.sleep(delay); delay=min(60,delay*2); continue
+            delay=self.database_retry
             await asyncio.sleep(self.interval)
 
     async def drain_loop(self):
@@ -452,7 +503,7 @@ class TelegramCollector:
         from psycopg_pool import PoolTimeout
         while True:
             try:
-                await self.drain_captures([self.spool])
+                await self.drain_captures([self.spool],[self.history_spool])
                 await asyncio.to_thread(self.state.apply_tombstones)
             except (psycopg.OperationalError,PoolTimeout):
                 # Capture remains durable; the independent heartbeat stops the
@@ -460,24 +511,61 @@ class TelegramCollector:
                 await asyncio.sleep(1)
             await asyncio.sleep(.25)
 
-    async def drain_captures(self,spools):
+    async def drain_captures(self,spools,history_spools=()):
         last=None;count=0
         def apply(item):
             nonlocal last,count
             self.state.apply(item);last=item;count+=1
         for spool in spools:await asyncio.to_thread(spool.drain,apply,100)
+        # History pages were applied inline when fetched. Replaying them is
+        # idempotent and is neither live progress nor live backlog.
+        for spool in history_spools:await asyncio.to_thread(spool.drain,self.state.apply,100)
         publish=getattr(self.state,'publish_receipts',None)
         if callable(publish):await asyncio.to_thread(publish,limit=100)
         if count or time.monotonic()>=getattr(self,'_next_capture_status',0):
-            pending=await asyncio.to_thread(lambda:sum(sum(1 for _ in s.path.glob('*.json')) for s in spools))
-            await asyncio.to_thread(self.state.capture_progress,last,count,min(20000,pending))
+            def pending(group):return min(20000,sum(sum(1 for _ in s.path.glob('*.json')) for s in group))
+            extra={'history_pending':await asyncio.to_thread(pending,history_spools)} if history_spools else {}
+            owned=[*spools,*history_spools,*([self.send_receipts] if getattr(self,'send_receipts',None) is not None else [])]
+            quarantined=await asyncio.to_thread(lambda:sum(s.quarantined() for s in owned))
+            invalid,self.invalid_messages=self.invalid_messages,0
+            await asyncio.to_thread(self.state.capture_progress,last,count,await asyncio.to_thread(pending,spools),
+                quarantined=min(20000,quarantined),invalid=invalid,**extra)
             self._next_capture_status=time.monotonic()+15
+
+    async def renew_lease(self):
+        """Renew ownership, retrying transient faults only while the lease is still ours.
+
+        The database enforces expiry, but a half-open connection can block a
+        call far longer than the lease. Past the local deadline another owner
+        may hold the account, so this client must stop rather than wait.
+        """
+        if self._lease_valid_until is None:
+            self._lease_valid_until=time.monotonic()+self.lease_ttl-min(10,self.lease_ttl/4)
+        delay=1
+        while True:
+            remaining=self._lease_valid_until-time.monotonic()
+            if remaining<=0:raise RuntimeError('collector_lease_lost')
+            started=time.monotonic()
+            try:
+                await asyncio.wait_for(asyncio.to_thread(self.archive.renew,self.account,self.owner,
+                    self.state.lease[1],self.lease_ttl),remaining)
+            except TimeoutError:raise RuntimeError('collector_lease_lost') from None
+            except database_errors():
+                await asyncio.sleep(min(delay,max(0,self._lease_valid_until-time.monotonic())))
+                delay=min(5,delay*2); continue
+            # Conservative: the server deadline starts no earlier than this call.
+            self._lease_valid_until=started+self.lease_ttl-min(10,self.lease_ttl/4)
+            return
+
+    async def refresh_policy(self):
+        try:self.policy=await asyncio.to_thread(self.state.policy)
+        except database_errors():pass  # Keep the last committed policy; DB writes stay fenced.
 
     async def heartbeat(self):
         while True:
             await asyncio.sleep(self.heartbeat_interval)
-            await asyncio.to_thread(self.archive.renew,self.account,self.owner,self.state.lease[1],self.lease_ttl)
-            self.policy=await asyncio.to_thread(self.state.policy)
+            await self.renew_lease()
+            await self.refresh_policy()
 
     async def media_once(self):
         governor=getattr(self.provider,'governor',None)
@@ -503,11 +591,19 @@ class TelegramCollector:
                 if hasattr(stream,'aclose'): await stream.aclose()
         renewal=asyncio.create_task(renew()); download=asyncio.create_task(transfer())
         try:
-            done,_=await asyncio.wait([renewal,download],return_when=asyncio.FIRST_COMPLETED,timeout=3600)
+            done,_=await asyncio.wait([renewal,download],return_when=asyncio.FIRST_COMPLETED,
+                timeout=media_deadline(job['descriptor'].get('bytes')))
             if not done: raise TimeoutError('media_timeout')
             if renewal in done: renewal.result()
             blob=await download
-            await asyncio.to_thread(self.archive.finish_media,job,blob,writer,collector_lease=self.state.lease)
+            for attempt in range(3):
+                # The original is already verified on disk; do not repeat the provider transfer.
+                try:
+                    await asyncio.to_thread(self.archive.finish_media,job,blob,writer,collector_lease=self.state.lease)
+                    break
+                except database_errors():
+                    if attempt==2:raise
+                    await asyncio.sleep(1+attempt)
         except (ProviderUnavailable,ProviderRateLimited,OSError,ValueError,RuntimeError,TimeoutError) as exc:
             if str(exc)=='media_lease_lost': return True
             if str(exc)=='collector_lease_lost': raise
@@ -517,6 +613,10 @@ class TelegramCollector:
             elif str(exc)=='disk_reserve': code,permanent='disk_reserve',False
             elif isinstance(exc,OSError) and exc.errno in (errno.ENOSPC,errno.EDQUOT):
                 code,permanent='disk_reserve',False
+            elif isinstance(exc,OSError) and (exc.filename is not None or exc.errno==errno.EROFS):
+                # A missing directory, permission or read-only mount is local
+                # storage, not the provider network.
+                code,permanent='storage_unavailable',False
             elif str(exc) in ('media_size_mismatch','media_hash_mismatch','blob_corrupt'):
                 code,permanent='integrity_error',False
             else: code,permanent='network_error',False
@@ -535,16 +635,28 @@ class TelegramCollector:
         return True
 
     async def media_loop(self):
+        delay=self.database_retry
         while True:
-            if not await self.media_once(): await asyncio.sleep(1)
+            try:active=await self.media_once()
+            except database_errors():
+                # An unfinished job's lease expires and it is claimed again later.
+                await asyncio.sleep(delay); delay=min(60,delay*2); continue
+            delay=self.database_retry
+            if not active: await asyncio.sleep(1)
 
     async def run(self):
+        started=time.monotonic()
         epoch=await asyncio.to_thread(self.archive.acquire,self.account,self.owner,self.lease_ttl)
+        self._lease_valid_until=started+self.lease_ttl-min(10,self.lease_ttl/4)
         self.state=self.state_class(self.archive,self.account,(self.owner,epoch))
         tasks=[];failure=None
         try:
             self.policy=await asyncio.to_thread(self.state.policy)
             await asyncio.to_thread(self.state.status,'starting',self.coverage_code)
+            sweep=getattr(self.writer,'sweep_abandoned',None)
+            if sweep is not None:
+                # Best effort: leftovers only waste disk, they never block capture.
+                with suppress(OSError):await asyncio.to_thread(sweep)
             if hasattr(self.provider,'bind_state'):self.provider.bind_state(self.state)
             if getattr(self.provider,'supports_owner_reads',False) is True:
                 self.provider.subscribe(self.capture,self.deleted,self.receipt,owner_reads=self.owner_read)
@@ -590,11 +702,17 @@ class TelegramCollector:
         from .commands import CommandWorker
         worker=OutgoingWorker(self.state,self.send_outgoing,getattr(self.provider,'send_gate',None))
         commands=CommandWorker(self.state,self.execute_operation,getattr(self.provider,'send_gate',None))
+        delay=self.database_retry
         while True:
-            active=await worker.once()
-            # Text sends get the first opportunity; only one foreground job is
-            # dispatched on the existing account session at a time.
-            active=await commands.once() or active
+            try:
+                active=await worker.once()
+                # Text sends get the first opportunity; only one foreground job is
+                # dispatched on the existing account session at a time.
+                active=await commands.once() or active
+            except database_errors():
+                # Dispatched rows keep their lease epoch; nothing is retried automatically.
+                await asyncio.sleep(delay); delay=min(60,delay*2); continue
+            delay=self.database_retry
             await asyncio.sleep(.25 if active else 1)
 
     async def execute_operation(self,job):

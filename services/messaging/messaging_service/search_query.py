@@ -85,11 +85,22 @@ class SearchPlan:
             return 'lower('+(text_sql or alias+'.body')+") LIKE lower(q.literal_pattern) ESCAPE E'\\\\'"
         return '('+' OR '.join(self.vector(alias,lang)+' @@ q.'+lang for lang in self.languages)+')'
 
-    def rank(self, alias):
+    def rank(self, alias, text_sql=None):
         if not self.query or self.mode=='exact':
             return '0::bigint'
-        return '(round((greatest('+','.join('ts_rank_cd('+self.vector(alias,lang)+',q.'+lang+',32)'
-            for lang in self.languages)+')*1000000)::numeric))::bigint'
+        base='greatest('+','.join('ts_rank_cd('+self.vector(alias,lang)+',q.'+lang+',32)' for lang in self.languages)+')'
+        if text_sql is None or self.mode not in ('all','phrase'):
+            return '(round(('+base+'*1000000)::numeric))::bigint'
+        # Stemming merges e.g. договор/договориться, so cover density alone can
+        # rank scattered word forms above the phrase. Tiers dominate: the typed
+        # query as a case-insensitive substring (2), its words adjacent in order
+        # in any form (1), other matches (0). (tier+[0,1) rank)/3 stays within
+        # the 0..1000000 cursor bound.
+        phrase=' OR '.join(self.vector(alias,lang)+' @@ q.'+('' if self.mode=='phrase' else 'phrase_')+lang
+            for lang in self.languages)
+        tier=('(CASE WHEN lower('+text_sql+") LIKE lower(q.literal_pattern) ESCAPE E'\\\\' THEN 2 WHEN "+
+            phrase+' THEN 1 ELSE 0 END)')
+        return '(round((('+tier+'+'+base+'::float8)/3*1000000)::numeric))::bigint'
 
     def snippet(self, text_sql):
         if not self.query:
@@ -129,6 +140,9 @@ def compile_query(query='', query_mode='all', search_language='auto'):
     if query_mode!='exact':
         for lang in languages:
             columns.append(FUNCTIONS[query_mode]+"('"+lang+"',%s) AS "+lang); params.append(query)
+    if query_mode=='all':
+        for lang in languages:
+            columns.append("phraseto_tsquery('"+lang+"',%s) AS phrase_"+lang); params.append(query)
     # This CTE is referenced by filtering, ranking and presentation. A shared
     # materialized row hides constant tsqueries from GIN index conditions and
     # can turn a selective LIMIT query into a date-ordered archive traversal.

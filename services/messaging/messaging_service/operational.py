@@ -16,13 +16,14 @@ CONNECTION_ERRORS = set(TERMINAL) | {'provider_disconnected','provider_not_ready
     'disk_reserve','spool_corrupt','collector_lease_lost'}
 MEDIA_ERRORS = {'media_unavailable','media_reference_changed','unsupported_media_type',
     'media_hash_mismatch','media_size_mismatch','media_size_limit','media_metadata_unavailable',
-    'invalid_media_path','media_timeout','media_network_error'}
+    'invalid_media_path','media_timeout','media_network_error','media_storage_unavailable'}
+LOCAL_STORAGE_ERRORS = {'storage_unavailable','media_storage_unavailable'}
 PHASE_STATES = {
     'connection':{'connecting','connected','retry_wait','blocked','stopped'},
     'live_capture':{'starting','receiving','backlogged','paused','stopped'},
     'history':{'scanning','waiting','error','stopped'},
 }
-PHASE_REASONS = CONNECTION_ERRORS | {'provider_ready','capture_ready','capture_draining',
+PHASE_REASONS = CONNECTION_ERRORS | {'provider_ready','capture_ready','capture_draining','capture_quarantined',
     'collector_shutdown','history_scan','history_scan_finished','provider_temporarily_unavailable',
     'collector_starting','operator_resumed'}
 
@@ -52,10 +53,63 @@ def operations(row, history, files, now=None):
         full_history_verified=False, collector_running=running)
     phases['history']=phase
     counts=files['download'];errors=files.get('download_errors',{})
+    diagnostics=[]
+    error_states=files.get('download_error_states',{})
+    for code,count in sorted(errors.items()):
+        states=error_states.get(code)
+        if states:
+            diagnostics.extend({'reason_code':code,'count':number,'job_state':state,
+                **describe(code,job_state=state)} for state,number in sorted(states.items()))
+        else:diagnostics.append({'reason_code':code,'count':count,**describe(code)})
+    storage_paused=error_states.get('paused_storage',{}).get('queued',errors.get('paused_storage',0))
+    retry_queued=sum(states.get('queued',0) for code,states in error_states.items()
+        if code not in ('paused_storage','retry_exhausted'))
     phases['media']={'state':'processing' if counts['leased'] else
+        'storage_unavailable' if errors.get('storage_unavailable') else
         'paused_storage' if errors.get('paused_storage') else 'needs_attention' if counts['failed'] else
         'queued' if counts['queued'] else 'idle',
-        'counts':counts,'errors':errors,'diagnostics':[{'reason_code':code,'count':count,**describe(code)}
-            for code,count in sorted(errors.items())],'independent_of_connection':True,
-        'storage_paused_jobs':errors.get('paused_storage',0)}
+        'counts':counts,'errors':errors,'diagnostics':diagnostics,'independent_of_connection':True,
+        'storage_paused_jobs':storage_paused,'storage_paused':bool(storage_paused),
+        'storage_unavailable_jobs':errors.get('storage_unavailable',0),
+        'terminal_failed_jobs':counts['failed'],'needs_attention':bool(counts['failed']),
+        'retry_queued_jobs':retry_queued}
     return phases
+
+
+LIVE_CONFIRM_SECONDS=60
+RECENT_LIVE_EVENT_SECONDS=300
+
+
+def _time(value):
+    if isinstance(value,datetime):return value
+    try:return datetime.fromisoformat(value) if isinstance(value,str) else None
+    except ValueError:return None
+
+
+def liveness(phases, now=None):
+    """Live-session health, independent of new messages and of history coverage."""
+    now=now or datetime.now(timezone.utc)
+    connection=phases.get('connection') or {}
+    capture=phases.get('live_capture') or {}
+    # The drain loop refreshes live_capture about every 15 seconds and runs only
+    # while the provider session is open; a disconnect ends the collector run.
+    confirmed=_time(capture.get('observed_at')) if capture.get('state') in ('receiving','backlogged') else None
+    age=round(max(0,(now-confirmed).total_seconds()),1) if confirmed else None
+    last=capture.get('last_commit') or {}
+    event=_time(last.get('committed_by'))
+    pending=capture.get('pending_events')
+    if connection.get('collector_running') is not True:state='collector_not_running'
+    elif connection.get('state')=='blocked':state='blocked'
+    elif connection.get('state')!='connected':state='not_connected'
+    elif age is None or age>LIVE_CONFIRM_SECONDS:state='unconfirmed'
+    elif pending:state='capture_backlogged'
+    elif event and (now-event).total_seconds()<=RECENT_LIVE_EVENT_SECONDS:state='receiving'
+    else:state='idle_connected'
+    return {'state':state,'connected':state in ('receiving','idle_connected','capture_backlogged'),
+        'quiet_but_healthy':state=='idle_connected',
+        'session_confirmed_at':confirmed.isoformat() if confirmed else None,'confirmation_age_seconds':age,
+        'confirm_window_seconds':LIVE_CONFIRM_SECONDS,
+        'last_live_event_at':event.isoformat() if event else None,'last_live_event_origin':last.get('origin'),
+        'pending_live_events':pending,'basis':'collector_drain_refresh_while_provider_session_open',
+        'notice':'Independent of new messages, history gaps and catch-up. Confirms an open provider session, '
+            'not that every provider callback was delivered.'}

@@ -76,7 +76,8 @@ def test_page_commit_failure_preserves_previous_cursor_and_spool(wa):
     w.state.apply=fail
     with pytest.raises(RuntimeError,match='db_offline'):asyncio.run(w.sync_once())
     assert not any(k in w.state.progress('123@c.us','user') for k in ['head','history_before','catchup_before'])
-    assert len(list(w.spool.path.glob('*.json')))==2
+    # The committed first message left the spool; the failed one waits for replay.
+    assert len(list(w.spool.path.glob('*.json')))==1
     w.state.apply=original;w.spool.drain(original);asyncio.run(w.sync_once())
     assert len(s.search(key)['items'])==2
 
@@ -119,7 +120,8 @@ def test_pending_history_is_not_reported_as_exhausted_and_gap_is_visible(wa):
     p=w.state.progress('123@c.us','user');assert p['gap']
     with s.pool.connection() as c:
         row=c.execute("SELECT * FROM source_status WHERE account='wa-one'").fetchone()
-    assert row['status']=='degraded' and row['detail_code']=='whatsapp_catchup_gap' and row['coverage']=='partial'
+    # Missing history does not make live receiving look broken.
+    assert row['status']=='receiving' and row['detail_code']=='whatsapp_catchup_gap' and row['coverage']=='partial'
 
 
 def test_node_raw_spool_is_compatible_with_python_validator(tmp_path):
@@ -295,9 +297,13 @@ def test_whatsapp_media_parameters_normalize_before_durable_ingest(mime,expected
 
 
 def test_whatsapp_mime_controls_remain_rejected():
+    # The name is a stable test identity: control characters are still rejected
+    # as MIME text, but now neutralized so a hostile sender cannot stop capture.
     from messaging_service.adapters import whatsapp_message
     raw={'chatId':'123@c.us','messageId':'false_123@c.us_AUDIO','timestamp':1800000000,'hasMedia':True,'mimetype':'audio/ogg; codecs=opus\r\nInjected: header','filesize':123}
-    with pytest.raises(ValueError):whatsapp_message('test',raw)
+    # A hostile sender must not stop capture, and no header text survives.
+    media=whatsapp_message('test',raw)['media'][0]
+    assert media['mime']=='application/octet-stream' and 'Injected' not in json.dumps(media)
 
 
 def test_failed_chat_moves_behind_other_chats_after_restart_without_advancing_cursor(wa):
