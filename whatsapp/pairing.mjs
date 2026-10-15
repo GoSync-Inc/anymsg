@@ -5,7 +5,8 @@ export class PairingError extends Error {}
 async function closeCleanly(client,timeoutMs) {
   // Puppeteer Browser.close() may swallow its own errors. Observe the actual
   // Chromium exit before destroy, including a process that has already exited.
-  const child=client.pupBrowser?.process?.();
+  const browser=client.pupBrowser;
+  const child=browser?.process?.();
   let onExit,timer;
   const exited=child ? new Promise(resolve=>{
     if(child.exitCode!=null || child.signalCode!=null)
@@ -14,7 +15,14 @@ async function closeCleanly(client,timeoutMs) {
   }) : Promise.resolve(null);
   try {
     const [,outcome]=await Promise.race([
-      Promise.all([Promise.resolve().then(()=>client.destroy()),exited]),
+      Promise.all([Promise.resolve().then(async()=>{
+        // whatsapp-web.js 1.34.7 checks the removed isConnected() method and
+        // silently skips closing Puppeteer 25. Close our owned browser first;
+        // still require the observed clean process exit and auth cleanup.
+        if(child && child.exitCode==null && child.signalCode==null &&
+            typeof browser.close==='function')await browser.close();
+        await client.destroy();
+      }),exited]),
       new Promise((resolve,reject)=>{
         timer=setTimeout(()=>reject(new PairingError('pairing_close_timeout')),timeoutMs);
       }),
