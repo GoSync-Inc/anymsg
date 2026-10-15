@@ -202,6 +202,12 @@ class Store:
             dataset=self.dataset(c,p)
             accounts = c.execute('SELECT id,platform,label,synthetic FROM accounts WHERE id=ANY(%s) ORDER BY id',
                                  ([r['id'] for r in dataset['sources']],)).fetchall()
+            supported_by_account={}
+            for account in accounts:
+                provider=account_provider(c,account['id'],account['platform'])
+                supported=[row['operation'] for row in operation_manifest(account['platform'],provider=provider)
+                           if row['supported']]
+                supported_by_account[account['id']]={'provider':provider,'count':len(supported),'operations':supported}
             features={'read':['search','history','context','updates','reviews','search_people','search_files','get_file_text','get_file_occurrences','get_sync_status','get_file_segments','resolve_reference','preview_message'], 'download':['attachment'], 'cursor-write':['ack'], 'send':['send_message','get_send_status']}
             if 'read' in p['permissions']:
                 features['review-write']=['record_review']
@@ -283,9 +289,7 @@ class Store:
                     'supported_count_by_platform':{platform:sum(item['supported'] for item in operation_manifest(platform))
                                                    for platform in ('telegram','whatsapp')},
                     'platform_counts_basis':'legacy_defaults_use_account_manifest_for_actual_support',
-                    'supported_by_account':{a['id']:{'provider':account_provider(c,a['id'],a['platform']),
-                        'count':sum(item['supported'] for item in operation_manifest(a['platform'],
-                            provider=account_provider(c,a['id'],a['platform'])))} for a in accounts},
+                    'supported_by_account':supported_by_account,
                     'availability_tool':'list_messenger_operations','account_opt_in_required':True,
                     'independent_key_permissions':True,'new_permissions_inherited_by_existing_keys':False,
                     'administration':['groups','contacts','account_profile'],

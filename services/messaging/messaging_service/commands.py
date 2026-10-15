@@ -228,6 +228,7 @@ def manifest(c,p,account):
     policy=c.execute('SELECT * FROM account_policies WHERE account=%s',(account,)).fetchone()
     items=[]
     for entry in operation_manifest(row['platform'],provider=provider):
+        if not entry['supported']:continue
         required=_required_permissions(entry['permission'],entry['operation'])
         permitted_here=(not(set(required)-set(p['permissions'])) and
                         (not entry['full_account'] or p['chat_ids'] is None) and
@@ -300,7 +301,7 @@ def enqueue(store,c,p,account,operation,chat_id='',message_id='',expected_revisi
     return _public(row,c,p)
 
 
-def _check_saved(store,c,p,row,*,ready=True,check_versions=True,verify_file=True):
+def _check_saved(store,c,p,row,*,ready=True,check_versions=True,verify_file=True,check_dispatch=True):
     if row['principal']!=p['id'] or str(row['key_id'])!=str(p['key_id']):raise APIError('not_found',404)
     payload=row['payload']
     binding=payload.get('authorization_binding')
@@ -315,10 +316,12 @@ def _check_saved(store,c,p,row,*,ready=True,check_versions=True,verify_file=True
         raise APIError('operation_access_changed',409)
     _account(c,p,row['account'])
     if binding['full_account'] and p['chat_ids'] is not None:raise APIError('forbidden',403)
-    if row['status'] not in ('queued','dispatching'):
+    if not check_dispatch or row['status'] not in ('queued','dispatching'):
         # The completed operation may itself edit/delete the target, archive a
         # chat, or revoke its invitation. Receipts remain readable without
         # authorizing another action or requiring its former revision to exist.
+        # Passive status reads use the same scope checks while still pending;
+        # worker admission/preflight independently revalidate dispatch support.
         def scoped_message(message_id,chat_id):
             message=c.execute('SELECT account,chat FROM messages WHERE id=%s',(message_id,)).fetchone()
             if not message or message['account']!=row['account'] or message['chat']!=chat_id:
@@ -360,7 +363,7 @@ def status(store,c,p,operation_id):
         if (row['expires_at']<=observed or not lease or lease['epoch']!=row['lease_epoch'] or
             lease['expires_at']<=observed):
             row={**row,'status':'unknown','error_code':'operation_result_unknown'}
-    _check_saved(store,c,p,row,ready=False,check_versions=False)
+    _check_saved(store,c,p,row,ready=False,check_versions=False,check_dispatch=False)
     targets(p,[row['id']])
     return _public(row,c,p)
 

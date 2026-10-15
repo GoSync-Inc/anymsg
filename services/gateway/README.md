@@ -28,6 +28,14 @@ and argument schema. There is no generic arbitrary backend executor. Unknown wri
 are not retried. Capability discovery intersects profile, local grants and current
 backend permissions. An unavailable module leaves platform introspection available.
 
+Messenger-operation enums also intersect the backend's explicit supported names
+for each permitted account. A mixed Telegram/WhatsApp key sees their union; each
+preview/execute rechecks the exact account before dispatch. Unsupported operations
+are omitted from account catalogs. Missing support names hide live actions rather
+than inferring them from a provider name or count. Scoped receipt reads remain
+available across provider changes under the existing action permission ceiling.
+Upgrade the messaging backend before the gateway when adding this contract.
+
 Original files are streamed through bounded, short-lived bearer tickets with separate
 connection pools. URLs cannot select another origin or path. Tickets recheck current
 local policy and credential binding, and poll the backend's existing HEAD download
