@@ -107,7 +107,8 @@ def decorate_messages(c,p,rows,*,include_system=False):
     siblings=c.execute('''SELECT s.account,s.chat,s.sent_at,a.platform,count(*) AS n,
         bool_and(s.provider_id ~ '^[0-9]{1,18}$') AS numeric_ids
         FROM messages s JOIN accounts a ON a.id=s.account
-        LEFT JOIN message_metadata md ON md.message=s.id AND md.revision=s.revision
+        LEFT JOIN LATERAL (SELECT current.metadata FROM message_metadata current
+          WHERE current.message=s.id AND current.revision=s.revision OFFSET 0) md ON true
         WHERE NOT s.deleted AND '''+scope+' AND '+('true' if include_system else visible_sql('s','md'))+'''
           AND (s.account,s.chat,s.sent_at) IN(SELECT account,chat,sent_at FROM messages WHERE id=ANY(%s))
         GROUP BY s.account,s.chat,s.sent_at,a.platform''',[*args,ids]).fetchall()
