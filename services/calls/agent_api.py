@@ -306,12 +306,12 @@ class AgentAPI:
         stop,
         outbound,
         archive_factory=None,
-        browser=True,
+        readiness=None,
     ):
         self.service, self.registry = service, registry
         self.start, self.stop, self.outbound = start, stop, outbound
         self.archive_factory = archive_factory or self.archive
-        self.browser = browser
+        self.readiness = readiness
 
     @staticmethod
     def archive(principal):
@@ -336,33 +336,6 @@ class AgentAPI:
         if brief.get("owner_principal") != principal.id:
             raise ServiceError("not_found_or_forbidden", 403)
         return value
-
-    def channel_status(self, principal):
-        """Configured state per granted channel in preflight order; no provider IO."""
-        result = {}
-        for channel in principal.channels:
-            if channel == "browser":
-                result[channel] = {
-                    "state": "configured" if self.browser else "disabled"
-                }
-                continue
-            settings = getattr(self.outbound, "settings", None)
-            allowed = set(principal.destinations.get(channel, []))
-            allowed &= set(settings.allowed.get(channel, [])) if settings else set()
-            account = "telegram" if channel == "telegram" else "twilio"
-            state = (
-                "calling_disabled"
-                if not settings or not settings.enabled
-                else "recipient_not_allowed"
-                if not allowed
-                else "model_key_required"
-                if not self.outbound.key()
-                else "provider_not_configured"
-                if account not in self.outbound.providers
-                else "configured"
-            )
-            result[channel] = {"state": state, "allowed_recipients": len(allowed)}
-        return result
 
     @staticmethod
     def route(principal, brief):
@@ -423,13 +396,13 @@ class AgentAPI:
                 "principal": principal.id,
                 "permissions": principal.scopes,
                 "channels": principal.channels,
-                "channel_status": self.channel_status(principal),
                 "limits": LIMITS,
                 "scope": "owned_briefs_and_calls",
                 "archive_configured": bool(principal.archive_config),
                 "shared_learning": False,
                 "owner_decision_write": False,
                 "live_call_verification": "not_claimed",
+                **({'calling_readiness':self.readiness(principal)} if self.readiness else {}),
             }
         if name in {"prepare_call", "prepare_external_call"}:
             selected = args.brief

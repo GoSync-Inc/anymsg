@@ -268,7 +268,7 @@ async def test_http_surface_separates_owner_control_and_bounded_agent_body(tmp_p
             ).status_code == 401
             assert (
                 await c.post("/api/credentials", json={}, headers=headers)
-            ).status_code == 403
+            ).status_code == 401
             cap = await c.post("/v1/capabilities", json={}, headers=headers)
             assert cap.status_code == 200 and cap.json()["principal"] == "alice"
             assert (
@@ -375,37 +375,11 @@ async def test_lists_are_owned_newest_first_paged_and_summarized(tmp_path):
     service.close()
 
 
-async def test_capabilities_report_channel_configuration_and_enforced_limits(tmp_path):
+async def test_capabilities_report_enforced_limits(tmp_path):
     path, _, _ = registry(tmp_path)
     service = VoiceService(tmp_path / "data")
-    keys = []
-    settings = CallingSettings(
-        allowed={"phone": ["+12025550123", "+12025550199"], "sip": []}
-    )
-    outbound = Outbound(service, lambda: keys[0] if keys else None, settings, {})
-    surface = api(service, path, outbound)
-
-    async def status():
-        return (await surface.call("alice", "capabilities", {}))["channel_status"]
-
-    assert await status() == {
-        "browser": {"state": "configured"},
-        "phone": {"state": "calling_disabled", "allowed_recipients": 1},
-    }
-    settings.enabled = True
-    assert (await status())["phone"]["state"] == "model_key_required"
-    keys.append("synthetic")
-    assert (await status())["phone"]["state"] == "provider_not_configured"
-    outbound.providers["twilio"] = object()
-    assert (await status())["phone"] == {"state": "configured", "allowed_recipients": 1}
-    settings.allowed = {}
-    assert (await status())["phone"] == {
-        "state": "recipient_not_allowed",
-        "allowed_recipients": 0,
-    }
-    surface.browser = False
+    surface = api(service, path, None)
     caps = await surface.call("alice", "capabilities", {})
-    assert caps["channel_status"]["browser"] == {"state": "disabled"}
     assert caps["limits"] == {
         "active_calls_per_service": 1,
         "max_duration_secs": {"minimum": 30, "maximum": 600, "default": 600},

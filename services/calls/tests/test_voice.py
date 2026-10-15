@@ -81,4 +81,29 @@ async def test_pipeline_error_marks_failure_without_leaking_provider_error_paylo
             messages.append(value)
     await voice.report_error(state,RTVI())
     assert state['end_reason']=='model_error'
-    assert messages[0]['kind']=='error' and 'Billing' in messages[0]['message']
+    assert messages[0]['kind']=='error' and messages[0]['code']=='unknown'
+
+
+@pytest.mark.parametrize('status,category,code',[
+    (401,None,'authentication'),(402,None,'quota'),(403,None,'authorization'),
+    (429,None,'rate_limit'),(None,'quota','quota'),(None,'private-fixture','unknown')])
+async def test_model_failure_records_only_safe_category_and_status(tmp_path,status,category,code):
+    from pipecat.frames.frames import ErrorFrame
+    from voice import report_error
+    secret='fixture-key-MUST-NOT-LEAK'
+    class ProviderError(Exception):
+        status_code=status
+    store=VoiceService(tmp_path)
+    brief=store.prepare(BriefInput(goal='Synthetic',counterparty='Test',success_fields=['time']),[])
+    call=store.start(brief['id']);state={'service':store,'call_id':call['id']};messages=[]
+    class RTVI:
+        async def send_server_message(self,value):messages.append(value)
+    frame=ErrorFrame(error=secret,exception=ProviderError(secret),category=SimpleNamespace(value=category))
+    await report_error(state,RTVI(),frame)
+    assert messages[0]['code']==code
+    event=store.get_call(call['id'])['events'][-1]
+    assert event['kind']=='model_error' and event['code']==code
+    assert event.get('http_status')==status
+    import json
+    assert secret not in json.dumps([messages,event])
+    store.close()

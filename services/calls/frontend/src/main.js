@@ -4,6 +4,7 @@ import { ActivityGate, TurnTiming, summarize } from './timing.mjs';
 import { startRemoteAudio, stopRemoteAudio } from './audio-playback.mjs';
 import { AudioHealth, audioHealthText } from './audio-health.mjs';
 import { settleDisconnectedCall } from './call-cleanup.mjs';
+import { MicrophoneControl, bindTalkButton } from './microphone.mjs';
 import { createLearningUI } from './learning.mjs';
 import './style.css';
 
@@ -16,6 +17,16 @@ let config, brief = null, current = null, client = null, active = false, stoppin
 let audioContext = null, probes = [], poller = null, audioPoller = null, timing = new TurnTiming(), lastRender = '';
 let inboxSignature='';
 let transport=null,health=new AudioHealth(),healthPoller=null,healthBusy=false,playerWaiting=0;
+const microphone=new MicrophoneControl(enabled=>client?.enableMic(enabled),mic=>{
+  $('talk').setAttribute('aria-pressed',String(mic.enabled));
+  $('talk').textContent=mic.enabled?'Говори · отпусти, чтобы слушать':'Удерживай, чтобы говорить';
+  $('mic-state').textContent=mic.mode
+    ? (mic.enabled?'Микрофон включён, пока держишь кнопку.':'Микрофон выключен. Для ответа удерживай кнопку или пробел, когда она в фокусе.')
+    : 'Микрофон открыт во время разговора. В шумном месте включи режим по кнопке перед запуском.';
+  $('mute').textContent=mic.enabled?'Выключить микрофон':'Включить микрофон';
+  locks();
+});
+bindTalkButton($('talk'),microphone,window,document);
 Object.assign(outcomeLabels,{refused:'Собеседник отказался от разговора.',unavailable:'Собеседник сейчас недоступен.'});
 const learningUI=createLearningUI({api,node,error,currentCall:()=>current,isActive:()=>active,
   promptChanged:async()=>{invalidate();await refreshConfig();}});
@@ -32,11 +43,15 @@ function node(tag,text,cls) { const n=document.createElement(tag); if(text!==und
 function status(text,isActive=false) { $('status').textContent=text; $('status').classList.toggle('active',isActive); }
 function ms(value) { return Number.isFinite(value) ? `${Math.round(value)} мс` : '—'; }
 function locks() {
-  for (const id of ['goal','counterparty','language','voice','conversation-mode','dialog-engine','self-reference','owner-notes','supervisor-notes','fields','approval-fields','account','query','search','prepare','keys-toggle']) $(id).disabled=active || preparing;
+  for (const id of ['goal','counterparty','language','voice','grok-voice','conversation-mode','dialog-engine','self-reference','owner-notes','supervisor-notes','fields','approval-fields','account','query','search','prepare','keys-toggle']) $(id).disabled=active || preparing;
   const joinWaiting=current?.id===config?.active_call_id && current?.status==='waiting_for_browser' && brief?.id===current?.brief_id;
-  $('start').disabled=config?.channels?.browser==='local_rehearsal_only' || active || preparing || !brief || !config?.credentials.gemini || (!!config?.active_call_id && !joinWaiting);
+  $('start').disabled=config?.channels?.browser==='local_rehearsal_only' || active || preparing || !brief || !config?.credentials[brief?.dialog_engine==='grok_realtime'?'xai':'gemini'] || (!!config?.active_call_id && !joinWaiting);
   $('stop').disabled=!active;
-  $('mute').disabled=!active || !client;
+  $('push-to-talk').disabled=active || preparing;
+  $('talk').hidden=!microphone.mode;
+  $('talk').disabled=!active || !client || !microphone.ready;
+  $('mute').hidden=microphone.mode;
+  $('mute').disabled=!active || !client || !microphone.ready;
   document.querySelectorAll('.source-row input').forEach(el=>el.disabled=active || preparing);
 }
 function invalidate() {
@@ -47,7 +62,7 @@ function invalidate() {
 }
 function formBody() {
   return {goal:$('goal').value.trim(),counterparty:$('counterparty').value.trim(),language:$('language').value,
-    voice:$('voice').value,conversation_mode:$('conversation-mode').value,dialog_engine:$('dialog-engine').value,self_reference:$('self-reference').value,owner_notes:$('owner-notes').value.trim(),supervisor_notes:$('supervisor-notes').value.trim(),
+    voice:$('voice').value,grok_voice:$('grok-voice').value,conversation_mode:$('conversation-mode').value,dialog_engine:$('dialog-engine').value,self_reference:$('self-reference').value,owner_notes:$('owner-notes').value.trim(),supervisor_notes:$('supervisor-notes').value.trim(),
     success_fields:$('fields').value.split(',').map(v=>v.trim()).filter(Boolean),
     approval_fields:$('approval-fields').value.split(',').map(v=>v.trim()).filter(Boolean),source_message_ids:[...selected.keys()]};
 }
@@ -57,8 +72,7 @@ async function refreshConfig() {
     const link=node('a','Браузерная репетиция на этом Mac');link.id='local-rehearsal-link';link.href='http://127.0.0.1:13842/';
     $('start').parentElement.before(link);
   }
-  $('keys-toggle').textContent=config.credentials.gemini ? 'Ключ Gemini сохранён' : 'Подключить Gemini';
-  $('model-label').textContent=config.model;
+  providerUI();
   $('archive-label').textContent=config.archive.connected ? 'AnyMsg подключён' : 'AnyMsg недоступен';
   if (!config.archive.connected) $('archive-label').title='Можно проверить поручение с собственными фактами. Поиск сообщений пока недоступен.';
   const previous=$('account').value;
@@ -68,10 +82,24 @@ async function refreshConfig() {
     $('voice').replaceChildren(...config.voices.map(v=>new Option(v,v)));
     $('voice').value='Puck';
   }
+  if (!$('grok-voice').options.length) {
+    $('grok-voice').replaceChildren(...config.voice_providers.xai.voices.map(v=>new Option(v,v)));
+    $('grok-voice').value='rex';
+  }
   locks();
+}
+function providerUI() {
+  const grok=$('dialog-engine').value==='grok_realtime', provider=grok?'xai':'gemini', label=grok?'xAI':'Gemini';
+  $('grok-voice-field').hidden=!grok;
+  $('key-provider').value=provider;
+  $('voice').parentElement.hidden=grok;
+  $('model-label').textContent=grok?config?.voice_providers.xai.model:config?.model;
+  $('keys-toggle').textContent=config?.credentials[provider]?`Ключ ${label} сохранён`:`Подключить ${label}`;
 }
 function snapshot(b) {
   $('dialog-engine').value=b.dialog_engine || 'gemini_live';
+  $('grok-voice').value=b.grok_voice || 'rex';
+  providerUI();
   $('prompt').textContent=b.prompt;
   $('prompt-version').textContent=`${b.prompt_version} / ${b.model} / ${b.snapshot_sha256.slice(0,12)}`;
   $('facts').replaceChildren(...b.facts.map(f=>{
@@ -294,9 +322,9 @@ async function start() {
     current=await api('/api/calls/start','POST',{brief_id:brief.id});lastRender='';renderRecord(current,true);
     if(current.status!=='waiting_for_browser')throw new Error('Эта проверка уже завершена. Подготовь новое поручение.');
     transport=new SmallWebRTCTransport({iceServers:[]});
-    client=new PipecatClient({transport,enableMic:true,enableCam:false,callbacks:{
+    client=new PipecatClient({transport,enableMic:!microphone.mode,enableCam:false,callbacks:{
       onTrackStarted:attachTrack,
-      onBotReady:()=>{status('Разговор идёт',true);$('call-hint').textContent='Говори как собеседник. На вопросы владельца можно ответить после завершения.';locks();},
+      onBotReady:()=>{if(!active || stopping)return;microphone.start();status('Разговор идёт',true);$('call-hint').textContent='Говори как собеседник. На вопросы владельца можно ответить после завершения.';locks();},
       onServerMessage:message=>{if(message.kind==='error'){error(message.message);stop(false);}else pollRecord().catch(()=>{});},
       onError:()=>{error('Сбой подключения или передачи звука. Подробности сохраняются в диагностике разговора.');stop();},
       onDisconnected:()=>{if(active && !stopping)stop(false);},
@@ -312,7 +340,7 @@ async function start() {
 }
 async function stop(requestStop=true) {
   if(stopping || !active)return;
-  stopping=true; active=false;clearInterval(poller);clearInterval(audioPoller);
+  stopping=true; active=false;microphone.stop();clearInterval(poller);clearInterval(audioPoller);
   clearInterval(healthPoller);
   // Collect while the peer still exists, before server stop or client.disconnect.
   await pollHealth();
@@ -347,17 +375,19 @@ async function loadHistory() {
 $('keys-toggle').onclick=()=>{$('keys-panel').hidden=!$('keys-panel').hidden;if(!$('keys-panel').hidden)$('gemini-key').focus();};
 $('keys-form').onsubmit=async e=>{
   e.preventDefault();error();
-  try {await api('/api/credentials','POST',{gemini:$('gemini-key').value});$('gemini-key').value='';$('key-feedback').textContent='Ключ сохранён в памяти. Доступ к модели проверяется при первом разговоре.';await refreshConfig();}
+  try {await api('/api/credentials','POST',{[$('key-provider').value]:$('gemini-key').value});$('gemini-key').value='';$('key-feedback').textContent='Ключ сохранён. Доступ к модели проверяется при разговоре.';await refreshConfig();}
   catch(e){error(e.message);}
 };
-$('forget-key').onclick=async()=>{if(active)await stop();try{await api('/api/credentials','DELETE');$('gemini-key').value='';$('key-feedback').textContent='Ключ удалён из памяти.';await refreshConfig();}catch(e){error(e.message);}};
+$('forget-key').onclick=async()=>{if(active)await stop();try{await api('/api/credentials','DELETE');$('gemini-key').value='';$('key-feedback').textContent='Ключи удалены.';await refreshConfig();}catch(e){error(e.message);}};
 $('brief-form').onsubmit=prepare;
-for(const id of ['goal','counterparty','language','voice','conversation-mode','dialog-engine','self-reference','owner-notes','supervisor-notes','fields','approval-fields'])$(id).addEventListener('input',invalidate);
+for(const id of ['goal','counterparty','language','voice','grok-voice','conversation-mode','dialog-engine','self-reference','owner-notes','supervisor-notes','fields','approval-fields'])$(id).addEventListener('input',invalidate);
+$('dialog-engine').addEventListener('change',()=>{providerUI();$('key-provider').value=$('dialog-engine').value==='grok_realtime'?'xai':'gemini';});
 $('inbox-refresh').onclick=()=>loadInbox().catch(e=>error(e.message));
 $('search').onclick=search;
 $('query').onkeydown=e=>{if(e.key==='Enter'){e.preventDefault();search();}};
 $('start').onclick=start;$('stop').onclick=stop;
-$('mute').onclick=()=>{if(!client)return;const enabled=!client.isMicEnabled;client.enableMic(enabled);$('mute').textContent=enabled?'Выключить микрофон':'Включить микрофон';};
+$('mute').onclick=()=>microphone.toggle();
+$('push-to-talk').onchange=()=>microphone.setMode($('push-to-talk').checked);
 $('review-form').onsubmit=async e=>{
   e.preventDefault();if(!current || active)return;
   try {renderRecord(await api(`/api/calls/${current.id}/result`,'POST',{review:{task:$('task-rating').value,naturalness:Number($('naturalness').value),notes:$('review-notes').value.trim()}}));$('review-feedback').textContent='Оценка сохранена.';await loadHistory();}
