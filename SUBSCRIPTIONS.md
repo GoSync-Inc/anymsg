@@ -1,5 +1,8 @@
 # Durable subscriptions and agent delivery
 
+Current delivery work and priority: [BACKLOG.md](BACKLOG.md), DK-08–DK-10.
+The planned sections below are design reference, not a separate delivery queue.
+
 Status: **0.9.16 / schema 26 implements the general subscription core**:
 explicit sources and senders, persistent lifecycle, committed-event matching and
 passive event pages. The delivery architecture below also describes subsequent
