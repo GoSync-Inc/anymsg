@@ -377,7 +377,16 @@ func runLane(ctx context.Context, p *Provider, in io.Reader, out io.Writer, allo
 				return e
 			}
 		} else if e = emit(map[string]any{"id": r.ID, "result": result}); e != nil {
-			return e
+			// An oversized result was never written, so the pipe is still
+			// synchronized. Answer a read (e.g. a large dialogs catalog) with an
+			// error frame, as the Node lane does, instead of ending the native
+			// process. A mutation keeps the lane-exit unknown outcome.
+			if e.Error() != "provider_response_too_large" || r.Method == "send_text" || r.Method == "messenger_operation" {
+				return e
+			}
+			if e = emit(map[string]any{"id": r.ID, "error": "provider_response_too_large"}); e != nil {
+				return e
+			}
 		}
 	}
 	return scanner.Err()
