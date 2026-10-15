@@ -92,7 +92,7 @@ func TestNativeDeleteIsGlobalOwnMessageOnly(t *testing.T) {
 		if pm == nil || pm.GetType() != waE2E.ProtocolMessage_REVOKE || pm.GetKey().GetID() != m.Info.ID || !pm.GetKey().GetFromMe() || pm.GetKey().GetRemoteJID() != m.Info.Chat.String() {
 			t.Fatal("wrong revoke target")
 		}
-		return whatsmeow.SendResponse{ID: extra.ID, Chat: to, Timestamp: time.Unix(1700000001, 0)}, nil
+		return whatsmeow.SendResponse{ID: extra.ID, Chat: to, Sender: d.owner, Timestamp: time.Unix(1700000001, 0)}, nil
 	}
 	r, e := executeOperation(context.Background(), job, d)
 	operationResult(t, r, e, "submitted")
@@ -109,6 +109,26 @@ func TestNativeDeleteIsGlobalOwnMessageOnly(t *testing.T) {
 	requireError(t, e, "operation_target_invalid")
 	if calls != 1 {
 		t.Fatal("unsafe delete fallback sent")
+	}
+}
+
+func TestNativeOperationSendIncludesWireArchiveReference(t *testing.T) {
+	d := operationsFake(t)
+	requested, _ := ParseChatID(operationsChat)
+	wireChat := types.NewJID("999900001111", types.HiddenUserServer)
+	d.ownerLID = types.NewJID("999900002222", types.HiddenUserServer)
+	d.lidForPN = func(context.Context, types.JID) (types.JID, error) { return wireChat, nil }
+	d.pnForLID = func(context.Context, types.JID) (types.JID, error) { return requested, nil }
+	d.send = func(_ context.Context, _ types.JID, _ *waE2E.Message, extra whatsmeow.SendRequestExtra) (whatsmeow.SendResponse, error) {
+		return whatsmeow.SendResponse{ID: extra.ID, Chat: wireChat, Sender: d.ownerLID, Timestamp: time.Unix(1700000000, 0)}, nil
+	}
+	r, e := executeOperation(context.Background(), operationJob("send_location", operationsChat, map[string]any{"latitude": 1.0, "longitude": 2.0}), d)
+	operationResult(t, r, e, "confirmed")
+	value := r.(map[string]any)
+	ref, ok := value["data"].(map[string]any)["archive_reference"].(map[string]any)
+	if !ok || ref["provider_chat_id"] != LegacyChatID(wireChat) || ref["provider_message_id"] != "true_"+LegacyChatID(wireChat)+"_TESTSTANZA" ||
+		value["provider_message_id"] != "true_"+operationsChat+"_TESTSTANZA" {
+		t.Fatal("operation lost compatible public or exact wire reference", value)
 	}
 }
 
@@ -325,7 +345,7 @@ func TestNativeMessageOperationsTargetExactCapturedMessage(t *testing.T) {
 						t.Fatal("wrong pin")
 					}
 				}
-				return whatsmeow.SendResponse{ID: extra.ID, Chat: to, Timestamp: time.Unix(1700000001, 0)}, nil
+				return whatsmeow.SendResponse{ID: extra.ID, Chat: to, Sender: d.owner, Timestamp: time.Unix(1700000001, 0)}, nil
 			}
 			r, e := executeOperation(context.Background(), job, d)
 			operationResult(t, r, e, "submitted")
@@ -440,7 +460,7 @@ func TestNativeFileUploadVerifiedBeforeSendAndReauthorizedAfterUpload(t *testing
 				if doc.GetCaption() != "caption" || doc.GetFileName() != "test.pdf" || doc.GetFileLength() != uint64(len(data)) {
 					t.Fatal("wrong upload envelope")
 				}
-				return whatsmeow.SendResponse{ID: extra.ID, Chat: to, Timestamp: time.Unix(1700000000, 0)}, nil
+				return whatsmeow.SendResponse{ID: extra.ID, Chat: to, Sender: d.owner, Timestamp: time.Unix(1700000000, 0)}, nil
 			}
 			r, e := executeOperation(context.Background(), job, d)
 			outcome := "confirmed"
@@ -470,7 +490,7 @@ func TestNativeForwardStripsSourceContextAndRechecksSourceScope(t *testing.T) {
 		if !context.GetIsForwarded() || context.GetStanzaID() != "" || len(context.GetMentionedJID()) != 0 {
 			t.Fatal("private source context leaked")
 		}
-		return whatsmeow.SendResponse{ID: extra.ID, Chat: to, Timestamp: time.Unix(1700000001, 0)}, nil
+		return whatsmeow.SendResponse{ID: extra.ID, Chat: to, Sender: d.owner, Timestamp: time.Unix(1700000001, 0)}, nil
 	}
 	r, e := executeOperation(context.Background(), job, d)
 	operationResult(t, r, e, "confirmed")

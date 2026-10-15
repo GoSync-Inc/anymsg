@@ -22,7 +22,7 @@ GRANT SELECT(id,accounts,chat_ids,permissions,enabled,scope_version) ON principa
 GRANT SELECT(id,principal,revoked,expires_at,permissions,permission_version) ON api_keys TO messaging_collector;
 -- Rich payloads are immutable to the collector; it dispatches stored output only.
 GRANT SELECT ON outgoing_messages TO messaging_collector;
-GRANT UPDATE(status,started_at,finished_at,lease_epoch,provider_message_id,error_code)
+GRANT UPDATE(status,started_at,finished_at,lease_epoch,provider_message_id,error_code,archive_reference)
     ON outgoing_messages TO messaging_collector;
 GRANT INSERT(principal,key_id,operation,outcome,error_code,resource_ids,actor) ON audit_log TO messaging_collector;
 -- Provider proofs are immutable; only bounded publication cursors may advance.

@@ -134,10 +134,65 @@ def dispatch_payload(job,platform):
         raise SendRejected('send_target_invalid') from None
 
 
-def result(row,c=None):
+def archive_reference(job,receipt):
+    """Private provider proof; never replace the immutable requested destination.
+
+    Native WhatsApp verifies the PN↔LID pair against its session store. Here we
+    additionally bind the returned wire reference to the requested stanza, so a
+    malformed IPC receipt cannot attach a different message or group.
+    """
+    if 'archive_reference' not in receipt:return None  # Legacy providers/rows.
+    ref=receipt['archive_reference']
+    requested=job['provider_chat']; public=receipt['provider_message_id']
+    if (not isinstance(ref,dict) or set(ref)!={'provider_chat_id','provider_message_id'} or
+        not all(isinstance(v,str) and 1<=len(v)<=256 for v in ref.values())):
+        raise RuntimeError('send_receipt_mismatch')
+    chat,mid=ref['provider_chat_id'],ref['provider_message_id']
+    if not re.fullmatch(r'[a-zA-Z0-9_.:-]{1,140}@(c\.us|g\.us|lid)',chat):
+        raise RuntimeError('send_receipt_mismatch')
+    def suffix(target,value):
+        prefix='true_'+target+'_'
+        if not re.fullmatch(r'[a-zA-Z0-9_.:@-]{1,256}',value) or not value.startswith(prefix):
+            raise RuntimeError('send_receipt_mismatch')
+        rest=value[len(prefix):]
+        if not rest:raise RuntimeError('send_receipt_mismatch')
+        return rest
+    original,wire=suffix(requested,public),suffix(chat,mid)
+    if chat==requested:
+        # In groups only the verified owner's PN/LID suffix may differ; this is
+        # checked by the native provider. The stanza ID must still be identical.
+        if (original!=wire and (not chat.endswith('@g.us') or
+            original.rsplit('_',1)[0]!=wire.rsplit('_',1)[0])):
+            raise RuntimeError('send_receipt_mismatch')
+    elif (not re.fullmatch(r'[0-9]{1,20}@c\.us',requested) or
+          not re.fullmatch(r'[0-9]{1,20}@lid',chat) or original!=wire):
+        raise RuntimeError('send_receipt_mismatch')
+    return ref
+
+
+def project_reference(c,p,account,reference):
+    """Actual wire proof is metadata, never an implicit read grant to its alias."""
+    actual=None;reference_state='legacy_requested'
+    if reference:
+        chat=reference['provider_chat_id']
+        saved=c.execute('SELECT id FROM chats WHERE account=%s AND provider_chat=%s',
+            (account,chat)).fetchone() if c is not None else None
+        chat_id=saved['id'] if saved else stable_id('chat',account,chat)
+        if p is not None and permitted(p,account,chat_id):
+            actual={**reference,'chat_id':chat_id,'message_id':stable_id('msg',account,chat,reference['provider_message_id'])}
+            reference_state='provider_verified'
+        else:reference_state='scope_restricted'
+    return actual,reference_state
+
+
+def result(row,c=None,p=None):
     from .receipts import for_reference,unknown_evidence
-    receipt=for_reference(c,row['account'],row['provider_chat'],row['provider_message_id']) \
+    actual,reference_state=project_reference(c,p,row['account'],row.get('archive_reference'))
+    receipt=for_reference(c,row['account'],
+        actual['provider_chat_id'] if actual else row['provider_chat'],
+        actual['provider_message_id'] if actual else row['provider_message_id']) \
         if c is not None and row['status']=='sent' and row['provider_message_id'] else unknown_evidence()
+    if reference_state=='scope_restricted':receipt=unknown_evidence()
     artifact=row.get('render_artifact')
     artifact=artifact if isinstance(artifact,dict) else {}
     warning_codes=artifact.get('warnings',[]) if isinstance(artifact,dict) else []
@@ -145,8 +200,10 @@ def result(row,c=None):
         'send_id':row['id'],'status':row['status'],'account':row['account'],
         'chat_id':row['chat'],'provider_chat_id':row['provider_chat'],
         'provider_message_id':row['provider_message_id'],
-        'message_id':stable_id('msg',row['account'],row['provider_chat'],row['provider_message_id'])
-            if row['provider_message_id'] else None,
+        'message_id':actual['message_id'] if actual else
+            stable_id('msg',row['account'],row['provider_chat'],row['provider_message_id'])
+            if row['provider_message_id'] and reference_state!='scope_restricted' else None,
+        'archive_reference':actual,'archive_reference_state':reference_state,
         'created_at':row['created_at'],'expires_at':row['expires_at'],
         'finished_at':row['finished_at'],'error_code':row['error_code'],
         'agent_send':{'principal':row['principal'],'credential_id':row['key_id'],
@@ -195,7 +252,7 @@ def enqueue(c,p,account,chat_id,text,request_id,reply_to='',format='plain',
                 existing.get('render_policy')=={'link_preview':link_preview,'allow_lossy':allow_lossy} and
                 (existing.get('preview_digest') or '')==preview_digest)
         if not matches:raise APIError('idempotency_conflict',409)
-        return result(existing,c)
+        return result(existing,c,p)
     if not default_policy and not preview_digest:raise APIError('preview_required',409)
     draft=reviewed(c,p,account,chat_id,text,reply_to,format,link_preview,allow_lossy,chat,reply_id)
     if preview_digest and preview_digest!=draft['preview_digest']:raise APIError('preview_mismatch',409)
@@ -223,7 +280,7 @@ def enqueue(c,p,account,chat_id,text,request_id,reply_to='',format='plain',
         (p['id'],p['key_id'],p['scope_version'],p['key_permission_version'],request_id,request_hash,account,chat_id,chat['provider_chat'],
          artifact['provider_text'],reply_id,text,format,Jsonb(artifact),Jsonb(draft['render_policy']),preview_digest or None)).fetchone()
     targets(p,[chat_id,row['id']])
-    return result(row,c)
+    return result(row,c,p)
 
 
 def status(c,p,send_id):
@@ -239,7 +296,7 @@ def status(c,p,send_id):
         if not lease or lease['epoch']!=row['lease_epoch'] or lease['expires_at']<=observed:
             row={**row,'status':'unknown','error_code':'sender_interrupted'}
     targets(p,[row['chat'],row['id']])
-    return result(row,c)
+    return result(row,c,p)
 
 
 class OutgoingWorker:
@@ -321,9 +378,10 @@ class OutgoingWorker:
         st=self.state
         with st.archive.store.pool.connection() as c:
             st.archive.fence(c,st.account,st.lease)
-            c.execute('''UPDATE outgoing_messages SET status=%s,provider_message_id=%s,error_code=%s,
+            c.execute('''UPDATE outgoing_messages SET status=%s,provider_message_id=%s,error_code=%s,archive_reference=%s,
                 finished_at=clock_timestamp() WHERE id=%s AND status='dispatching' AND lease_epoch=%s''',
-                (status,provider_id,code,job['id'],st.lease[1]))
+                (status,provider_id,code,Jsonb(job['_archive_reference']) if job.get('_archive_reference') else None,
+                 job['id'],st.lease[1]))
 
     async def once(self):
         if await asyncio.to_thread(self.state.cooldown_remaining)>0:return False
@@ -345,6 +403,7 @@ class OutgoingWorker:
             provider_id=receipt.get('provider_message_id') if isinstance(receipt,dict) else None
             if not isinstance(provider_id,str) or not 1<=len(provider_id)<=256:
                 raise RuntimeError('send_receipt_missing')
+            job['_archive_reference']=archive_reference(job,receipt)
         except SendRejected as exc:
             code=str(exc) if str(exc) in ('send_expired','sending_disabled','send_target_invalid','send_access_changed') else 'send_rejected'
             terminal='expired' if code=='send_expired' else 'cancelled' if code=='send_access_changed' else 'failed'

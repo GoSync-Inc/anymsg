@@ -18,6 +18,7 @@ import (
 	"strconv"
 	"sync"
 	"sync/atomic"
+	"syscall"
 	"time"
 )
 
@@ -357,6 +358,9 @@ func runLane(ctx context.Context, p *Provider, in io.Reader, out io.Writer, allo
 		return enc.Encode(v)
 	}
 	for scanner.Scan() {
+		if err := ctx.Err(); err != nil {
+			return err
+		}
 		var r request
 		if json.Unmarshal(scanner.Bytes(), &r) != nil || r.ID < 1 || r.ID > 9007199254740991 || !allowed[r.Method] {
 			if e := emit(map[string]any{"id": r.ID, "error": "provider_operation_failed"}); e != nil {
@@ -380,12 +384,22 @@ func sendingFile() (*os.File, error) {
 	if e != nil || n < 3 {
 		return nil, errors.New("private_sending_channel_required")
 	}
-	f := os.NewFile(uintptr(n), "sending")
-	s, e := f.Stat()
-	if e != nil || s.Mode()&os.ModeSocket == 0 {
+	var info syscall.Stat_t
+	if e = syscall.Fstat(n, &info); e != nil || info.Mode&syscall.S_IFMT != syscall.S_IFSOCK {
 		return nil, errors.New("private_sending_channel_required")
 	}
-	return f, nil
+	return inheritedIPCFile(n, "sending")
+}
+
+func inheritedIPCFile(fd int, name string) (*os.File, error) {
+	// Python hands off blocking pipes/sockets. NewFile only registers inherited
+	// descriptors with Go's runtime poller if O_NONBLOCK is already set. Without
+	// it Close waits for an idle Read/Write forever while the peer stays open,
+	// so SIGTERM cannot drain the lanes. Set the flag before creating the File.
+	if err := syscall.SetNonblock(fd, true); err != nil {
+		return nil, err
+	}
+	return os.NewFile(uintptr(fd), name), nil
 }
 
 func (p *Provider) handleMessage(e *events.Message) error {

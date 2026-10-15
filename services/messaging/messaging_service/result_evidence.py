@@ -8,8 +8,11 @@ def send_provenance(c,rows):
     ids=list({r.get('id') or r['message'] for r in rows})
     sends=c.execute('''SELECT DISTINCT ON(m.id) m.id AS message_id,o.id AS send_id,o.principal,o.body,
         count(*) OVER(PARTITION BY m.id) AS candidate_count
-        FROM messages m JOIN outgoing_messages o ON o.account=m.account AND o.chat=m.chat
-            AND o.provider_message_id=m.provider_id AND o.status='sent'
+        FROM messages m JOIN chats ch ON ch.id=m.chat AND ch.account=m.account
+        JOIN outgoing_messages o ON o.account=m.account AND o.status='sent' AND
+            ((o.archive_reference IS NULL AND o.chat=m.chat AND o.provider_message_id=m.provider_id) OR
+             (o.archive_reference->>'provider_chat_id'=ch.provider_chat AND
+              o.archive_reference->>'provider_message_id'=m.provider_id))
         WHERE m.id=ANY(%s) AND m.direction='outgoing'
         ORDER BY m.id,o.finished_at DESC,o.id''',(ids,)).fetchall()
     sent={r['message_id']:r for r in sends}

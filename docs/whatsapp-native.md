@@ -94,3 +94,34 @@ under `/app/whatsmeow-licenses`. Upstream source for the pinned revision is
 https://github.com/tulir/whatsmeow/tree/f16f9ca30d6a . Changes to MPL-covered files
 must remain available under MPL when distributed; this adapter does not edit
 upstream files. Release source includes the Go module lock and adapter sources.
+
+### Wire receipts and shutdown
+
+The provider can route a phone-number destination through its LID namespace.
+A successful send checks both directions of that mapping in the local session
+store and verifies the actual sender against the linked account's PN/LID.
+Capture retains only the actual wire chat/sender, so an own-device echo refers
+to the same archived message. The requested destination and public receipt
+projection stay immutable for idempotency.
+
+Schema 28 stores a separate `archive_reference` for the exact wire chat and
+message. Send status links delivery/provenance to that reference and exposes it
+only if the current key's chat scope permits it. Otherwise `message_id` and
+`archive_reference` are null, `archive_reference_state` is `scope_restricted`,
+and delivery evidence is unknown. The reference is provider acceptance evidence;
+it does not prove that ingestion is complete or override collector exclusions.
+Operation sends use the same contract inside their result `data`.
+
+Any error after provider invocation remains uncertain and never causes an
+application resend. A mismatching receipt must be checked against history before
+another owner-approved send. Receipt validation is covered without live sends,
+including PN→LID, group sender LID, conflicting maps and missing fields.
+
+The native process registers inherited command pipes/sockets with the Go runtime
+poller. SIGTERM, either command lane closing, or a full output pipe can therefore
+stop it without waiting for another command. Subprocess tests cover these cases.
+
+Upgrade messaging runtime and backup tooling together before applying schema 28.
+The additive migration does not rewrite requested destinations or archive IDs;
+older runtimes deliberately reject a newer database. A binary-only rollback of
+the Go subprocess remains independent of the PostgreSQL schema.

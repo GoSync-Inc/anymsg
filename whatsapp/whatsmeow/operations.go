@@ -353,12 +353,16 @@ func executeOperation(ctx context.Context, job operationRequest, d operationDepe
 		return map[string]any{"id": LegacyChatID(j), "name": truncate(c.FullName, 512), "push_name": truncate(c.PushName, 512), "short_name": truncate(c.FirstName, 512), "is_business": nil, "is_my_contact": c.FullName != "", "is_blocked": nil, "is_self": j.ToNonAD() == d.owner.ToNonAD()}
 	}
 	send := func(message *waE2E.Message, extra string) (any, error) {
-		var id string
-		e := mutate(extra, func() error { var e error; id, e = sendAndCapture(ctx, d.sendDependencies, target, message); return e })
+		var receipt map[string]any
+		e := mutate(extra, func() error {
+			var e error
+			receipt, e = sendAndCaptureReceipt(ctx, d.sendDependencies, target, message)
+			return e
+		})
 		if e != nil {
 			return nil, e
 		}
-		return operationOutput("confirmed", nil, id)
+		return operationOutput("confirmed", map[string]any{"archive_reference": receipt["archive_reference"]}, receipt["provider_message_id"].(string))
 	}
 	op := job.Operation
 	switch op {

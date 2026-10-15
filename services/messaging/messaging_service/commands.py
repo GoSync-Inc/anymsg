@@ -239,11 +239,16 @@ def manifest(c,p,account):
             'owner_approval_verified_by_server':False,'automatic_retry':False}
 
 
-def _public(row):
+def _public(row,c=None,p=None):
+    answer=row['result']
+    if isinstance(answer,dict) and isinstance(answer.get('data'),dict) and 'archive_reference' in answer['data']:
+        from .outgoing import project_reference
+        actual,state=project_reference(c,p,row['account'],answer['data']['archive_reference'])
+        answer={**answer,'data':{**answer['data'],'archive_reference':actual,'archive_reference_state':state}}
     return serial({'operation_id':row['id'],'operation':row['operation'],'account':row['account'],
         'chat_id':row['chat'],'message_id':row['message'],'expected_revision':row['expected_revision'],
         'status':row['status'],'created_at':row['created_at'],'expires_at':row['expires_at'],
-        'finished_at':row['finished_at'],'error_code':row['error_code'],'result':row['result'],
+        'finished_at':row['finished_at'],'error_code':row['error_code'],'result':answer,
         'request_id':row['request_id'],'preview_digest':row['preview_digest'],
         'owner_approval_verified_by_server':False,'automatic_retry':False,
         'next_action':'get_messenger_operation' if row['status'] in ('queued','dispatching') else
@@ -274,7 +279,7 @@ def enqueue(store,c,p,account,operation,chat_id='',message_id='',expected_revisi
     if existing:
         if existing['request_hash']!=request_hash:raise APIError('idempotency_conflict',409)
         _check_saved(store,c,p,existing,ready=False,check_versions=False)
-        return _public(existing)
+        return _public(existing,c,p)
     payload,spec=_resolve(store,c,p,account,operation,chat_id,message_id,expected_revision,parameters,
                          ready=True,verify_file=True)
     expected=_digest(p,payload)
@@ -292,7 +297,7 @@ def enqueue(store,c,p,account,operation,chat_id='',message_id='',expected_revisi
          account,chat_id or None,message_id or None,expected_revision,operation,spec['permission'],
          spec['mutation'],Jsonb(payload),preview_digest or None)).fetchone()
     targets(p,[row['id'],*p.get('_audit_targets',[])])
-    return _public(row)
+    return _public(row,c,p)
 
 
 def _check_saved(store,c,p,row,*,ready=True,check_versions=True,verify_file=True):
@@ -357,7 +362,7 @@ def status(store,c,p,operation_id):
             row={**row,'status':'unknown','error_code':'operation_result_unknown'}
     _check_saved(store,c,p,row,ready=False,check_versions=False)
     targets(p,[row['id']])
-    return _public(row)
+    return _public(row,c,p)
 
 
 class CommandWorker:
@@ -450,6 +455,10 @@ class CommandWorker:
             job['_preflight']=last_moment_preflight
             timeout=180 if job['operation']=='send_file' else 30
             answer=safe_result(await asyncio.wait_for(self.execute(job),timeout))
+            if isinstance(answer.get('data'),dict) and 'archive_reference' in answer['data']:
+                from .outgoing import archive_reference
+                archive_reference(job,{'provider_message_id':answer.get('provider_message_id'),
+                    'archive_reference':answer['data']['archive_reference']})
         except CommandRejected as exc:
             code=str(exc) if str(exc) in ('operation_expired','operation_disabled','operation_access_changed',
                 'operation_target_changed','sender_not_ready','attachment_unavailable','unsupported_operation',

@@ -14,10 +14,13 @@ import (
 	"go.mau.fi/whatsmeow/types"
 	"go.mau.fi/whatsmeow/types/events"
 	"google.golang.org/protobuf/proto"
+	"net"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"strconv"
 	"strings"
+	"syscall"
 	"testing"
 	"time"
 )
@@ -480,6 +483,155 @@ func TestExclusiveNativeSessionLock(t *testing.T) {
 	if two, e := acquire(c.SessionDirectory); e == nil {
 		two.Close()
 		t.Fatal("duplicate owner")
+	}
+}
+
+func TestNativeIPCProcessHelper(t *testing.T) {
+	if os.Getenv("ANYMSG_TEST_IPC_PROCESS") != "1" {
+		return
+	}
+	if err := execute(os.Getenv("ANYMSG_TEST_IPC_CONFIG"), false); err != nil {
+		fmt.Fprintln(os.Stderr, err)
+		os.Exit(1)
+	}
+	os.Exit(0)
+}
+
+func TestNativeProcessExitsWithInheritedBlockingIPC(t *testing.T) {
+	for _, stop := range []string{"sigterm", "background-eof", "action-eof", "sigterm-output-backpressure"} {
+		t.Run(stop, func(t *testing.T) {
+			config := testConfig(t)
+			configPath := filepath.Join(filepath.Dir(config.SessionDirectory), "config.json")
+			if err := os.WriteFile(configPath, mustJSON(config), 0600); err != nil {
+				t.Fatal(err)
+			}
+			pair, err := syscall.Socketpair(syscall.AF_UNIX, syscall.SOCK_STREAM, 0)
+			if err != nil {
+				t.Fatal(err)
+			}
+			syscall.CloseOnExec(pair[0])
+			syscall.CloseOnExec(pair[1])
+			peerFile := os.NewFile(uintptr(pair[0]), "action-peer")
+			childFile := os.NewFile(uintptr(pair[1]), "inherited-action")
+			defer childFile.Close()
+			// A retained duplicate reproduces Python socket.makefile's extra
+			// reference: closing its socket alone does not send the child EOF.
+			duplicate, err := syscall.Dup(pair[0])
+			if err != nil {
+				peerFile.Close()
+				t.Fatal(err)
+			}
+			syscall.CloseOnExec(duplicate)
+			retainedPeer := os.NewFile(uintptr(duplicate), "retained-peer-stream")
+			defer retainedPeer.Close()
+			peer, err := net.FileConn(peerFile)
+			peerFile.Close()
+			if err != nil {
+				t.Fatal(err)
+			}
+			defer peer.Close()
+			cmd := exec.Command(os.Args[0], "-test.run=^TestNativeIPCProcessHelper$")
+			cmd.Env = append(os.Environ(), "ANYMSG_TEST_IPC_PROCESS=1", "ANYMSG_TEST_IPC_CONFIG="+configPath, "ANYMSG_WHATSAPP_SEND_FD=3")
+			cmd.ExtraFiles = []*os.File{childFile}
+			stdin, err := cmd.StdinPipe()
+			if err != nil {
+				t.Fatal(err)
+			}
+			defer stdin.Close()
+			stdout, err := cmd.StdoutPipe()
+			if err != nil {
+				t.Fatal(err)
+			}
+			var stderr bytes.Buffer
+			cmd.Stderr = &stderr
+			if err = cmd.Start(); err != nil {
+				t.Fatal(err)
+			}
+			childFile.Close()
+			done := make(chan error, 1)
+			go func() { done <- cmd.Wait() }()
+			waited := false
+			defer func() {
+				if !waited {
+					_ = cmd.Process.Kill()
+					<-done
+				}
+			}()
+			// Neither request starts a provider or opens auth. Their replies
+			// prove both real execute lanes are alive before becoming idle.
+			probe := []byte("{\"id\":1,\"method\":\"policy\",\"params\":{}}\n")
+			if _, err = stdin.Write(probe); err != nil {
+				t.Fatal(err)
+			}
+			background := make(chan map[string]any, 1)
+			go func() {
+				var response map[string]any
+				_ = json.NewDecoder(stdout).Decode(&response)
+				background <- response
+			}()
+			select {
+			case response := <-background:
+				if response["error"] != "provider_not_ready" {
+					t.Fatal("background probe", response)
+				}
+			case <-time.After(5 * time.Second):
+				t.Fatal("background lane did not answer")
+			}
+			if err = peer.SetDeadline(time.Now().Add(5 * time.Second)); err != nil {
+				t.Fatal(err)
+			}
+			if _, err = peer.Write([]byte("{\"id\":1,\"method\":\"send_text\",\"params\":{}}\n")); err != nil {
+				t.Fatal(err)
+			}
+			var response map[string]any
+			if err = json.NewDecoder(peer).Decode(&response); err != nil || response["error"] != "provider_not_ready" {
+				t.Fatal("action probe", response, err)
+			}
+			// Let both idle readers block in the inherited descriptors. They
+			// must be cancellable even if their peer remains open indefinitely.
+			time.Sleep(50 * time.Millisecond)
+			switch stop {
+			case "sigterm":
+				if err = cmd.Process.Signal(syscall.SIGTERM); err != nil {
+					t.Fatal(err)
+				}
+				peer.Close() // retainedPeer still holds the action endpoint open
+			case "background-eof":
+				stdin.Close() // action endpoint and retained stream both stay open
+			case "action-eof":
+				peer.Close()
+				retainedPeer.Close() // background stdin writer stays open
+			case "sigterm-output-backpressure":
+				// Stop consuming stdout and fill both pipes. Shutdown must also
+				// interrupt an emitter, not only a reader waiting for more input.
+				floodDone := make(chan struct{})
+				go func() {
+					_, _ = stdin.Write(bytes.Repeat(probe, 10000))
+					close(floodDone)
+				}()
+				defer func() { stdin.Close(); <-floodDone }()
+				select {
+				case <-floodDone:
+					t.Fatal("output backpressure fixture unexpectedly fit in IPC buffers")
+				case <-time.After(100 * time.Millisecond):
+				}
+				if err = cmd.Process.Signal(syscall.SIGTERM); err != nil {
+					t.Fatal(err)
+				}
+			}
+			select {
+			case err = <-done:
+				waited = true
+				if err != nil {
+					t.Fatalf("process did not exit cleanly: %v; stderr: %s", err, stderr.String())
+				}
+			case <-time.After(5 * time.Second):
+				t.Fatal("process required a kill while an IPC peer remained open")
+			}
+			if _, err = os.Stat(filepath.Join(config.SessionDirectory, "auth.sqlite")); !errors.Is(err, os.ErrNotExist) {
+				t.Fatal("offline lifecycle regression opened auth", err)
+			}
+		})
 	}
 }
 
