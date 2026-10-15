@@ -215,3 +215,37 @@ async def test_callback_total_deadline_capacity_disconnect_and_cancel_release(tm
         assert await invoke(app) == 200
     finally:
         app.state.service.close()
+
+
+async def test_health_is_owner_only_and_skips_neighbours(application, tmp_path):
+    async def unavailable(*args, **kwargs):
+        raise AssertionError('health must not probe neighbours')
+    application.state.archive.capabilities = unavailable
+    async with httpx.AsyncClient(transport=httpx.ASGITransport(application), base_url='http://127.0.0.1') as c:
+        assert (await c.get('/api/health')).status_code == 401
+        token = (tmp_path / 'owner.token').read_text().strip()
+        response = await c.get('/api/health', headers={'Authorization': 'Bearer ' + token})
+        assert response.status_code == 200 and response.json() == {'ok': True}
+
+
+@pytest.mark.parametrize('kind', ['symlink', 'mode', 'short'])
+def test_unsafe_control_token_fails_closed(tmp_path, kind):
+    from control import control_key
+    path = tmp_path / 'control.token'
+    if kind == 'symlink':
+        target = tmp_path / 'elsewhere'
+        target.write_text(secrets.token_urlsafe(32))
+        os.chmod(target, 0o600)
+        path.symlink_to(target)
+    else:
+        path.write_text('short' if kind == 'short' else secrets.token_urlsafe(32))
+        os.chmod(path, 0o644 if kind == 'mode' else 0o600)
+    with pytest.raises((OSError, ValueError)):
+        control_key(tmp_path)
+
+
+def test_control_token_created_private_and_stable(tmp_path):
+    from control import control_key
+    first = control_key(tmp_path)
+    assert os.stat(tmp_path / 'control.token').st_mode & 0o777 == 0o600
+    assert control_key(tmp_path) == first

@@ -1,6 +1,7 @@
 """Separate authenticated control MCP for rehearsals and explicitly authorized calls."""
 import secrets
 import os
+import stat
 from pathlib import Path
 from typing import Any
 
@@ -15,15 +16,25 @@ from learning import SemanticReview
 
 
 def control_key(directory):
+    """Same file rules as owner.token: no links, private mode, owned by this process."""
     path=Path(directory)/'control.token'
     try:
-        with path.open('x') as output:
-            os.chmod(path,0o600)
-            output.write(secrets.token_urlsafe(32))
+        fd=os.open(path,os.O_WRONLY|os.O_CREAT|os.O_EXCL|os.O_NOFOLLOW,0o600)
     except FileExistsError:
         pass
-    os.chmod(path,0o600)
-    return path.read_text().strip()
+    else:
+        with os.fdopen(fd,'w') as output:
+            output.write(secrets.token_urlsafe(32));output.flush();os.fsync(output.fileno())
+    fd=os.open(path,os.O_RDONLY|os.O_NOFOLLOW|os.O_NONBLOCK)
+    with os.fdopen(fd,'rb') as stream:
+        info=os.fstat(stream.fileno())
+        if (not stat.S_ISREG(info.st_mode) or info.st_nlink!=1 or info.st_uid!=os.geteuid() or
+                stat.S_IMODE(info.st_mode)!=0o600 or info.st_size>256):
+            raise ValueError('Unsafe control credential file')
+        token=stream.read(257).decode('ascii').strip()
+    if not 20<=len(token)<=200 or any(c.isspace() for c in token):
+        raise ValueError('Invalid control credential')
+    return token
 
 
 def create_control(service,prepare,start,stop,capabilities,outbound=None,browser_url='http://127.0.0.1:13842/'):
