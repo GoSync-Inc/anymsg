@@ -41,7 +41,7 @@ def validate_capture(value):
         if set(value)!={'kind','account','event','change','observed_at','origin'}: raise ValueError('invalid_capture')
         event=value['event']
         if not isinstance(event,dict) or set(event)-{'chatId','chatName','messageId','senderId','body',
-                'timestamp','fromMe','hasMedia','filename','mimetype','filesize','editedTimestampMs',
+                'timestamp','timestampResolution','durationSeconds','fromMe','hasMedia','filename','mimetype','filesize','editedTimestampMs',
                 'senderName','senderUsername','replyToId','forwarded','mediaKind','mentionsOwner','replyToOwner','identityObservations','formatting','messageType','isService','isSelfChat','senderIsContact'}:
             raise ValueError('invalid_whatsapp_event')
         envelope=whatsapp_message(value['account'],event,change=value['change'],
