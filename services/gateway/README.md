@@ -28,6 +28,15 @@ and argument schema. There is no generic arbitrary backend executor. Unknown wri
 are not retried. Capability discovery intersects profile, local grants and current
 backend permissions. An unavailable module leaves platform introspection available.
 
+Calendar capabilities retain a reviewed `constraints` allowlist (write limitations,
+freshness, bounded refresh and request limits), while upstream feature/tool catalogs
+remain hidden. `gateway_tools` is the selected connection's operation ceiling;
+`gateway_actions` describes messenger actions only. Calendar `allowed_event_actions`
+also intersects local/backend scopes and requires both selected plan/apply tools.
+`write_enabled` alone is not a write grant. Slot requests may add explicitly reviewed
+`additional_calendar_refs` to member bindings and return their exact `source_selection`.
+Pending refreshes are polled with `refresh=false`; missing or pending coverage is unknown.
+
 `messages_request_file_download` explicitly schedules bounded retrieval of one
 existing archive attachment. Select it in the profile and grant `download` locally
 and upstream; the backend must advertise `request_file_download` in its manifest.

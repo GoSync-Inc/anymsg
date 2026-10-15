@@ -6,6 +6,23 @@ from .adapters.calls import receipt_reference
 from .catalog import arguments, CATALOG
 from .policy import Denied, key_from_file
 
+CALENDAR_CONSTRAINTS = {
+    "event_write",
+    "recurrence_write",
+    "future_split",
+    "invitations",
+    "refresh",
+    "window_limit_days",
+    "calendar_limit",
+    "event_limit",
+    "cache_max_age_seconds",
+    "refresh_wait_seconds",
+    "plan_action_limit",
+    "plan_ttl_seconds",
+    "atomic_cross_provider",
+    "availability_sources",
+}
+
 
 class Dispatch:
     def __init__(self, policy, clients, tickets=None):
@@ -166,6 +183,30 @@ class Dispatch:
             raise
         if module == "calls":
             receipt_reference(tool["operation"], result)
+        if module == "calendar" and tool["operation"] in {"calendars", "capabilities"}:
+            result = dict(result)
+            if "constraints" in result:
+                constraints = result["constraints"]
+                result["constraints"] = (
+                    {field: value for field, value in constraints.items() if field in CALENDAR_CONSTRAINTS}
+                    if isinstance(constraints, dict)
+                    else {}
+                )
+            selected = set(self.policy.visible(current, principal))
+            scopes = set(principal["grants"].get("calendar", [])) & set(caps["permissions"])
+            result["calendars"] = [
+                dict(
+                    row,
+                    allowed_event_actions=[
+                        action
+                        for action in row.get("allowed_event_actions", [])
+                        if action in {"create", "update", "delete"}
+                        and {"calendar_plan", "calendar_apply"} <= selected
+                        and {"plan:create", "plan:execute", "event:" + action} <= scopes
+                    ],
+                )
+                for row in result.get("calendars", [])
+            ]
         if tool.get("action_group"):
             if tool["operation"] == "list_messenger_operations":
                 result = {
