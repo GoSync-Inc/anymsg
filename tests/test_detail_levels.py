@@ -36,7 +36,7 @@ def test_mcp_context_returns_the_anchor_once_at_each_detail_level(seeded):
     assert set(transcript)>={'transcript','message_id','context_window','conversation','content_is_untrusted'}
     assert 'message' not in transcript and 'context' not in transcript
     assert 'demo-tg-1' in transcript['transcript'] and occurrences(transcript,text)==1
-    assert any(f['attachment_id']=='demo-file-1' for f in transcript['files'])
+    assert any(f['id']=='demo-file-1' and f['message_id']=='demo-tg-2' for f in transcript['files'])
     # Full detail is the unchanged evidence contract.
     assert full['message']['body']==text and 'demo-tg-1' in [row['id'] for row in full['context']]
     assert full['conversation_view']['transcript'] and 'latest_known_meaningful_message' in full['conversation']
@@ -48,6 +48,7 @@ def test_compact_messages_and_chats_omit_duplicate_text_and_routine_qualifiers(s
         page=structured(rpc(client,key,'get_messages',{'chat_id':'telegram-demo-chat'}))
         found=structured(rpc(client,key,'search',{'query':'Маяк','order':'relevance'}))
         chats=structured(rpc(client,key,'list_chats',{}))
+        context=structured(rpc(client,key,'get_context',{'message_id':'demo-tg-2'}))
     for row in page['items']+found['items']:
         assert set(row)>={'id','chat','sender','sent_at','direction','kind','display_text'}
         for field in ('body','snippet','position','ordering','integrity','formatting','delivery_receipt',
@@ -56,7 +57,9 @@ def test_compact_messages_and_chats_omit_duplicate_text_and_routine_qualifiers(s
     assert page['conversation_view']['provider_currentness_verified'] is False
     assert [row['id'] for row in found['items']]==['demo-tg-1'] and found['items'][0]['chat_title']
     file_row=next(row for row in page['items'] if row['id']=='demo-tg-2')
-    assert file_row['attachments'][0]['attachment_id']=='demo-file-1'
+    # Files keep the same id key as full detail and the published clients.
+    assert file_row['attachments'][0]['id']=='demo-file-1'
+    assert context['attachments'][0]['id']=='demo-file-1'
     for chat in chats['items']:
         assert not any(k.startswith('awaiting_reply_') or k.startswith('last_message_') for k in chat)
         assert 'provider_chat_id' not in chat

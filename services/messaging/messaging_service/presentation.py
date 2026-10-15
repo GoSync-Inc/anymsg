@@ -15,7 +15,7 @@ FILE_FIELDS = ('attachment_id','id','message_id','account','chat','revision','sh
 
 
 TRANSCRIPT_BODY_CHARS = 2000
-LEAN_FILE_FIELDS = ('attachment_id','display_name','mime','bytes','download_status','extraction_status','error_code')
+LEAN_FILE_FIELDS = ('id','display_name','mime','bytes','download_status','extraction_status','error_code')
 
 
 def options(method, arguments):

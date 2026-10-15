@@ -12,7 +12,7 @@ def message():
         ordering_warning='same_timestamp_order_unknown')
 
 
-def test_compact_conversation_returns_text_once_and_keeps_order_uncertainty():
+def test_compact_conversation_preserves_original_and_order_uncertainty():
     row=message()
     view={'view':'conversation','contract_version':1,'transcript':'1. Вы → собеседник: '+row['display_text'],
         'warnings':['same_timestamp_order_unknown'],'content_is_untrusted':True}
