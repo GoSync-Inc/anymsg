@@ -312,6 +312,16 @@ class Runner:
             if p.name=='snapshot' or p.name.startswith('.backup-'):
                 if p.is_symlink():raise ValueError('unexpected_staging_symlink')
                 shutil.rmtree(p)
+    def remove_abandoned(self,work):
+        # The next run takes a NEW snapshot under a new ID, so nothing in this
+        # undelivered job directory is reusable: partial/complete ciphertext,
+        # age temporaries and private worker inputs. Local retention counts
+        # only delivered jobs, so leaving any of it would leak disk shared with
+        # the database. The journal is removed only after this succeeds.
+        if work.is_symlink():raise ValueError('unexpected_staging_symlink')
+        # Defensive: a delivered recovery point is never an abandoned capture.
+        if (work/'delivery.json').exists():raise RuntimeError('invalid_backup_journal')
+        if work.exists():shutil.rmtree(work)
     def run_stream(self,work):
         if (work/'delivery.json').exists():
             # Receipt was durably committed before a crash during owned staging
@@ -445,7 +455,7 @@ class Runner:
             # A failed cold capture must be retried from a NEW snapshot, after
             # collectors have recovered; never publish its partial plaintext.
             if info:self.docker.call('rm',self.journal['container'])
-            work=self.root/self.journal['id'];self.cleanup_plaintext(work)
+            self.remove_abandoned(self.root/self.journal['id'])
             self.journal_path.unlink()
         # Preserve the actionable error from the initiating process.
         if not self.status_path.exists() or read_json(self.status_path).get('state')!='error':
