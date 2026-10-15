@@ -35,6 +35,16 @@ fsync, очередь БД и время самого запроса агент�
 догоняющие события; `origin=live` не доказывает отсутствие такой задержки.
 Stateless MCP не будит простаивающего агента: клиент должен вызвать чтение/updates.
 
+Owner mentions сохраняются по Telegram `mentioned` или совпадению WhatsApp
+mentioned IDs с cached phone/LID identities текущего авторизованного аккаунта.
+У WhatsApp quoted participant тоже может подтвердить ответ владельцу. Capture
+не делает дополнительных contact/quoted-message запросов; неизвестный LID не
+сопоставляется с phone по имени или числовому совпадению. Ранее сохранённые reply
+IDs можно сопоставить с outgoing только внутри того же account/chat. Это
+эвристика очереди внимания, а не provider unread state или факт обязательства.
+
+Документация использованных API: [Telethon catch-up и streaming download](https://docs.telethon.dev/en/stable/modules/client.html), [ограничения MessageDeleted](https://docs.telethon.dev/en/stable/modules/events.html#telethon.events.messagedeleted.MessageDeleted). Реальные Telegram downloads проверены; длительное наблюдение и сценарии reconnect требуют отдельной приёмки. В0.7.2 истёкшие/требующие обновления file references обрабатываются очередью с ограниченными попытками и новой загрузкой metadata, не останавливая сбор остальных чатов.
+
 ### Карантин очереди и устойчивость
 
 Одно сообщение не останавливает сбор аккаунта. Адаптеры обрезают или
@@ -61,16 +71,6 @@ pool) не перезапускают коллектор: сверка, меди
 повторяют попытку с паузой до 60 с. Lease продлевается с локальным дедлайном:
 если БД не отвечает дольше lease, коллектор останавливается сам, а не ждёт на
 полуоткрытом соединении.
-
-Owner mentions сохраняются по Telegram `mentioned` или совпадению WhatsApp
-mentioned IDs с cached phone/LID identities текущего авторизованного аккаунта.
-У WhatsApp quoted participant тоже может подтвердить ответ владельцу. Capture
-не делает дополнительных contact/quoted-message запросов; неизвестный LID не
-сопоставляется с phone по имени или числовому совпадению. Ранее сохранённые reply
-IDs можно сопоставить с outgoing только внутри того же account/chat. Это
-эвристика очереди внимания, а не provider unread state или факт обязательства.
-
-Документация использованных API: [Telethon catch-up и streaming download](https://docs.telethon.dev/en/stable/modules/client.html), [ограничения MessageDeleted](https://docs.telethon.dev/en/stable/modules/events.html#telethon.events.messagedeleted.MessageDeleted). Реальные Telegram downloads проверены; длительное наблюдение и сценарии reconnect требуют отдельной приёмки. В0.7.2 истёкшие/требующие обновления file references обрабатываются очередью с ограниченными попытками и новой загрузкой metadata, не останавливая сбор остальных чатов.
 
 ## Условия перед живым подключением
 
