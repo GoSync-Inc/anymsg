@@ -17,6 +17,11 @@ def test_subscription_overlay_is_opt_in_and_has_bounded_runtime_authority(tmp_pa
     root = Path(__file__).resolve().parents[1]
     env = {**os.environ, 'PROBE_PUBLIC_URL': 'https://example.invalid',
            'PROBE_ALLOWED_HOSTS': 'example.invalid'}
+    overlay = yaml.safe_load((root / 'deploy/compose.subscriptions.yaml').read_text())
+    source_volumes = overlay['services']['subscriptions']['volumes']
+    assert len(source_volumes) == 1
+    # Raw Compose defaults host-path creation to true: require explicit false.
+    assert source_volumes[0]['bind']['create_host_path'] is False
     # Canonical rendering resolves env_file on older Compose versions. Give it
     # only a synthetic DB fixture; retain the real project directory so builds
     # and bind mounts still resolve against the original deployment template.
@@ -59,7 +64,9 @@ def test_subscription_overlay_is_opt_in_and_has_bounded_runtime_authority(tmp_pa
     assert secret['type'] == 'bind' and secret['read_only'] is True
     assert Path(secret['source']) == root / 'deploy/private/subscriptions.dsn'
     assert secret['target'] == '/run/secrets/database_url'
-    assert secret['bind']['create_host_path'] is False
+    # Older compose-go bool/omitempty serialization omits false from JSON.
+    # The strict raw-YAML check above distinguishes omission from its default.
+    assert secret.get('bind', {}).get('create_host_path', False) is False
     assert service['read_only'] is True and service['user'] == '10001:10001'
     assert service['cap_drop'] == ['ALL']
     assert 'no-new-privileges:true' in service['security_opt']
