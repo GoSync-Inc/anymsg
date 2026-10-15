@@ -1,0 +1,255 @@
+{
+  "format": 1,
+  "module": "calls",
+  "source": "personal-os/services/voice_service",
+  "files": [
+    {
+      "path": ".dockerignore",
+      "sha256": "79598b39f560502b31541a093f5a8dcb91a919f65d72cf140fa14a5cf3c9e319"
+    },
+    {
+      "path": ".gitignore",
+      "sha256": "843b4bee727644376ec33de5cf557f0849dd5bd8b7f15d5ca6480c2abb5d7fc5"
+    },
+    {
+      "path": "BENCHMARKS.md",
+      "sha256": "9f4641cdae8b7cff1efcb6cac5cf0af30ace65c9560cbc4cbc68a196804c01dc"
+    },
+    {
+      "path": "Dockerfile",
+      "sha256": "7d59a6adecc384f6e068a83aaa0d0269611685a2abada26a27ada5ad7aa0789e"
+    },
+    {
+      "path": "LIVE_FLOWS.md",
+      "sha256": "3e869aea94d428ca949ac06f8e79c0298270c09a51b607afbe9b877aa6df0092"
+    },
+    {
+      "path": "README.md",
+      "sha256": "015c968dfd9c08e7f0502e0c433f10188f1361ae68689f62e4c85a6d0923b594"
+    },
+    {
+      "path": "agent_mcp.py",
+      "sha256": "5de8f42b4816fa30fb182202b3d2df27d9b514e0d30beae5dee76c2b576a772a"
+    },
+    {
+      "path": "anymsg.py",
+      "sha256": "1b496c8d8563c1dd7fc4b7473585d23f9ce1abb36b5165a5dfc5f7da5cf112fc"
+    },
+    {
+      "path": "app.py",
+      "sha256": "6ac65f64578dbe775d2043026ff27f38a46ecc9d684d588582b24b6f2ff24c46"
+    },
+    {
+      "path": "audio_health.py",
+      "sha256": "f3026bdd329513b74e0040f9375bded3073a0f49e6cdb8808382323949d47aaf"
+    },
+    {
+      "path": "audio_probe.py",
+      "sha256": "ac765830ba6e3217e050be2959e4c881efb7e0d44301de0a4d186403e704cfc3"
+    },
+    {
+      "path": "control.py",
+      "sha256": "cc85b27ef75c701118232ec284f5fb4c3dfbd54302e26ed4e2cf8fff8c0a082a"
+    },
+    {
+      "path": "core.py",
+      "sha256": "083a75b7001f7716a9cbdc84a27a258283ba248712e9d6407543e97c6ecf4923"
+    },
+    {
+      "path": "custom_tts.py",
+      "sha256": "8e13478c3b835aa1aeb745d385d5407c8418089eac8177a889b2228a4ff7178b"
+    },
+    {
+      "path": "frontend/index.html",
+      "sha256": "fbdda9dc7d0fff4b1bb1b841eb1db5fa78ec49f940c4cc8a24964726ff0fb5a5"
+    },
+    {
+      "path": "frontend/package-lock.json",
+      "sha256": "276befbaab6b9c09aa11d9892fa16fd380b9d2f8fbc98e9764dd4b964066085e"
+    },
+    {
+      "path": "frontend/package.json",
+      "sha256": "0d3d49e1d62cfa4493dfb426d173323a4abbe2193eb87d6f9ef6479ec2bb8b8a"
+    },
+    {
+      "path": "frontend/public/setup.html",
+      "sha256": "a1ff5ef223a13427f006e47ce89341873f62d365fbb18a6a6d99a7522237e633"
+    },
+    {
+      "path": "frontend/src/audio-health.mjs",
+      "sha256": "8b28f2aa5a72bedc43bba6e537727c75f702300c25b5bba74680d5a0e6b48f26"
+    },
+    {
+      "path": "frontend/src/audio-playback.mjs",
+      "sha256": "3139576890da4904dff6c89de8ef88f6af5e987306103ce74d6bf39df46a86b3"
+    },
+    {
+      "path": "frontend/src/call-cleanup.mjs",
+      "sha256": "fd4f19dc25a2bbca089634695d4b3ee52b3930d4b85c8c5b34c1cbb8515201fe"
+    },
+    {
+      "path": "frontend/src/learning.mjs",
+      "sha256": "18ec49e7b6cd9d5255ccafa2e239356da128c60cf323697503e15ef781e2804f"
+    },
+    {
+      "path": "frontend/src/main.js",
+      "sha256": "8df84713f93a2d15d9603ff23deb51e8fbc2f955ae75fa5f1516e640f2db2ddb"
+    },
+    {
+      "path": "frontend/src/style.css",
+      "sha256": "fd3e10ef038c6df1fbe4ea3c0340d7044e9bdeabad3cbd8c9c15d87662a120a4"
+    },
+    {
+      "path": "frontend/src/timing.mjs",
+      "sha256": "df98888725f6970a202cd5ebe9c8adbcee5f6012d0ca137e8b0399904f6f99ae"
+    },
+    {
+      "path": "frontend/tests/audio-health.test.mjs",
+      "sha256": "26b8239529363a09bd4c94b29d24bf7a9c7de9fc5bf13ee8a9ff60fe38a433a5"
+    },
+    {
+      "path": "frontend/tests/audio-playback.test.mjs",
+      "sha256": "bf007a7838c19b0487a8dce6045606f006ba9598bfc411c16c13ba9bae36444d"
+    },
+    {
+      "path": "frontend/tests/call-cleanup.test.mjs",
+      "sha256": "2c960a8896c8d5465bc60f8ce104aa0aa434cf94bde390e6505f6d51ce32dca3"
+    },
+    {
+      "path": "frontend/tests/timing.test.mjs",
+      "sha256": "098fa8f193521382c21156945e0ef263a58e03882a50183acf7742f7bb52f18d"
+    },
+    {
+      "path": "learning.py",
+      "sha256": "bc5f5fc73485490904201957267619bb4181b25db32dd5c080c4364a13502d27"
+    },
+    {
+      "path": "live_flow_prompt.py",
+      "sha256": "f26447a1d776a06f28f2ce4ddc6d1d0d9aecd2f9c3c7d880916f3a60502a4595"
+    },
+    {
+      "path": "live_flows.py",
+      "sha256": "ecb26655a5a67750b8620cdd5865b6f017aa906cbe43f955577433a889186192"
+    },
+    {
+      "path": "outbound.py",
+      "sha256": "9b865d62588791a58535931fb53accc8c9cc6067e33e083265ccda6545dc2419"
+    },
+    {
+      "path": "pyproject.toml",
+      "sha256": "f38930884e227576182da826d28a3ebaa0f076f535bc09bf807b2f6283113ff9"
+    },
+    {
+      "path": "regressions.py",
+      "sha256": "a99619e66872b95fedd40e2c0c0da0bdfbc97a1bdd944bb6a8ea217601c47ac8"
+    },
+    {
+      "path": "settings.py",
+      "sha256": "542a715fa1a103aa58807f1b6885e314cd7d0f96089654fc0fcd6402424fc708"
+    },
+    {
+      "path": "supervisor.py",
+      "sha256": "ff5f6236eaa2deb7e611610cb68d50c2c97d445a6a63f6cee6f5abd679b08e76"
+    },
+    {
+      "path": "telegram_audio.py",
+      "sha256": "07a67f4ed577b5a5c47bffa78a4262f93cb4c73dfad451b7f7eb81c25e1b3192"
+    },
+    {
+      "path": "telegram_broker.py",
+      "sha256": "71e62083317c2458117e135d736a015c75ad65c2676621b2d5bf025561b2f837"
+    },
+    {
+      "path": "telegram_session_owner.py",
+      "sha256": "e5ea0d8d386758283f1d227bbde7c2046db1b805af23c51ed593f4f84e1c33ce"
+    },
+    {
+      "path": "tests/test_anymsg.py",
+      "sha256": "48b4cc5beb612d356cb9ad3acd48310592317a4bbdddc314d9394317f33d98d9"
+    },
+    {
+      "path": "tests/test_async_supervision.py",
+      "sha256": "d2dcbf880dc077c33bc62de96e38c5115780df6f80efcebec56b700f65d49c01"
+    },
+    {
+      "path": "tests/test_audio_health.py",
+      "sha256": "edb46ab6211dd5b43b00aa287826d4edf4ad15ea3c381d39a1da39539b3466c4"
+    },
+    {
+      "path": "tests/test_audio_probe.py",
+      "sha256": "17ec339fea72d63c4ed07b9c23cef1085cd037021958181daea2894320d3bff6"
+    },
+    {
+      "path": "tests/test_control.py",
+      "sha256": "b77823114d3581bb96ec387f96c67d0b2642081210bbe13b55f0c4e92c186609"
+    },
+    {
+      "path": "tests/test_custom_tts.py",
+      "sha256": "be64a0dcd1ab0645a63483c69337cdb30e5977524318305cd7ff0b064185d193"
+    },
+    {
+      "path": "tests/test_decision_workflow.py",
+      "sha256": "afae29d8df22c1f6cad67c0ee257208991bce65fbf0c75d592db647fcdcac642"
+    },
+    {
+      "path": "tests/test_external_audio.py",
+      "sha256": "c3b0019fb99cb3f920f474b1952a93e2e223fcba3b042333033be3e29fa3366a"
+    },
+    {
+      "path": "tests/test_learning.py",
+      "sha256": "7397c614d6cd18105efbd6108429d91a3e969f77f70258c855d65354a2013d69"
+    },
+    {
+      "path": "tests/test_learning_api.py",
+      "sha256": "a0943f7eb09a1f6182e783a0ce9a0a340ba2a264a461156acd2c575a199f58fa"
+    },
+    {
+      "path": "tests/test_live_flows.py",
+      "sha256": "144f4b23c4b5a94cc78e04a18f696ad89055af2f3dfcf1e7ad81d238e6d9cb85"
+    },
+    {
+      "path": "tests/test_outbound.py",
+      "sha256": "d137da6afe7aba5cf22914b804af8bebe2e10028348b00bd467080efbcc39386"
+    },
+    {
+      "path": "tests/test_regressions.py",
+      "sha256": "1619f2a62344c08e0d443b277ffa2bf3118a79665ee4bd306562426bd5366478"
+    },
+    {
+      "path": "tests/test_server_calling.py",
+      "sha256": "54bfbbb58b8e470d4db8740ca839a0a5714e0f3a03bc1eea79a11db8400e4969"
+    },
+    {
+      "path": "tests/test_social_conversation.py",
+      "sha256": "652ea47e41099500bd11a731b545d73a35882f1718f89917073fc4c2b4f4e718"
+    },
+    {
+      "path": "tests/test_supervisor.py",
+      "sha256": "d8e398d08d8e0142fd31a6083acf1685eb8c82d8f74ae2fec66653fe81108693"
+    },
+    {
+      "path": "tests/test_tasks.py",
+      "sha256": "ce3adf7c9ed3d90eeff5eade996f1bf4b0c548654a77b9931b5664e557cef861"
+    },
+    {
+      "path": "tests/test_telegram_broker.py",
+      "sha256": "d13a4e93585b4efcff27e696ec4651a22378fa9ba0fd58c87ef3bc35b617263b"
+    },
+    {
+      "path": "tests/test_voice.py",
+      "sha256": "353fead4602523cccc3096fe5c9f9091a9be563a9fecdad6a0fc317323574027"
+    },
+    {
+      "path": "tests/test_webrtc.py",
+      "sha256": "1f8a3c92c47fb66d0947a77ba7c094bafaeba5e06d79b86f0bfa254c64cd56f8"
+    },
+    {
+      "path": "uv.lock",
+      "sha256": "5e20d61559d5df05e9fa4a3bb8ddf03bbb8f237fcc66ce8f81fff4fb05f3ef8b"
+    },
+    {
+      "path": "voice.py",
+      "sha256": "6261b5307c2896fba75fd000a9b7fd0fed2ee5571f1f3ce2f75e33f79f2ecf1e"
+    }
+  ]
+}

@@ -1,0 +1,9 @@
+*
+!*.py
+!pyproject.toml
+!uv.lock
+!Dockerfile
+!frontend/
+frontend/*
+!frontend/dist/
+!frontend/dist/**
