@@ -65,6 +65,10 @@ class TwilioCalls:
         return 'https://api.twilio.com/2010-04-01/Accounts/'+self.config['account_sid']
 
     async def preflight(self,b):
+        return self.configuration(b)
+
+    def configuration(self,b):
+        """Local validation only; never creates a provider connection."""
         cfg=self.config
         if not re.fullmatch(r'AC[0-9a-fA-F]{32}',cfg.get('account_sid','')) or not cfg.get('auth_token'):
             raise ServiceError('twilio_credentials_required')
@@ -133,8 +137,9 @@ class TwilioCalls:
 
 
 class Outbound:
-    def __init__(self,service,key,settings,providers):
+    def __init__(self,service,key,settings,providers,model_key=None):
         self.service,self.key,self.settings,self.providers=service,key,settings,providers
+        self.model_key=model_key
         self.lock=asyncio.Lock(); self.tasks={};self.runtime_stop=None
         service.db.execute('CREATE TABLE IF NOT EXISTS outbound_attempts (call_id TEXT PRIMARY KEY, token TEXT NOT NULL)')
         service.db.commit()
@@ -144,7 +149,7 @@ class Outbound:
         if b['channel']=='browser': raise ServiceError('external_brief_required')
         if not self.settings.enabled: raise ServiceError('calling_disabled')
         if b['destination'] not in self.settings.allowed.get(b['channel'],[]): raise ServiceError('recipient_not_allowed')
-        if not self.key(): raise ServiceError('model_key_required')
+        if not (self.model_key(b) if self.model_key else self.key()): raise ServiceError('model_key_required')
         provider=self.providers.get(b['account'])
         if not provider: raise ServiceError('provider_not_configured')
         return await provider.preflight(b)

@@ -129,6 +129,9 @@ class AuditedGemini(GeminiLiveLLMService):
 
 
 def create_model(brief,key,recorder=None):
+    if brief.get('dialog_engine')=='grok_realtime':
+        from grok_voice import AuditedGrok
+        return AuditedGrok(brief,key,recorder)
     return AuditedGemini(api_key=key,recorder=recorder,external_tts=bool(brief.get('custom_voice_id')),
         live_flows=brief.get('dialog_engine')=='gemini_live_flows',settings=GeminiLiveLLMService.Settings(
         model=brief['model'],system_instruction=brief['prompt'],voice=brief['voice']),
@@ -239,7 +242,8 @@ async def run_transport(transport,brief,key,state,browser=False):
     async def begin():
         service.connected(identity)
         await worker.rtvi.send_server_message({'kind':'session','call_id':identity,'model':brief['model'],
-            'voice':brief.get('custom_voice_id') or brief['voice'],'voice_style':brief.get('voice_style','neutral'),
+            'voice':brief['grok_voice'] if brief.get('dialog_engine')=='grok_realtime' else brief.get('custom_voice_id') or brief['voice'],
+            'voice_style':brief.get('voice_style','neutral'),
             'dialog_engine':brief.get('dialog_engine','gemini_live')})
         if live_flows:
             await flow.initialize(flow.nodes['discussion'])
