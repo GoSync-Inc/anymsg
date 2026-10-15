@@ -51,6 +51,8 @@ methods or a backend-specific REST URL. Platform introspection returns these as
 and calls methods. An empty messenger action list and `owner_decision_write: false`
 do not deny a selected calls preparation method. Calls channel, destination, scope
 and owned-brief checks remain the backend's authority; these labels grant no access.
+`calls_list_briefs` and `calls_list_calls` (`calls:read`) page the backend credential's
+own briefs and calls newest first as short summaries; existing profiles do not gain them.
 
 Backend HTTP failures retain only their numeric `backend_status`, a reviewed
 `backend_error` classification (including `query_timeout`), and a UUID-shaped
@@ -59,8 +61,8 @@ not forwarded as diagnostics. MCP and REST return the same safe error. A failure
 after a mutation is dispatched still reports `mutation_outcome_unknown` and forbids
 automatic retries, even when a backend error classification is available.
 Calendar capabilities retain a reviewed `constraints` allowlist (write limitations,
-freshness, bounded refresh and request limits), while upstream feature/tool catalogs
-remain hidden. `gateway_tools` is the selected connection's operation ceiling;
+accepted time format, freshness, bounded refresh and request limits), while upstream
+feature/tool catalogs remain hidden. `gateway_tools` is the selected connection's operation ceiling;
 `gateway_actions` describes messenger actions only. Calendar `allowed_event_actions`
 also intersects local/backend scopes and requires both selected plan/apply tools.
 `write_enabled` alone is not a write grant. Slot requests may add explicitly reviewed
@@ -79,7 +81,15 @@ Messenger-operation enums also intersect the backend's explicit supported names
 for each permitted account. A mixed Telegram/WhatsApp key sees their union; each
 preview/execute rechecks the exact account before dispatch. Unsupported operations
 are omitted from account catalogs. Missing support names hide live actions rather
-than inferring them from a provider name or count. Scoped receipt reads remain
+than inferring them from a provider name or count.
+`messages_capabilities` advertises in `gateway_actions_by_account` (and their union
+`gateway_actions`) only actions that are granted, supported and reported in the
+backend's per-account `available_operations` (key permitted and account opt-in).
+`gateway_actions_excluded_by_account` counts the remaining ceiling actions per
+reason (`not_available_for_account`, or `availability_not_reported` for an older
+backend) without listing them; `list_messenger_operations` shows per-row reasons.
+The operation enum and the per-call ceiling are unchanged by this narrower view;
+the backend still enforces account opt-in on every preview and execute. Scoped receipt reads remain
 available across provider changes under the existing action permission ceiling.
 Upgrade the messaging backend before the gateway when adding this contract.
 

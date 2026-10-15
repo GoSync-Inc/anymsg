@@ -54,7 +54,9 @@ def test_query_timeout_diagnostics_match_on_rest_and_mcp_without_private_backend
     assert rest.status_code == 503 and mcp["isError"]
     assert rest.json() == mcp["structuredContent"] == {
         "error": "backend_unavailable", "backend_error": "query_timeout", "backend_status": 503,
-        "request_id": "a" * 32,
+        "request_id": "a" * 32, "phase": "operation", "retryable": True, "retry_after_seconds": 2,
+        "next_action": "narrow_accounts_chat_types_or_awaiting_reply_days",
+        "hint": "Narrow with accounts, chat_types or a smaller awaiting_reply_days, then retry once.",
     }
     assert attempts == ["/v1/list_chats", "/v1/list_chats"]
 
@@ -73,7 +75,10 @@ def test_unclassified_backend_failure_has_status_without_copying_body(tmp_path, 
                            tools=["messages_list_chats"], grants=["read"])
     with TestClient(app) as client:
         response = client.post("/v1/messages_list_chats", json={}, headers=HEADERS)
-    assert response.json() == {"error": "backend_unavailable", "backend_status": 502}
+    value = response.json()
+    assert len(value.pop("gateway_request_id")) == 32
+    assert value == {"error": "backend_unavailable", "backend_status": 502, "phase": "operation",
+                     "retryable": True, "retry_after_seconds": 2, "next_action": "retry_after_delay"}
 
 
 def test_mutation_http_failure_keeps_unknown_outcome_with_safe_correlation_and_no_retry(tmp_path):
@@ -170,3 +175,68 @@ def test_capabilities_explain_messaging_action_scope_and_preserve_backend_identi
     }
     assert "tool_manifest" not in response
     assert "DO NOT" not in json.dumps(response) + json.dumps(platform)
+
+
+def test_gateway_timeout_on_read_names_phase_retry_and_narrowing_hint(tmp_path):
+    def backend(request):
+        if request.url.path == "/v1/capabilities":
+            return httpx.Response(200, json={"permissions": ["read"]})
+        raise httpx.ReadTimeout("synthetic slow archive")
+
+    app, _, _ = configured(tmp_path, backend, module="messaging",
+                           tools=["messages_list_chats"], grants=["read"])
+    with TestClient(app) as client:
+        value = client.post("/v1/messages_list_chats", json={"awaiting_reply": True}, headers=HEADERS).json()
+    assert len(value.pop("gateway_request_id")) == 32
+    assert value == {"error": "backend_unavailable", "reason": "gateway_timeout", "phase": "operation",
+                     "retryable": True, "retry_after_seconds": 2,
+                     "next_action": "narrow_accounts_chat_types_or_awaiting_reply_days",
+                     "hint": "Narrow with accounts, chat_types or a smaller awaiting_reply_days, then retry once."}
+
+
+def test_capability_failure_reports_that_a_mutation_was_not_sent(tmp_path):
+    attempts = []
+
+    def backend(request):
+        attempts.append(request.url.path)
+        return httpx.Response(503, json={"error": "service_busy", "request_id": "c" * 32})
+
+    app, _, _ = configured(tmp_path, backend, tools=["calendar_apply"], grants=["plan:execute"])
+    with TestClient(app) as client:
+        value = client.post("/v1/calendar_apply", json={"plan_id": "synthetic-plan",
+            "request_id": "synthetic-request"}, headers=HEADERS).json()
+    assert value == {"error": "backend_unavailable", "backend_error": "service_busy", "backend_status": 503,
+                     "request_id": "c" * 32, "phase": "capabilities", "operation_sent": False,
+                     "retryable": True, "retry_after_seconds": 2, "next_action": "retry_after_delay"}
+    assert attempts == ["/v1/capabilities"]
+
+
+def test_calls_listings_need_read_scope_and_pass_owned_pages_through(tmp_path):
+    permissions, seen = ["calls:read"], []
+    page = {"items": [{"id": "brief-synthetic", "channel": "browser"}], "next_offset": None}
+
+    def backend(request):
+        if request.url.path == "/v1/capabilities":
+            return httpx.Response(200, json={"permissions": permissions})
+        seen.append((request.url.path, json.loads(request.content)))
+        return httpx.Response(200, json=page)
+
+    tools = ["platform_capabilities", "calls_list_briefs", "calls_list_calls"]
+    app, _, _ = configured(tmp_path, backend, module="calls", tools=tools, grants=["calls:read"])
+    with TestClient(app) as client:
+        listed = {t["name"]: t for t in rpc(client, "tools/list").json()["result"]["tools"]}
+        assert set(listed) == set(tools)
+        assert listed["calls_list_calls"]["annotations"]["readOnlyHint"] is True
+        rest = client.post("/v1/calls_list_briefs", json={"limit": 5}, headers=HEADERS)
+        mcp = rpc(client, "tools/call", {"name": "calls_list_calls", "arguments": {}}).json()["result"]
+        assert rest.json() == mcp["structuredContent"] == page
+        assert client.post("/v1/calls_list_calls", json={"limit": 101}, headers=HEADERS).status_code == 422
+        permissions.clear()
+        assert client.post("/v1/calls_list_calls", json={}, headers=HEADERS).status_code == 403
+        assert [t["name"] for t in rpc(client, "tools/list").json()["result"]["tools"]] == [
+            "platform_capabilities"
+        ]
+    assert seen == [
+        ("/v1/list_briefs", {"limit": 5, "offset": 0}),
+        ("/v1/list_calls", {"limit": 100, "offset": 0}),
+    ]

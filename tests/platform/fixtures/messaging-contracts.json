@@ -795,7 +795,7 @@
         "openWorldHint": false,
         "readOnlyHint": true
       },
-      "description": "Search archived text across chosen accounts/chats/sender IDs. Lists use OR within each\ndimension, AND between dimensions; [] matches nothing. Exact account-scoped sender IDs,\nnot a merged person directory. query_mode: all words (all), phrase, or web (quotes/OR/-word).\nUTC range [from_time,to_time). order asc/desc; use next_cursor as after with unchanged\nfilters/order. before is an exclusive chronological boundary, incompatible with after.\nConversation view hides known system events unless include_system=true.\norder=relevance ranks hits, not dialogue turns. Preserve supplied order, inspect ambiguity.\ndirection: incoming/outgoing or empty. No provider calls, ACK or semantic task extraction.\n",
+      "description": "Search archived text across chosen accounts/chats/sender IDs. Lists use OR within each\ndimension, AND between dimensions; [] matches nothing. Exact account-scoped sender IDs,\nnot a merged person directory. query_mode: all words (all), phrase, or web (quotes/OR/-word).\nUTC range [from_time,to_time). order asc/desc; use next_cursor as after with unchanged\nfilters/order. before is an exclusive chronological boundary, incompatible with after.\nConversation view hides known system events unless include_system=true.\norder=relevance ranks hits, not dialogue turns. Preserve supplied order, inspect ambiguity.\ndirection: incoming/outgoing or empty. detail=transcript returns only the numbered transcript.\nNo provider calls, ACK or semantic task extraction.\n",
       "inputSchema": {
         "properties": {
           "query": {
@@ -976,7 +976,8 @@
             "default": "compact",
             "enum": [
               "compact",
-              "full"
+              "full",
+              "transcript"
             ],
             "title": "Detail",
             "type": "string"
@@ -1254,7 +1255,7 @@
         "openWorldHint": false,
         "readOnlyHint": true
       },
-      "description": "Archived history. order=desc starts at newest; next_cursor as after continues in that\norder. To expand older than context_window.older_cursor, use before with order=desc.\nTo expand newer than context_window.newer_cursor, use after with order=asc.\nafter and before are mutually exclusive; UTC dates are [from_time,to_time).\nConversation view hides known system events unless include_system=true.\nRead display_text/kind and order_status; positions belong to this page only.\nNo provider call or read receipt. Empty page does not prove full provider history.\n",
+      "description": "Archived history. order=desc starts at newest; next_cursor as after continues in that\norder. To expand older than context_window.older_cursor, use before with order=desc.\nTo expand newer than context_window.newer_cursor, use after with order=asc.\nafter and before are mutually exclusive; UTC dates are [from_time,to_time).\nConversation view hides known system events unless include_system=true.\nRead display_text/kind and order_status; positions belong to this page only.\ndetail=transcript returns only the numbered transcript and cursors.\nNo provider call or read receipt. Empty page does not prove full provider history.\n",
       "inputSchema": {
         "properties": {
           "chat_id": {
@@ -1335,7 +1336,8 @@
             "default": "compact",
             "enum": [
               "compact",
-              "full"
+              "full",
+              "transcript"
             ],
             "title": "Detail",
             "type": "string"
@@ -1375,7 +1377,7 @@
         "openWorldHint": false,
         "readOnlyHint": true
       },
-      "description": "Message, counted nearby conversation, files and first five visible reviews.\nKnown system events are hidden unless include_system=true; unknown empty records stay visible.\nconversation describes the actual known chat head, not this window. Inspect freshness,\nordering ambiguity and heuristic suggested_action before claiming who needs to reply.\nPaginate reviews via get_reviews.",
+      "description": "Message, counted nearby conversation, files and first five visible reviews.\nKnown system events are hidden unless include_system=true; unknown empty records stay visible.\nconversation describes the actual known chat head, not this window. Inspect freshness,\nordering ambiguity and heuristic suggested_action before claiming who needs to reply.\nCompact returns the anchor once, in message; detail=transcript returns only the transcript.\nPaginate reviews via get_reviews.",
       "inputSchema": {
         "properties": {
           "message_id": {
@@ -1451,7 +1453,8 @@
             "default": "compact",
             "enum": [
               "compact",
-              "full"
+              "full",
+              "transcript"
             ],
             "title": "Detail",
             "type": "string"

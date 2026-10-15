@@ -1,3 +1,6 @@
+import pytest
+
+from family_calendar.errors import CalendarError
 from family_calendar.service.core import FamilyService
 from tests.service.test_policy import SCOPES
 
@@ -180,3 +183,31 @@ def test_large_cached_calendar_keeps_plan_valid_but_overlap_check_incomplete(hou
     assert result["plan_id"]
     assert result["overlap_check"]["status"] == "incomplete"
     assert result["overlap_check"]["reason"] == "event_limit"
+
+
+def wall(start, end, zone):
+    return {
+        "action": "create",
+        "calendar_ref": "cal-a",
+        "event": {"title": "Wall time", "start": start, "end": end, "timezone": zone},
+    }
+
+
+def test_plan_reads_offset_free_event_times_in_the_event_timezone(household):
+    service, key = setup(household)
+    result = service.plan(key, [wall("2026-10-20T10:00:00", "2026-10-20T10:30", "Asia/Makassar")])
+    event = household.one("SELECT payload FROM plans WHERE id=%s", (result["plan_id"],))["payload"]
+    assert event["steps"][0]["event"]["start"] == "2026-10-20T02:00:00+00:00"
+    assert result["steps"][0]["diff"]["end"]["after"] == "2026-10-20T02:30:00+00:00"
+    offset = service.plan(key, [wall("2026-10-20T10:00:00+08:00", "2026-10-20T10:30", "Asia/Makassar")])
+    assert offset["steps"][0]["event"]["start"] == "2026-10-20T02:00:00+00:00"
+    for start, end, zone, code in [
+        ("2026-03-29T02:30", "2026-03-29T04:00", "Europe/Berlin", "invalid_local_time"),
+        ("2026-10-25T02:30", "2026-10-25T04:00", "Europe/Berlin", "ambiguous_local_time"),
+        ("2026-10-20", "2026-10-21", "Asia/Makassar", "invalid_time"),
+        ("2026-10-20T25:00", "2026-10-21T01:00", "Asia/Makassar", "invalid_time"),
+        ("2026-10-20T10:00", "2026-10-20T11:00", "../Makassar", "invalid_timezone"),
+    ]:
+        with pytest.raises(CalendarError, match=code):
+            service.plan(key, [wall(start, end, zone)])
+    assert service.capabilities(key)["constraints"]["time_format"].startswith("ISO 8601")

@@ -42,6 +42,7 @@ FeedbackReferences = dict[Literal['message_ids','chat_ids','subscription_ids'],A
 FeedbackDescription = Annotated[StrictStr,Field(min_length=1,max_length=4000,pattern=r'^[^\x00-\x08\x0b-\x1f\x7f]+$')]
 FeedbackOperation = Annotated[StrictStr,Field(min_length=1,max_length=128,pattern=r'^[a-z][a-z0-9_]*$')]
 Detail = Literal['compact','full']
+MessageDetail = Literal['compact','full','transcript']
 ConversationView = Literal['archive','conversation']
 QueryMode = Literal['all','phrase','web','exact']
 SearchLanguage = Literal['auto','simple','russian','english','indonesian']
@@ -246,6 +247,8 @@ def create_app(store: Store, allowed_hosts: list[str]):
         'Read capabilities for account scope, source coverage and synthetic-data status. '
         'Message tools default to conversation view: preserve returned order, use display_text and kind, '
         'and inspect order_status and conversation state. Position is local to this page, never a permanent sequence. '
+        'detail=compact returns each message text once; detail=transcript returns only the numbered transcript; '
+        'detail=full adds body, ordering and timestamp evidence. '
         'An ambiguous timestamp tie does not establish who replied last; suggested_action is a heuristic, not an obligation. '
         'Use preview_message for formatted drafts. Its digest binds content, not human approval. '
         'Before send_message, show the sending account, exact recipient, visible text, formatting, '
@@ -540,7 +543,7 @@ def create_app(store: Store, allowed_hosts: list[str]):
                accounts: list[StrictStr] | None=None, chats: list[StrictStr] | None=None,
                senders: list[StrictStr] | None=None, query_mode: QueryMode='all', order: Literal['asc','desc','relevance']='asc',
                before: str='', direction: Literal['','incoming','outgoing']='', search_language: SearchLanguage='auto', fuzzy: bool=False,
-               compact: bool | None=None, body_chars: StrictInt | None=None, include_coverage: bool | None=None, detail: Detail='compact',
+               compact: bool | None=None, body_chars: StrictInt | None=None, include_coverage: bool | None=None, detail: MessageDetail='compact',
                     view: ConversationView='conversation',include_system: StrictBool=False,exclude_channels: StrictBool=False) -> dict[str, Any]:
         """Search archived text across chosen accounts/chats/sender IDs. Lists use OR within each
         dimension, AND between dimensions; [] matches nothing. Exact account-scoped sender IDs,
@@ -549,7 +552,8 @@ def create_app(store: Store, allowed_hosts: list[str]):
         filters/order. before is an exclusive chronological boundary, incompatible with after.
         Conversation view hides known system events unless include_system=true.
         order=relevance ranks hits, not dialogue turns. Preserve supplied order, inspect ambiguity.
-        direction: incoming/outgoing or empty. No provider calls, ACK or semantic task extraction.
+        direction: incoming/outgoing or empty. detail=transcript returns only the numbered transcript.
+        No provider calls, ACK or semantic task extraction.
         """
         return call(ctx,'search',detail=detail,query=query,account=account,chat=chat,sender=sender,
                     from_time=from_time,to_time=to_time,after=after,limit=limit,
@@ -590,7 +594,7 @@ def create_app(store: Store, allowed_hosts: list[str]):
     @mcp.tool(structured_output=True, annotations=read)
     def get_messages(ctx: Context, chat_id: str, after: str='', limit: int=20,
                      before: str='', order: Literal['asc','desc']='asc', from_time: str='', to_time: str='',
-                     compact: bool | None=None,body_chars: StrictInt | None=None,include_coverage: bool | None=None, detail: Detail='compact',
+                     compact: bool | None=None,body_chars: StrictInt | None=None,include_coverage: bool | None=None, detail: MessageDetail='compact',
                     view: ConversationView='conversation',include_system: StrictBool=False) -> dict[str, Any]:
         """Archived history. order=desc starts at newest; next_cursor as after continues in that
         order. To expand older than context_window.older_cursor, use before with order=desc.
@@ -598,6 +602,7 @@ def create_app(store: Store, allowed_hosts: list[str]):
         after and before are mutually exclusive; UTC dates are [from_time,to_time).
         Conversation view hides known system events unless include_system=true.
         Read display_text/kind and order_status; positions belong to this page only.
+        detail=transcript returns only the numbered transcript and cursors.
         No provider call or read receipt. Empty page does not prove full provider history.
         """
         return call(ctx,'get_messages',detail=detail,chat_id=chat_id,after=after,limit=limit,
@@ -607,12 +612,13 @@ def create_app(store: Store, allowed_hosts: list[str]):
     @mcp.tool(structured_output=True, annotations=read)
     def get_context(ctx: Context, message_id: str, limit: int=10,
                     before_count: StrictInt | None=None, after_count: StrictInt | None=None,
-                    compact: bool | None=None, body_chars: StrictInt | None=None, include_coverage: bool | None=None, detail: Detail='compact',
+                    compact: bool | None=None, body_chars: StrictInt | None=None, include_coverage: bool | None=None, detail: MessageDetail='compact',
                     view: ConversationView='conversation',include_system: StrictBool=False) -> dict[str, Any]:
         """Message, counted nearby conversation, files and first five visible reviews.
         Known system events are hidden unless include_system=true; unknown empty records stay visible.
         conversation describes the actual known chat head, not this window. Inspect freshness,
         ordering ambiguity and heuristic suggested_action before claiming who needs to reply.
+        Compact returns the anchor once, in message; detail=transcript returns only the transcript.
         Paginate reviews via get_reviews."""
         return call(ctx,'get_context',detail=detail,message_id=message_id,limit=limit,before_count=before_count,
                     after_count=after_count,compact=compact,body_chars=body_chars,include_coverage=include_coverage,view=view,include_system=include_system)

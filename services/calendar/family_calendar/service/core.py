@@ -1,5 +1,6 @@
 from datetime import datetime, timedelta, timezone
 import hashlib
+import re
 from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
 from psycopg.types.json import Jsonb
@@ -17,15 +18,38 @@ def window(start, end):
     return a, b
 
 
+TIME_FORMAT = (
+    "ISO 8601 date-time with offset or Z, e.g. 2026-10-20T10:00:00+08:00; plan event "
+    "start/end may omit the offset (YYYY-MM-DDTHH:MM[:SS]) and are then wall time in "
+    "the event's IANA timezone"
+)
+LOCAL_TIME = re.compile(r"\d{4}-\d{2}-\d{2}T\d{2}:\d{2}(?::\d{2}(?:\.\d{1,6})?)?")
+
+
+def wall_time(value, zone):
+    """Resolve an offset-free event time in its own zone; gaps and folds fail explicitly."""
+    if not isinstance(value, str) or not LOCAL_TIME.fullmatch(value):
+        return value
+    try:
+        t = datetime.fromisoformat(value).replace(tzinfo=zone)
+    except ValueError:
+        raise CalendarError("invalid_time") from None
+    if t.astimezone(timezone.utc).astimezone(zone).replace(tzinfo=None) != t.replace(tzinfo=None):
+        raise CalendarError("invalid_local_time")
+    if t.replace(fold=0).utcoffset() != t.replace(fold=1).utcoffset():
+        raise CalendarError("ambiguous_local_time")
+    return t
+
+
 def validate_event(event):
     allowed = {"title", "start", "end", "timezone", "location", "description"}
     if not isinstance(event, dict) or set(event) - allowed or not {"start", "end", "timezone"} <= set(event):
         raise CalendarError("invalid_event")
-    a, b = window(event["start"], event["end"])
     try:
-        ZoneInfo(event["timezone"])
-    except (ZoneInfoNotFoundError, TypeError):
+        zone = ZoneInfo(event["timezone"])
+    except (ZoneInfoNotFoundError, TypeError, ValueError):
         raise CalendarError("invalid_timezone") from None
+    a, b = window(wall_time(event["start"], zone), wall_time(event["end"], zone))
     for k, limit in [("title", 256), ("location", 512), ("description", 4000)]:
         if k in event and (not isinstance(event[k], str) or len(event[k]) > limit):
             raise CalendarError("invalid_event")
@@ -178,6 +202,7 @@ class FamilyService:
             permissions=sorted(self.principal(key)["scopes"]),
             constraints={
                 "event_write": "single non-recurring timed guest-free event",
+                "time_format": TIME_FORMAT,
                 "recurrence_write": False,
                 "future_split": False,
                 "invitations": False,

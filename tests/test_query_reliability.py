@@ -279,7 +279,7 @@ def test_group_attention_uses_explicit_candidates_without_rescanning_broadcasts(
             'params':{'name':'list_chats','arguments':{'limit':5}}}).json()
         record_property('mcp_elapsed_ms',round((monotonic()-started)*1000,2))
         assert 'error' not in response and not response['result'].get('isError'),response
-        assert response['result']['structuredContent']['items'][0]['conversation']['owner_attention']['target_message']['id']==expected
+        assert response['result']['structuredContent']['items'][0]['conversation']['owner_attention']['target_message_id']==expected
 
 
 def test_group_reply_heads_keep_telegram_order_and_whatsapp_same_second_uncertainty(seeded):
@@ -381,5 +381,5 @@ def test_large_chat_audit_calls_work_through_store_rest_and_mcp(seeded,record_pr
             'params':{'name':'list_chats','arguments':options}}).json()
         record_property('mcp_elapsed_ms',round((monotonic()-started)*1000,2))
         assert 'error' not in rpc and not rpc['result'].get('isError'),rpc
-        assert rpc['result']['structuredContent']['items'][0]['last_message_id']=='audit-call-20000'
-        assert rpc['result']['structuredContent']['items'][0]['conversation']['latest_known_meaningful_message']['id']=='audit-call-20000'
+        assert rpc['result']['structuredContent']['items'][0]['last_message']['id']=='audit-call-20000'
+        assert rpc['result']['structuredContent']['items'][0]['conversation']['latest_message_id']=='audit-call-20000'

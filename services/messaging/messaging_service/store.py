@@ -198,16 +198,18 @@ class Store:
     def capabilities(self, token):
         with self.authorized(token,'capabilities') as (c, p):
             from .messenger_operations import CATALOG_VERSION,OPERATIONS,operation_manifest
-            from .whatsapp_capabilities import account_provider
+            from .commands import manifest
             dataset=self.dataset(c,p)
             accounts = c.execute('SELECT id,platform,label,synthetic FROM accounts WHERE id=ANY(%s) ORDER BY id',
                                  ([r['id'] for r in dataset['sources']],)).fetchall()
             supported_by_account={}
             for account in accounts:
-                provider=account_provider(c,account['id'],account['platform'])
-                supported=[row['operation'] for row in operation_manifest(account['platform'],provider=provider)
-                           if row['supported']]
-                supported_by_account[account['id']]={'provider':provider,'count':len(supported),'operations':supported}
+                # Same rows as list_messenger_operations: supported, plus what this key
+                # can use now (key permitted and opted in for the account).
+                listed=manifest(c,p,account['id'])
+                supported=[row['operation'] for row in listed['items']]
+                supported_by_account[account['id']]={'provider':listed['provider'],'count':len(supported),
+                    'operations':supported,'available_operations':[row['operation'] for row in listed['items'] if row['available']]}
             features={'read':['search','history','context','updates','reviews','search_people','search_files','get_file_text','get_file_occurrences','get_sync_status','get_file_segments','resolve_reference','preview_message'], 'download':['attachment','request_file_download'], 'cursor-write':['ack'], 'send':['send_message','get_send_status']}
             if 'read' in p['permissions']:
                 features['review-write']=['record_review']
@@ -249,6 +251,7 @@ class Store:
                     'update_orders':['event','sent_at_within_delivered_batch'],
                     'updates_exclude_channels':True,'updates_start_from':['beginning','now_creation_only'],'is_backfill':True,
                     'detail_default':'compact','details':['compact','full'],
+                    'message_details':['compact','full','transcript'],
                     'collector_operations':['connection','live_capture','history','media'],
                 'connection_failures':'durable_terminal_gate_and_capped_retry','status_cache_seconds':10,'status_refresh':True,
                     'people_candidates':['transliteration','same_sender_grouping'],
