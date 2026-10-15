@@ -60,6 +60,7 @@ def test_download_hash_scope_and_revocation(seeded):
     s,a,b=seeded
     item=s.get_attachment(b,'demo-file-1')
     grant=item['download_url'].rsplit('/',1)[-1]
+    # download() also returns the admitted binding now; assertions are unchanged.
     metadata,path,_=s.download(grant)
     assert hashlib.sha256(path.read_bytes()).hexdigest()==item['sha256']
     with pytest.raises(APIError): s.download(item['sha256'])

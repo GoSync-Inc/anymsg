@@ -50,6 +50,7 @@ def test_unexpected_http_failures_have_one_safe_response_and_one_capture(channel
             calls.append('download')
             if channel == 'download_stat':
                 # Exercise the real FileResponse stat failure before headers.
+                # Store.download also returns the admitted binding (unused here).
                 return {'filename': PRIVATE, 'digest': 'a' * 64}, tmp_path / 'missing-original', ()
             raise failure
 
