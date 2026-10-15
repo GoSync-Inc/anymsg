@@ -45,6 +45,63 @@ async def test_only_one_worker_can_recover_jobs_and_run_for_a_database(store):
         ).fetchone()["ok"]
 
 
+@pytest.mark.asyncio
+async def test_interrupted_sync_job_fails_once_and_does_not_block_a_fresh_refresh(household):
+    from family_calendar.service.store import Store
+    from family_calendar.service.worker import Worker
+
+    household.grant("family", "adult-a", "cal-a", SCOPES, "details")
+    key = household.agent("agent", "family", "adult-a", SCOPES, ["cal-a"])
+    window = ("2026-10-19T00:00:00Z", "2026-10-20T00:00:00Z")
+    # A job that killed the previous worker process mid-read.
+    household.query(
+        "INSERT INTO sync_jobs(id,principal_id,calendar_ref,start_at,end_at,state) "
+        "VALUES ('sync-crashed','agent','cal-a',%s,%s,'sending')",
+        window,
+    )
+    reads = []
+
+    class Providers:
+        async def read_window(self, cal, start, end):
+            reads.append(cal["ref"])
+            return []
+
+        async def close(self):
+            pass
+
+    recovering = Worker(Store(household.dsn, household.schema), Providers())
+    ticked = asyncio.Event()
+
+    async def tick():
+        ticked.set()
+        await asyncio.Future()
+
+    recovering.tick = tick
+    running = asyncio.create_task(recovering.run())
+    try:
+        await asyncio.wait_for(ticked.wait(), 5)
+    finally:
+        running.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await running
+    assert household.one("SELECT state FROM sync_jobs WHERE id='sync-crashed'")["state"] == "failed"
+    coverage = FamilyService(household).agenda(key, ["cal-a"], *window)["coverage"][0]
+    assert (coverage["status"], coverage["error"]) == ("unknown", "sync_interrupted")
+
+    worker = Worker(household, Providers())
+    household.query(
+        "INSERT INTO sync_jobs(id,principal_id,calendar_ref,start_at,end_at) "
+        "VALUES ('sync-fresh','agent','cal-a',%s,%s)",
+        window,
+    )
+    assert await worker.sync_one()
+    assert not await worker.sync_one()
+    assert reads == ["cal-a"]
+    assert household.one("SELECT state FROM sync_jobs WHERE id='sync-fresh'")["state"] == "verified"
+    coverage = FamilyService(household).agenda(key, ["cal-a"], *window)["coverage"][0]
+    assert (coverage["status"], coverage["error"]) == ("complete", None)
+
+
 @pytest.fixture
 def operation(household):
     household.grant("family", "adult-a", "cal-a", SCOPES, "details")
