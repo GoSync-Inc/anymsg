@@ -22,9 +22,11 @@ permissions:
   contents: read
 concurrency:
   # Each merge queue run has a group of its own and cancels nothing; a superseded
-  # group run finishes and the queue ignores it. Other runs keep their groups.
-  group: ci-${{ github.event_name == 'merge_group' && format('merge-queue-{0}', github.run_id) || github.event.pull_request.number || github.ref }}
-  cancel-in-progress: ${{ github.event_name != 'merge_group' }}
+  # group run finishes and the queue ignores it. Each main push run also has its
+  # own group, so every merged SHA keeps a complete result for promotion and
+  # Tiden. Pull request and dispatch runs keep their groups.
+  group: ci-${{ github.event_name == 'merge_group' && format('merge-queue-{0}', github.run_id) || github.event_name == 'push' && format('main-push-{0}', github.run_id) || github.event.pull_request.number || github.ref }}
+  cancel-in-progress: ${{ github.event_name != 'merge_group' && github.event_name != 'push' }}
 jobs:
   checks:
     uses: ./.github/workflows/checks.yml
