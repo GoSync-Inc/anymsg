@@ -8,8 +8,10 @@ Preserve existing SQL migration checksums and provider IDs. Test wheels outside 
 checkout and inspect wheel/sdist/npm contents before publication. Stop owned test
 processes after use; do not stop shared services. Superflow is not automatic.
 
-Maintain planned work, priorities and delivery status in root BACKLOG.md.
-Module documents keep contracts and acceptance procedures and link to that queue;
+Maintain requirements, planned work, priorities and delivery status in the existing
+DeedKit Tiden product. Read docs/operations/tiden-product-workflow.md and use the
+standard Tiden skills. BACKLOG.md is navigation and a legacy-ID index, not an
+editable queue. Module documents keep contracts and acceptance procedures;
 do not create parallel roadmaps. Distinguish merged source from live verification.
 
 Production upgrades follow docs/operations/production.md. Use the verified
@@ -20,7 +22,7 @@ existing state, sessions and Compose topology; do not prune shared Docker data
 to make space. Changing a deployed service requires the applicable live-session
 authority; synthetic CI is not that authority.
 
-Tiden holds the product specs and test evidence; read TIDEN-CI.md. Never
+Tiden holds the product specs, work queue and test evidence; read TIDEN-CI.md. Never
 rename, move or re-parametrize existing tests (path and name are Tiden IDs)
 or the seven `anymsg-ci::*` checks. For product changes run the intent loop:
 `tiden intent start "<objective>" --promise ...` before editing, then push,

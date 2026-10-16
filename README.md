@@ -143,7 +143,9 @@ See [ACCESS.md](ACCESS.md), [SEARCH.md](SEARCH.md), [FILE_INDEX.md](FILE_INDEX.m
 [COLLECTORS.md](COLLECTORS.md), [MEDIA_STORAGE.md](MEDIA_STORAGE.md),
 [ENRICHMENT.md](ENRICHMENT.md) and [BACKUP_STREAMING.md](BACKUP_STREAMING.md).
 Run synthetic tests only: [CONTRIBUTING.md](CONTRIBUTING.md).
-Current work, priorities and delivery status: [BACKLOG.md](BACKLOG.md).
+Current work, priorities and delivery status live in the existing Tiden product;
+[BACKLOG.md](BACKLOG.md) provides navigation and historical IDs. Agents follow the
+[Tiden product workflow](docs/operations/tiden-product-workflow.md).
 Component responsibilities and verification boundaries: [ARCHITECTURE.md](ARCHITECTURE.md).
 Historical agent review context: [REVIEW_FOLLOWUP.md](REVIEW_FOLLOWUP.md).
 Optional runtime diagnostics: [TELEMETRY.md](TELEMETRY.md).
