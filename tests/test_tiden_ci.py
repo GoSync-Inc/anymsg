@@ -6,7 +6,8 @@ import xml.etree.ElementTree as ET
 
 import pytest
 
-from scripts.tiden_ci import CHECKS, normalize_junit, prepare, publish, resolve_branch, route_branch
+from scripts.tiden_ci import (CHECKS, intent_links, linked_intent_branch, normalize_junit, prepare, publish,
+                              resolve_branch, route_branch)
 
 
 def report(tmp_path, xml):
@@ -241,3 +242,95 @@ def test_routed_run_refuses_a_rewritten_source_association(tmp_path, monkeypatch
     with pytest.raises(RuntimeError, match="rewrote"):
         publish(tmp_path, manifest, "codex/feature", "product", routed=True)
     assert any(call[1:3] == ["run", "abort"] for call in calls)
+
+
+# Synthetic Tiden identities; none of these belong to a real workspace or product.
+WORKSPACE = "aaaaaaaa-bbbb-4ccc-8ddd-eeeeeeeeeeee"
+PRODUCT = "11111111-2222-4333-8444-555555555555"
+INTENT_ID = "99999999-8888-4777-8666-555555555555"
+INTENT = {"id": INTENT_ID, "name": "intent/2026-10-16-feature", "status": "open"}
+
+
+def tiden_link(branch=INTENT_ID, product=PRODUCT, workspace=WORKSPACE):
+    return f"https://app.tiden.ai/{workspace}/products/{product}/branches/{branch}"
+
+
+def linked_manifest(manifest, *links):
+    return {**manifest, "pr_tiden_links": intent_links(" ".join(links))}
+
+
+def test_pull_request_description_yields_only_tiden_branch_ids():
+    body = (f"Fix.\n\nTiden intent branch: [intent/2026-10-16-feature]({tiden_link()})\n"
+            f"Again: {tiden_link()} and https://example.com/branches/{INTENT_ID}")
+    assert intent_links(body) == [{"workspace": WORKSPACE, "product": PRODUCT, "branch": INTENT_ID}]
+    assert intent_links("") == [] and intent_links(None) == []
+    many = " ".join(tiden_link(f"{i:08d}-0000-4000-8000-000000000000") for i in range(9))
+    assert len(intent_links(many)) == 5
+    assert intent_links(tiden_link(branch="not-a-uuid")) == []
+
+
+def test_linked_open_intent_branch_receives_pull_request_evidence(tmp_path, monkeypatch):
+    calls, manifest = routed_cli(monkeypatch, tmp_path, created=INTENT["name"], final_id=INTENT_ID,
+                                 final_branches=(), existing=(INTENT,))
+    result = publish(tmp_path, linked_manifest(manifest, tiden_link()), "codex/feature", PRODUCT,
+                     routed=True, workspace=WORKSPACE)
+    assert result["branchId"] == INTENT_ID
+    assert not any(call[1:3] == ["branch", "create"] for call in calls)
+    creation = next(call for call in calls if call[1:3] == ["run", "create"])
+    assert creation[creation.index("--branch") + 1] == INTENT["name"]
+    assert json.loads((tmp_path / "tiden-route.json").read_text()) == {
+        "branch": INTENT["name"], "source": "pull-request-link"}
+
+
+@pytest.mark.parametrize("existing, links", [
+    ((INTENT,), (tiden_link(product="22222222-2222-4333-8444-555555555555"),)),
+    ((INTENT,), (tiden_link(workspace="bbbbbbbb-bbbb-4ccc-8ddd-eeeeeeeeeeee"),)),
+    (({**INTENT, "status": "merged"},), (tiden_link(),)),
+    (({**INTENT, "name": "codex/other"},), (tiden_link(),)),
+    ((INTENT, {"id": "77777777-8888-4777-8666-555555555555", "name": "intent/2026-10-16-other", "status": "open"}),
+     (tiden_link(), tiden_link(branch="77777777-8888-4777-8666-555555555555"))),
+    ((), (tiden_link(),)),
+])
+def test_unusable_pull_request_link_keeps_git_branch_routing(tmp_path, monkeypatch, existing, links):
+    calls, manifest = routed_cli(monkeypatch, tmp_path, existing=existing)
+    result = publish(tmp_path, linked_manifest(manifest, *links), "codex/feature", PRODUCT,
+                     routed=True, workspace=WORKSPACE)
+    assert result["branchId"] == "new-id"
+    creation = next(call for call in calls if call[1:3] == ["run", "create"])
+    assert creation[creation.index("--branch") + 1] == "codex/feature"
+    assert json.loads((tmp_path / "tiden-route.json").read_text())["source"] == "routed"
+
+
+def test_explicit_target_wins_over_a_pull_request_link(tmp_path, monkeypatch):
+    explicit = {"id": "explicit-id", "name": "intent/explicit", "status": "open"}
+    calls, manifest = routed_cli(monkeypatch, tmp_path, created=explicit["name"], final_id="explicit-id",
+                                 final_branches=(), existing=(explicit, INTENT))
+    publish(tmp_path, linked_manifest(manifest, tiden_link()), "intent/explicit", PRODUCT, workspace=WORKSPACE)
+    creation = next(call for call in calls if call[1:3] == ["run", "create"])
+    assert creation[creation.index("--branch") + 1] == "intent/explicit"
+    meta = {**metadata(), "pr_tiden_links": intent_links(tiden_link())}
+    assert route_branch({**meta, "tiden_branch": "intent/explicit"}, {}) == ("intent/explicit", False)
+    assert route_branch(meta, {"codex/feature": "intent/mapped"}) == ("intent/mapped", False)
+    assert linked_intent_branch(meta["pr_tiden_links"], [INTENT], PRODUCT, WORKSPACE) == INTENT["name"]
+
+
+def test_unroutable_git_branch_name_needs_a_usable_pull_request_link(tmp_path, monkeypatch):
+    calls, manifest = routed_cli(monkeypatch, tmp_path, created=INTENT["name"], final_id=INTENT_ID,
+                                 final_branches=(), existing=(INTENT,))
+    manifest = {**linked_manifest(manifest, tiden_link()), "git_branch": "Release/1.2"}
+    assert publish(tmp_path, manifest, None, PRODUCT, routed=True, workspace=WORKSPACE)["branchId"] == INTENT_ID
+    with pytest.raises(ValueError, match="intent link"):
+        publish(tmp_path, {**manifest, "pr_tiden_links": []}, None, PRODUCT, routed=True, workspace=WORKSPACE)
+
+
+def test_prepare_keeps_pull_request_link_ids_but_not_the_description(tmp_path, monkeypatch):
+    import sys
+    from scripts import tiden_ci
+    (tmp_path / "metadata.json").write_text(json.dumps(metadata()))
+    monkeypatch.setenv("TIDEN_PR_BODY", f"Private note. Tiden intent branch: {tiden_link()}")
+    monkeypatch.setattr(sys, "argv", ["tiden_ci.py", "prepare", "--directory", str(tmp_path),
+                                      "--source-root", str(tmp_path)])
+    assert tiden_ci.main() == 0
+    manifest = (tmp_path / "manifest.json").read_text()
+    assert json.loads(manifest)["pr_tiden_links"] == [{"workspace": WORKSPACE, "product": PRODUCT, "branch": INTENT_ID}]
+    assert "Private note" not in manifest
