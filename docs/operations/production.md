@@ -36,19 +36,30 @@ SHA gets its own push CI for promotion. A queue run takes its workflow files fro
 the group commit; queue a fork's pull request only after reviewing its workflow
 changes (TIDEN-CI.md).
 
-The reviewed desired ruleset is `deploy/main-ruleset.json`. An administrator
-creates it with
+A merge through the queue is asynchronous. Once its checks pass, queue the pull
+request with **Merge when ready** or with the GraphQL `enqueuePullRequest`
+mutation, setting `expectedHeadOid` to the reviewed head SHA. It reaches `main`
+only after its group passes; a failed group drops it from the queue unmerged.
+While repository auto-merge is disabled, `gh pr merge` cannot queue a pull
+request: it calls `enablePullRequestAutoMerge` and fails with "Auto merge is not
+allowed" (cli/cli#13398).
+
+The reviewed desired ruleset is `deploy/main-ruleset.json`; until an administrator
+applies it, the classic rule in `deploy/main-protection.json` (strict up-to-date,
+no queue) stays live. Create the ruleset with
 `gh api --method POST repos/GoSync-Inc/deedkit/rulesets --input deploy/main-ruleset.json`,
-or updates the existing one with
+update it with
 `gh api --method PUT repos/GoSync-Inc/deedkit/rulesets/<id> --input deploy/main-ruleset.json`,
-and verifies the effective rules with
-`gh api repos/GoSync-Inc/deedkit/rules/branches/main`. Classic branch protection
-must stay absent: GitHub enforces it together with the ruleset, and its strict
-up-to-date check would again require updating each branch before it can enter
-the queue. `deploy/main-protection.json` keeps the previous classic protection
-for rollback only: restore it with
+and verify the effective rules with
+`gh api repos/GoSync-Inc/deedkit/rules/branches/main`. Then remove classic
+protection and keep it absent: GitHub enforces it together with the ruleset, and
+a pull request enters the queue only after it passes the branch protection
+checks, so a strict up-to-date rule would again require updating each branch
+first. `deploy/main-protection.json` remains the rollback state. To roll back,
+empty the queue (`mergeQueue(branch:"main"){entries{totalCount}}` is 0, or use
+`dequeuePullRequest`), restore classic protection with
 `gh api --method PUT repos/GoSync-Inc/deedkit/branches/main/protection --input deploy/main-protection.json`,
-then delete the ruleset.
+read it back, and only then delete the ruleset, so `main` is never unprotected.
 
 ## Host setup
 

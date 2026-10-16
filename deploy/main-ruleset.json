@@ -3,7 +3,7 @@
   "target": "branch",
   "enforcement": "active",
   "conditions": {
-    "ref_name": {"include": ["~DEFAULT_BRANCH"], "exclude": []}
+    "ref_name": {"include": ["refs/heads/main"], "exclude": []}
   },
   "bypass_actors": [],
   "rules": [
