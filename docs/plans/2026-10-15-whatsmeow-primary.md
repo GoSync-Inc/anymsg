@@ -2,8 +2,9 @@
 
 Status: implementation merged in [PR #19](https://github.com/GoSync-Inc/deedkit/pull/19),
 with corrective increments in PRs #20–23. This is historical design/acceptance
-reference. Current rollout and capability-extension status is maintained only in
-[BACKLOG.md](../../BACKLOG.md) (DK-07 and DK-28); production cutover remains separate.
+reference. Current rollout and capability-extension status is maintained in Tiden
+(DK-07 and DK-28), reached through [BACKLOG.md](../../BACKLOG.md).
+Production cutover remains separate.
 
 ## Target
 

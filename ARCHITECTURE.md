@@ -92,9 +92,10 @@ Examples of boundaries that must stay explicit:
   prove current provider completeness, transcription quality, server capacity
   or health of an off-site backup receiver.
 
-Future behavior belongs in [BACKLOG.md](BACKLOG.md) or an explicitly scoped
-change intent. It must not silently become an implemented baseline spec during
-a repository scan.
+Future behavior belongs in the existing Tiden product as queued requirements or
+an explicitly scoped change intent. [BACKLOG.md](BACKLOG.md) is its navigation
+and historical-ID index. Follow the [product workflow](docs/operations/tiden-product-workflow.md);
+future behavior must not silently become an implemented baseline during a scan.
 
 ## Evidence and reconciliation
 

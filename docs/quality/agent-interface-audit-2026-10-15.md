@@ -5,7 +5,8 @@ derived from an external agent audit. The private report and runtime identifiers
 are not repository inputs. Source changes require review and deployment; synthetic
 tests do not establish production recovery or host acceptance.
 
-Priorities and follow-up status belong in [BACKLOG.md](../../BACKLOG.md).
+Priorities and follow-up status belong in Tiden; [BACKLOG.md](../../BACKLOG.md)
+provides navigation and the historical-ID crosswalk.
 
 Status reconciled **2026-10-16** against main
 [`27ec8bf`](https://github.com/GoSync-Inc/deedkit/commit/27ec8bfc4d0a328dd4b639bab138cc21f6853ce7):

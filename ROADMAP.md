@@ -1,8 +1,8 @@
 # Roadmap
 
 The current platform-wide queue, priorities, completion criteria and delivered
-increments are maintained in **[BACKLOG.md](BACKLOG.md)**. This path remains as a
-compatibility entry point; do not add a second queue here.
+increments are maintained in **Tiden**, reached through [BACKLOG.md](BACKLOG.md).
+Both Markdown paths are navigation only; do not add a second queue here.
 
 DeedKit includes independent messaging, calendar, calls and gateway modules.
 The AnyMsg messaging module remains focused on collection, retrieval and scoped
