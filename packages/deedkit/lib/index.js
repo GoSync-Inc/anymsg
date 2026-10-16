@@ -1,7 +1,8 @@
 import {createHash, randomBytes} from 'node:crypto';
 import {constants, readFileSync} from 'node:fs';
-import {link, lstat, open, unlink} from 'node:fs/promises';
+import {link, lstat, open, realpath, unlink} from 'node:fs/promises';
 import {basename, dirname, join} from 'node:path';
+import {setTimeout as delay} from 'node:timers/promises';
 
 // The reviewed gateway catalog (services/gateway/src/agent_gateway/catalog.json)
 // plus platform_capabilities. A drift test keeps this list equal to the catalog.
@@ -105,6 +106,18 @@ function gatewayError(tool, status, body, headers) {
     operationSent: typeof body.operation_sent === 'boolean' ? body.operation_sent : null,
     phase: code(body.phase), reason: code(body.reason), backendError: code(body.backend_error),
     backendStatus: integer(body.backend_status, 599)});
+}
+
+// Remove only our own staging file, retrying briefly (Windows may hold it open).
+// Returns true when it is gone or was never ours; false when ours could not be removed.
+async function removeStaging(staging, same) {
+  for (let attempt = 0; attempt < 3; attempt++) {
+    const current = await lstat(staging).catch(error => error.code === 'ENOENT' ? null : undefined);
+    if (current === null || current && !same(current)) return true;
+    if (await unlink(staging).then(() => true, () => false)) return true;
+    await delay(50 * (attempt + 1));
+  }
+  return false;
 }
 
 // Releasing a body is best effort: a failing cancel must not replace the classified error.
@@ -238,14 +251,30 @@ export class DeedKitClient {
         !/^(?:_releases\/[0-9a-f]{12}\/)?v1\/files\/[A-Za-z0-9_-]{43}$/.test(url.pathname.slice(prefix.length)))
       throw new DeedKitError('invalid_download_url');
     if (signal?.aborted) throw new DeedKitError('request_aborted');
-    if (await lstat(output).then(() => true, error => error.code !== 'ENOENT'))
+    const name = basename(output);
+    // A Windows name with ':' addresses an alternate data stream, not a new file.
+    if (!name || name === '.' || name === '..' || process.platform === 'win32' && name.includes(':'))
+      throw new TypeError('Invalid output path');
+    // Resolve the existing directory through the filesystem, so the staging file and
+    // the output share one real directory (no lexical '..' or drive-relative surprises).
+    const directory = await realpath(dirname(output)).catch(() => { throw new DeedKitError('output_unavailable'); });
+    const target = join(directory, name);
+    if (await lstat(target).then(() => true, error => error.code !== 'ENOENT'))
       throw new DeedKitError('output_unavailable');
-    // Bytes go to a private staging file with an unguessable name beside the output.
+    // Bytes go to a private staging file with an unguessable name in that directory.
     // Only a verified file is published, with link(), which never replaces an existing
     // path; a failure removes the staging file and never touches the output path.
-    const staging = join(dirname(output), `.${basename(output).slice(0, 64)}.${randomBytes(12).toString('hex')}.deedkit-part`);
+    // The directory must be writable only by trusted users: anyone who can rename its
+    // entries can also replace the output after this call returns.
+    const staging = join(directory, `.deedkit-${randomBytes(12).toString('hex')}.part`);
     const handle = await open(staging, constants.O_WRONLY | constants.O_CREAT | constants.O_EXCL |
       (constants.O_NOFOLLOW ?? 0), 0o600).catch(() => { throw new DeedKitError('output_unavailable'); });
+    const created = await handle.stat().catch(async () => {
+      await handle.close().catch(() => {});
+      await unlink(staging).catch(() => {});
+      throw new DeedKitError('output_unavailable');
+    });
+    const same = value => Boolean(value?.isFile()) && value.dev === created.dev && value.ino === created.ino;
     const controller = new AbortController();
     let timer;
     // The deadline covers each wait for the server, not the whole transfer.
@@ -297,14 +326,27 @@ export class DeedKitClient {
         throw new DeedKitError('download_integrity_error', {status: 200});
       await handle.sync();
       if ((await handle.stat()).size !== grant.bytes) throw new DeedKitError('output_unavailable');
+      // Windows cannot link or remove a file that is still open.
       await handle.close();
-      // Fails if anything appeared at the output path meanwhile; nothing is overwritten.
-      await link(staging, output).catch(() => { throw new DeedKitError('output_unavailable'); });
-      return {path: output, bytes: total, sha256: grant.sha256};
+      // Publish only the verified file: the staging name must still be the inode written
+      // above, and link() fails if anything appeared at the output path meanwhile.
+      if (!same(await lstat(staging).catch(() => null)))
+        throw new DeedKitError('output_unavailable', {reason: 'staging_replaced'});
+      await link(staging, target).catch(() => { throw new DeedKitError('output_unavailable'); });
+      // A swap between the check and link() is detected here; the unknown file is left alone.
+      if (!same(await lstat(target).catch(() => null)))
+        throw new DeedKitError('output_unavailable', {reason: 'published_file_replaced'});
+      const result = {path: output, bytes: total, sha256: grant.sha256};
+      if (!await removeStaging(staging, same)) result.staging_left = staging;
+      return result;
+    } catch (caught) {
+      const error = caught instanceof DeedKitError ? caught : new DeedKitError('output_unavailable');
+      await handle.close().catch(() => {});
+      if (!await removeStaging(staging, same) && !error.reason) error.reason = 'staging_not_removed';
+      throw error;
     } finally {
       clearTimeout(timer);
       await handle.close().catch(() => {});
-      await unlink(staging).catch(() => {});
     }
   }
   async downloadAttachment(args, output, options = {}) {

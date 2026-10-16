@@ -1,7 +1,7 @@
 import {test} from 'node:test';
 import assert from 'node:assert/strict';
 import {createHash} from 'node:crypto';
-import {existsSync, mkdtempSync, readdirSync, readFileSync, rmSync, statSync, writeFileSync} from 'node:fs';
+import {existsSync, mkdtempSync, readdirSync, readFileSync, renameSync, rmSync, statSync, writeFileSync} from 'node:fs';
 import {open} from 'node:fs/promises';
 import {tmpdir} from 'node:os';
 import {join} from 'node:path';
@@ -30,7 +30,7 @@ test('downloads a ticket into a new private file without sending the gateway key
     const result = await client.downloadAttachment({attachment_id: 'fixture-attachment'}, output);
     assert.deepEqual(result, {path: output, bytes: bytes.length, sha256, filename: 'fixture.txt'});
     assert.deepEqual(readFileSync(output), bytes);
-    assert.equal(statSync(output).mode & 0o777, 0o600);
+    if (process.platform !== 'win32') assert.equal(statSync(output).mode & 0o777, 0o600);
     const [url, request] = requests[1];
     assert.equal(url, `https://gateway.example/deedkit/v1/files/${ticket}`);
     assert.equal(request.method, 'GET');
@@ -149,6 +149,31 @@ test('cleanup never removes a file that replaced the output path', async () => {
     assert.equal(readFileSync(late, 'utf8'), 'arrived first');
     assert.deepEqual(readdirSync(dir).sort(), ['file.bin', 'late.bin']);
   } finally { rmSync(dir, {recursive: true, force: true}); }
+});
+
+test('a replaced staging file is never published or deleted', async () => {
+  const dir = directory();
+  try {
+    const output = join(dir, 'file.bin');
+    const fetch = async () => new Response(new ReadableStream({pull(controller) {
+      // Another writer of the directory swaps the staging entry mid-transfer.
+      const staging = readdirSync(dir).find(name => name.endsWith('.part'));
+      renameSync(join(dir, staging), join(dir, 'moved'));
+      writeFileSync(join(dir, staging), 'replacement');
+      controller.enqueue(bytes);
+      controller.close();
+    }}), {status: 200});
+    const client = new DeedKitClient({baseUrl: 'https://gateway.example/deedkit', token, fetch});
+    await assert.rejects(client.downloadFile(grant(), output), {code: 'output_unavailable', reason: 'staging_replaced'});
+    assert.ok(!existsSync(output));
+    const replacement = readdirSync(dir).find(name => name.endsWith('.part'));
+    assert.equal(readFileSync(join(dir, replacement), 'utf8'), 'replacement');
+  } finally { rmSync(dir, {recursive: true, force: true}); }
+});
+
+test('a Windows alternate-stream output name is refused', {skip: process.platform !== 'win32'}, async () => {
+  const client = new DeedKitClient({baseUrl: 'https://gateway.example/deedkit', token, fetch: async () => fileResponse()});
+  await assert.rejects(client.downloadFile(grant(), 'file.bin:stream'), TypeError);
 });
 
 test('an attachment without an available original is not a usage error', async () => {

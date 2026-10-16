@@ -104,6 +104,8 @@ export interface DownloadResult {
   path: string;
   bytes: number;
   sha256: string;
+  /** Set only when the published file's staging link could not be removed. */
+  staging_left?: string;
 }
 
 export type JsonValue = null | boolean | number | string | JsonValue[] | { [key: string]: JsonValue };
@@ -137,7 +139,7 @@ export declare class DeedKitClient {
   static isReadOnly(tool: ToolName): boolean;
   call(tool: ToolName, args?: ToolArguments, options?: CallOptions): Promise<Record<string, unknown>>;
   platformCapabilities(options?: CallOptions): Promise<Record<string, unknown>>;
-  /** Stream a messages_get_attachment grant into a new private file, verifying length and SHA-256. */
+  /** Stream a grant into a private staging file, verify length and SHA-256, then link it to a new output name. */
   downloadFile(grant: DownloadGrant, output: string, options?: CallOptions): Promise<DownloadResult>;
   downloadAttachment(args: { attachment_id: string }, output: string, options?: CallOptions):
     Promise<DownloadResult & { filename: string | null }>;
