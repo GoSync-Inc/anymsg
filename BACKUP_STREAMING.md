@@ -18,10 +18,28 @@ is used only by the operator streaming code.
 Originals are read from the immutable, read-only CAS. Every referenced digest
 and size is verified, then each source is hashed again while normalized USTAR
 reads it. The manifest itself and database dump are also checked during reads.
-No original is linked, copied, deleted or modified. Reference capture must not
-be combined with future original eviction unless that implementation adds a
-shared backup/blob lifecycle fence; until then, the current immutable CAS must
-stay available for a retry.
+No source original is linked, copied, deleted or modified. With schema33 and
+later, capture first opens a durable database lifecycle fence. Both staged and
+reference capture retain it throughout encryption, delivery and retries. The
+retention worker cannot evict an original while any such fence remains open.
+Only a durable receipt matching the captured backup allows the host runner to
+release that fence through its separate isolated worker. The release worker has
+no provider sessions, original files, delivery key or Docker socket mounts.
+
+An unknown outcome or process crash can leave a fence open; it has no automatic
+expiry. A manual `snapshot` also leaves its fence open until the operator records
+successful delivery or explicitly reconciles abandonment. Before releasing an
+orphan, identify its exact job, stop only that owned job and establish that no
+capture, encoder, delivery or retry still needs its originals. Do not infer this
+from age alone. Before activating original eviction, finish or safely abandon
+all older staged/reference jobs: schema32 captures have no lifecycle fence and
+cannot protect themselves from eviction.
+
+Schema33/34 manifests distinguish present originals from deliberately absent
+ones. Each absence must match its captured catalog and completed eviction
+journal. An unexplained missing resident original still fails verification.
+Restored fences are released only after bundle/database verification and
+quarantine, with collectors disabled and old API keys revoked.
 
 Pinned binary `age` writes into a bounded pipe/FIFO. The host bridges this stream
 to SSH; only the host has the forced-command delivery key. The container retains
@@ -69,7 +87,7 @@ both versions; a sender switch requires the new matching worker and host runner.
 1. Run `tests/test_backup*.py` with an isolated PostgreSQL test database. Run an
    actual pinned-age encrypt/decrypt and pg_dump/pg_restore drill with sessions,
    spool and settings fixtures in quarantine. Never send or activate restored
-   collectors. Current supported backup schema range is 2..27.
+   collectors. Current supported backup schema range is 2..34.
 2. Install the new root-owned `backup_receiver.py` on the existing backup host
    without changing the restricted key's shell/read/delete privileges. The forced
    command stays the same receiver invocation; it accepts v1/v2 from stdin and
@@ -96,6 +114,90 @@ Use receiver-host maintenance `--prune --protected-file <root-owned-marker>
 anchor, filling remaining slots with the newest copies. If anchors exceed the
 selected cap, or a protected ciphertext fails verification, deletion is refused.
 The old daily/weekly presets remain available when `--max-copies` is omitted.
+
+For **one independently verified recovery point**, use local root maintenance
+`--rotate-anchor --protected-file <marker> --restore-proof <proof>
+--expected-protected-sha256 <previous-marker-sha256>`. Keep the existing anchor
+until its replacement has been decrypted and restored in an isolated quarantine.
+One retained point still needs temporary capacity for the old point **and** the
+new candidate; a quota failure never authorizes deleting the only verified point.
+
+Before using this policy, disable the receiver's scheduled count/daily/weekly
+prune job and replace it with the independent verification/rotation procedure.
+**Do not schedule `--prune --max-copies 1`: it retains the old protected anchor
+and can delete a new upload before verification.** The upload path and the old
+retention defaults remain unchanged. Upload completion alone never invokes
+rotation. Serialize verification/rotation with the next delivery; unresolved
+or failed candidates require an explicit operator decision before another full
+candidate is admitted. Rotation leaves unrelated unverified objects untouched;
+it is not a general age-based cleanup operation.
+
+The proof is a private (0600), single-link, root-owned regular JSON file outside
+the receiver archive, in a root-owned directory without group/other write access.
+The protected marker has the same operator ownership/privacy requirements.
+Every ancestor up to `/` must also be root-owned, without group/other write
+access or symlinks, for both the operator paths and the receiver archive.
+Sticky shared temporary directories are not suitable. Only the private archive
+leaf may belong to the restricted upload user. Rotation walks the directory
+chain from `/` with `openat` and retains descriptors; evidence reads, lock,
+atomic writes, fsync and exact object deletion use those anchored descriptors.
+If the archive or marker directory identity changes before cleanup, deletion is
+refused. These requirements apply to rotation; existing upload/retention
+invocations retain their established contracts.
+Proof input is bounded to 16 KiB. A separate verifier/operator creates this record
+**after** actual decryption, manifest and original/recovery hash verification,
+PostgreSQL restore/table verification, and collector quarantine. The receiver
+validates the attestation and its exact ciphertext/manifest identity; it does not
+perform or independently establish those restore checks itself. For example,
+the shape is:
+
+```json
+{
+  "v": 1,
+  "type": "independent_restore_verification",
+  "status": "verified",
+  "backup": {
+    "id": "20261016T091703Z-fedcba9876543210",
+    "bytes": 123456789,
+    "sha256": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+    "snapshot_sha256": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
+  },
+  "verification": {
+    "id": "0123456789abcdef0123456789abcdef",
+    "verified_at": "2026-10-16T10:00:00+00:00",
+    "schema_version": 32,
+    "manifest_sha256": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+    "checks": {
+      "decryption": true,
+      "bundle_integrity": true,
+      "database_restore": true,
+      "table_inventory": true,
+      "original_hashes": true,
+      "recovery_objects": true,
+      "collectors_quarantined": true
+    }
+  }
+}
+```
+
+The version is the actually restored schema, and all seven checks must be true.
+The 32-character hex verification ID identifies that independent restore run;
+`manifest_sha256` must equal the candidate's v2 `snapshot_sha256`. The candidate
+must have its matching committed v2 receipt and ciphertext. Verification time
+must include a timezone, follow receipt creation and not be in the future
+(five-minute clock tolerance). An upload receipt is not an acceptable proof.
+
+Under the same receiver lock as upload/prune, rotation verifies the old marker's
+exact SHA256 and every currently protected ciphertext, verifies the candidate,
+and fsyncs a root-owned `<marker>.rotation.json` journal. It atomically replaces
+and fsyncs the marker before deleting only the explicitly superseded verified
+objects and their receipts. The result protects one point. On error, keep the
+proof and journal and retry with the **same proof bytes and original expected
+marker SHA256**; this reconciles interruption before/after marker replacement
+without unprotecting the replacement. Finish an interrupted rotation before
+starting another one. Preserve the journal after success for idempotent retry.
+The restricted SSH forced command remains upload-only: sender stdin and
+`SSH_ORIGINAL_COMMAND` cannot select local maintenance or a proof path.
 
 Size transfer deadlines from measured **end-to-end** throughput. A streamed
 upload includes source integrity checks and encryption before/during delivery;

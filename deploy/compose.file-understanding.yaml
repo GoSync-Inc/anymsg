@@ -1,0 +1,52 @@
+# Optional configured endpoint worker. The selected profile must separately
+# allow any cloud processing. No daemon, model download or ASR replacement.
+services:
+  file-understanding:
+    profiles: [file-understanding]
+    image: anymsg-enricher:${MESSAGING_VERSION:-0.9.9}
+    build:
+      context: ..
+      target: enricher
+    init: true
+    restart: unless-stopped
+    depends_on:
+      db: {condition: service_healthy}
+    command: [python, -m, messaging_service.file_understanding, --config, /run/secrets/understanding_config]
+    environment:
+      DATABASE_URL_FILE: /run/secrets/database_url
+      PROBE_FILES: /data/files
+      PROCESSING_LOCK_DIR: /processing-locks
+    volumes:
+      - type: bind
+        source: ./private/file-understanding.dsn
+        target: /run/secrets/database_url
+        read_only: true
+        bind: {create_host_path: false}
+      - type: bind
+        source: ./private/file-understanding.json
+        target: /run/secrets/understanding_config
+        read_only: true
+        bind: {create_host_path: false}
+      - type: bind
+        source: ./private/enrichment.keys
+        target: /run/secrets/enrichment-keys
+        read_only: true
+        bind: {create_host_path: false}
+      - type: bind
+        source: ./private/processing-locks
+        target: /processing-locks
+        bind: {create_host_path: false}
+      - files:/data:ro
+    networks: [backend, frontend]
+    read_only: true
+    user: "10001:10001"
+    cap_drop: [ALL]
+    security_opt: [no-new-privileges:true]
+    tmpfs: ["/tmp:size=512m,noexec,nosuid"]
+    mem_limit: 3g
+    cpus: 2
+    pids_limit: 96
+    stop_grace_period: 630s
+    logging:
+      driver: json-file
+      options: {max-size: 5m, max-file: "2"}

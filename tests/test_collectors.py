@@ -438,7 +438,7 @@ def test_restricted_collector_role_ingests_but_cannot_read_keys_or_change_policy
             with s.pool.connection() as c:
                 c.execute('SET LOCAL ROLE '+role)
                 yield c
-    restricted=Archive(NS(pool=RestrictedPool(),append_event=s.append_event))
+    restricted=Archive(NS(pool=RestrictedPool(),append_event=s.append_event,files=s.files))
     state=CollectorState(restricted,w.account,w.state.lease)
     try:
         asyncio.run(w.capture(NS(message=message(23,media=True))))
@@ -501,7 +501,7 @@ def test_backup_covers_collector_positions_and_pending_deletions(worker,tmp_path
     directory=tmp_path/'snapshot'
     create_snapshot(s,directory,[sys.executable,'-c','print("unit-dump-stub")'])
     manifest=json.loads((directory/'manifest.json').read_text())
-    assert manifest['schema_version']==32
+    assert manifest['schema_version']==34
     assert manifest['tables']['collector_chats']['rows']==1
     assert manifest['tables']['provider_tombstones']['rows']==1
     assert verify_snapshot(s,directory)['status']=='verified'

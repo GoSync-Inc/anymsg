@@ -176,7 +176,12 @@ age header, размер и SHA256, записывает с fsync и не зам
 systemd повторяет неудачный job через5минут. Отдельный operator record
 `backup-config/last-restore.json` отражает последнюю фактическую проверку restore.
 
-Default template сохраняет локально две подтверждённые копии. На получателе его ежедневный job сохраняет
+Default template сохраняет локально одну подтверждённую копию. Это не даёт
+upload key права удалять удалённые бэкапы. Для одной проверенной копии на
+получателе используйте отдельную root-ротацию после независимого restore,
+описанную в [BACKUP_STREAMING.md](BACKUP_STREAMING.md); прежний общий prune timer
+нужно отключить или заменить до включения этой политики. Во время проверки
+замены временно хранятся обе копии. Старый режим ежедневной ротации сохраняет
 последние24, все копии моложе24часов, дневные за7дней, недельные за4недели и защищённую
 проверенную точку восстановления. Root-owned`protected.json` содержит её ID/size/hash;
 без него или при несовпадении hash **ничего не удаляется**. Upload key не может
@@ -216,9 +221,11 @@ request UUID, ревизий/provenance и счётчика, затем стан
 
 ## Schema 32: event delivery and private feedback
 
-The manifest includes 58 tables, adding subscription consumption, hashed page
+The manifest includes 63 tables, adding subscription consumption, hashed page
 receipts, registered receiver metadata, receiver bindings, the durable hint
-outbox and key-owned local feedback. Supported schema versions are 2–32. Install
+outbox and key-owned local feedback, original residency, eviction journals,
+durable backup fences and independent file-understanding artifacts/profiles.
+Supported schema versions are 2–34. Install
 the matching backup runtime before applying schema 32; older pinned runtimes
 must reject newer schemas rather than silently omit the delivery state.
 

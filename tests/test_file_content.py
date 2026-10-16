@@ -111,9 +111,11 @@ def test_phrase_overlap_and_chunk_invalidation_are_transactional(seeded):
     assert ids(search(s, b, 'boundaryphrase nextword', query_mode='phrase')) == ['overlap-file']
     with s.pool.connection() as c:
         c.execute("UPDATE messages SET revision=revision+1 WHERE id='demo-tg-1'")
-        assert c.execute("SELECT count(*) AS n FROM attachment_text_chunks WHERE attachment='overlap-file'").fetchone()['n'] == 0
-    assert ids(search(s, b, 'boundaryphrase')) == []
-    assert text(s, b, 'overlap-file')['text'] == ''
+        chunks = c.execute("SELECT source_revision FROM attachment_text_chunks WHERE attachment='overlap-file'").fetchall()
+        assert len(chunks) == 2 and all(row['source_revision'] == 2 for row in chunks)
+    assert ids(search(s, b, 'boundaryphrase')) == ['overlap-file']
+    retained = text(s, b, 'overlap-file')
+    assert retained['text'] == content[:4000] and retained['revision'] == 2
     # PostgreSQL treats ASCII dotted filenames as a single lexeme. The explicit
     # filename filter remains available regardless of extraction state.
     assert ids(search(s, b, filename='invoice')) == ['overlap-file']
@@ -170,9 +172,11 @@ def test_enriched_tail_document_type_segments_and_current_acl(seeded):
         segments(s, b, 'voice-public', limit=101)
     with s.pool.connection() as c:
         c.execute("UPDATE messages SET revision=revision+1 WHERE id='demo-tg-1'")
-        assert c.execute("SELECT count(*) AS n FROM attachment_enrichment_chunks WHERE attachment='voice-public'").fetchone()['n'] == 0
-    assert segments(s, b, 'voice-public')['segments'] == []
-    assert ids(search(s, b, 'tailtranscription')) == []
+        chunks = c.execute("SELECT source_revision FROM attachment_enrichment_chunks WHERE attachment='voice-public'").fetchall()
+        assert len(chunks) > 20 and all(row['source_revision'] == 2 for row in chunks)
+    retained = segments(s, b, 'voice-public')
+    assert retained['total_segments'] == 103 and retained['segments'][0] == {'index': 0, **marks[0]}
+    assert ids(search(s, b, 'tailtranscription')) == ['voice-public']
 
 
 def test_segment_response_byte_budget_and_absent_timestamps(seeded):

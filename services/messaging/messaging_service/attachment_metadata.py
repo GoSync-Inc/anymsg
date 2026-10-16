@@ -17,7 +17,11 @@ def processing_phases(c, row):
     """Current authorized occurrence, independent of original filesystem presence."""
     if not row.get('digest'):
         return {}
-    return c.execute('''SELECT coalesce(f.state,'unknown') AS extraction_status,
+    from .file_index import UNDERSTANDING_JOIN,UNDERSTANDING_COLUMNS
+    return c.execute('SELECT '+UNDERSTANDING_COLUMNS+''',coalesce(f.state,'unknown') AS extraction_status,
+        CASE WHEN r.state='evicted' AND EXISTS(SELECT FROM attachment_eviction_journal j
+            WHERE j.id=r.eviction_id AND j.digest=r.digest AND j.bytes=r.bytes AND j.state='completed')
+            THEN 'evicted' WHEN r.state='evicted' THEN 'missing' ELSE r.state END AS original_residency,
         (SELECT platform FROM accounts WHERE id=m.account) AS provider_platform,
         m.provider_id AS provider_message_id,
         (SELECT metadata->>'media_kind' FROM message_metadata
@@ -36,7 +40,8 @@ def processing_phases(c, row):
             AND f.source_mime=a.mime AND f.source_bytes=a.bytes AND f.state<>'superseded'
         LEFT JOIN attachment_enrichment e ON e.attachment=a.id AND e.source_digest=a.digest
             AND e.source_revision=m.revision AND e.state<>'superseded'
-        WHERE a.id=%s AND a.active AND NOT m.deleted''',(row['id'],)).fetchone() or {}
+        LEFT JOIN attachment_residency r ON r.digest=a.digest AND r.bytes=a.bytes
+        '''+UNDERSTANDING_JOIN+''' WHERE a.id=%s AND a.active AND NOT m.deleted''',(row['id'],)).fetchone() or {}
 
 
 def attachment_fields(row, *, original_present=None):
@@ -71,6 +76,8 @@ def attachment_fields(row, *, original_present=None):
         phase='unavailable' if original_present is False else 'ready'
         reason='original_missing' if original_present is False else 'original_downloaded'
         action='check_original_storage' if original_present is False else 'get_attachment'
+        if original_present is False and row.get('original_residency')=='evicted':
+            reason='original_evicted';action='request_file_download'
     else:
         download_status={'leased':'processing','ready':'unavailable'}.get(state,state)
         phase=download_status
@@ -85,10 +92,11 @@ def attachment_fields(row, *, original_present=None):
     coverage={key:row[key] for key in ('text_chars','processor_version','truncated','extraction_metadata')
         if registered and key in row}
     provenance={key:row[key] for key in ('provider_platform','provider_message_id','media_kind') if key in row}
+    description={key:value for key,value in row.items() if key.startswith('understanding_')}
     detail=describe(error,job_state=diagnostic_state) if error else None
     item=file_response_fields({'id':attachment_id,'attachment_id':attachment_id,
         'filename':filename,'mime':mime,'bytes':size,'sha256':digest if registered else None,
-        'digest':digest if registered else None,'error_code':error,**coverage,**provenance},
+        'digest':digest if registered else None,'error_code':error,**coverage,**provenance,**description},
         download_status=download_status,extraction_status=extraction,
         enrichment_status={'leased':'processing','unconfigured':'not_configured'}.get(enrichment,enrichment))
     item.update(state=state,status='unavailable' if original_present is False and registered else state,
@@ -97,6 +105,9 @@ def attachment_fields(row, *, original_present=None):
         metadata_basis='download_receipt' if registered else 'provider_descriptor',
         original_presence_verified=original_present is not None,
         original_available=original_present if registered else False if original_present is False else None,
+        original_residency=('resident' if original_present is True else
+            ('evicted' if row.get('original_residency')=='evicted' else 'missing')
+            if original_present is False else row.get('original_residency') or 'unknown'),
         download_phase=phase,download_reason=reason,reason=reason,next_action=action,
         download_request={'state':request_state,'until':until},error_detail=detail,
         download_retry_scheduled=bool(detail and detail.get('retry_scheduled')))

@@ -12,6 +12,7 @@ import json
 import os
 from pathlib import Path
 import re
+import secrets
 import shutil
 import signal
 import stat
@@ -25,13 +26,15 @@ AGE_HEADER=b'age-encryption.org/v1\n'
 
 
 def fsync_dir(path):
+    if isinstance(path,int):
+        os.fsync(path);return
     fd=os.open(path,os.O_RDONLY|os.O_DIRECTORY|os.O_NOFOLLOW)
     try:os.fsync(fd)
     finally:os.close(fd)
 
 
-def sha_file(path):
-    fd=os.open(path,os.O_RDONLY|os.O_NOFOLLOW)
+def sha_file(path,*,dir_fd=None):
+    fd=os.open(path,os.O_RDONLY|os.O_NOFOLLOW|os.O_NONBLOCK,dir_fd=dir_fd)
     with os.fdopen(fd,'rb') as f:
         st=os.fstat(f.fileno())
         if not stat.S_ISREG(st.st_mode) or st.st_nlink!=1:raise ValueError('invalid_stored_file')
@@ -254,21 +257,241 @@ def prune(directory,protected_file,*,now=None,keep_last=24,keep_daily=7,keep_wee
                 'protected':len(protected)}
 
 
+@contextmanager
+def trusted_directory(path,*,archive=False):
+    """Walk from / with openat: an untrusted ancestor cannot redirect a leaf."""
+    path=Path(path)
+    if not path.is_absolute() or '..' in path.parts:raise ValueError('invalid_operator_path')
+    flags=os.O_RDONLY|os.O_DIRECTORY|os.O_NOFOLLOW
+    fd=os.open('/',flags)
+    try:
+        for part in path.parts[1:]:
+            info=os.fstat(fd)
+            if info.st_uid!=0 or info.st_mode&0o022:raise ValueError('untrusted_operator_ancestor')
+            child=os.open(part,flags,dir_fd=fd)
+            os.close(fd);fd=child
+        info=os.fstat(fd)
+        if archive:
+            # Only the archive leaf may belong to the restricted upload user.
+            if info.st_mode&0o077:raise ValueError('private_receiver_directory_required')
+        elif info.st_uid!=0 or info.st_mode&0o022:
+            raise ValueError('untrusted_operator_ancestor')
+        yield fd
+    finally:os.close(fd)
+
+
+@contextmanager
+def rotation_handles(directory,protected_file,proof_file):
+    with trusted_directory(directory,archive=True) as archive_fd, \
+         trusted_directory(protected_file.parent) as control_fd, \
+         trusted_directory(proof_file.parent) as proof_fd:
+        identity=lambda fd:(os.fstat(fd).st_dev,os.fstat(fd).st_ino)
+        if identity(archive_fd) in {identity(control_fd),identity(proof_fd)}:
+            raise ValueError('separate_operator_evidence_required')
+        lock_fd=os.open('.receiver.lock',os.O_CREAT|os.O_RDWR|os.O_NOFOLLOW,0o600,dir_fd=archive_fd)
+        try:
+            info=os.fstat(lock_fd)
+            if not stat.S_ISREG(info.st_mode) or info.st_nlink!=1:raise ValueError('invalid_stored_file')
+            try:fcntl.flock(lock_fd,fcntl.LOCK_EX|fcntl.LOCK_NB)
+            except BlockingIOError:raise RuntimeError('receiver_busy') from None
+            yield archive_fd,control_fd,proof_fd
+        finally:os.close(lock_fd)
+
+
+def maintenance_json(path,*,root=False,limit=65536,dir_fd=None):
+    """Bounded openat read; held trusted directories anchor operator evidence."""
+    path=Path(path)
+    if root and dir_fd is None:
+        with trusted_directory(path.parent) as parent_fd:
+            return maintenance_json(path.name,root=True,limit=limit,dir_fd=parent_fd)
+    fd=os.open(path,os.O_RDONLY|os.O_NOFOLLOW|os.O_NONBLOCK,dir_fd=dir_fd)
+    with os.fdopen(fd,'rb') as source:
+        info=os.fstat(source.fileno())
+        if (not stat.S_ISREG(info.st_mode) or info.st_nlink!=1 or info.st_size>limit or
+            (root and (info.st_uid!=0 or info.st_mode&0o077))):
+            raise ValueError('invalid_operator_evidence')
+        raw=source.read(limit+1)
+    if len(raw)>limit:raise ValueError('invalid_operator_evidence')
+    def unique(pairs):
+        result={}
+        for key,value in pairs:
+            if key in result:raise ValueError('duplicate_evidence_field')
+            result[key]=value
+        return result
+    return raw,json.loads(raw,object_pairs_hook=unique)
+
+
+def anchor_items(value):
+    if not isinstance(value,list) or not value or len(value)>4096:
+        raise ValueError('verified_restore_anchor_required')
+    seen=set()
+    for item in value:
+        if (not isinstance(item,dict) or set(item)!={'id','bytes','sha256'} or
+            not isinstance(item['id'],str) or not BACKUP_ID.fullmatch(item['id']) or
+            type(item['bytes']) is not int or item['bytes']<64 or
+            not isinstance(item['sha256'],str) or not DIGEST.fullmatch(item['sha256']) or
+            item['id'] in seen):raise ValueError('invalid_protected_backup')
+        seen.add(item['id'])
+    return value
+
+
+def write_maintenance_json(path,value,*,dir_fd=None):
+    path=Path(path)
+    data=json.dumps(value,separators=(',',':'))+'\n'
+    if len(data.encode())>65536:raise ValueError('operator_evidence_too_large')
+    if dir_fd is None:
+        with trusted_directory(path.parent) as parent_fd:
+            return write_maintenance_json(path.name,value,dir_fd=parent_fd)
+    name='.'+path.name+'-'+secrets.token_hex(16)
+    fd=os.open(name,os.O_CREAT|os.O_EXCL|os.O_WRONLY|os.O_NOFOLLOW,0o600,dir_fd=dir_fd)
+    try:
+        with os.fdopen(fd,'w') as out:
+            out.write(data);out.flush();os.fsync(out.fileno())
+        os.replace(name,path.name,src_dir_fd=dir_fd,dst_dir_fd=dir_fd);fsync_dir(dir_fd)
+    finally:
+        try:os.unlink(name,dir_fd=dir_fd)
+        except FileNotFoundError:pass
+
+
+def ensure_directory_identity(path,fd):
+    info=os.stat(path,follow_symlinks=False);held=os.fstat(fd)
+    if not stat.S_ISDIR(info.st_mode) or (info.st_dev,info.st_ino)!=(held.st_dev,held.st_ino):
+        raise ValueError('operator_directory_changed')
+
+
+def rotate_anchor(directory,protected_file,proof_file,*,expected_protected_sha256):
+    """Local root maintenance: promote one independently restored v2 backup.
+
+    The receiver cannot perform or attest a restore. A separate operator records
+    the quarantine result in a private root-owned proof outside the upload tree.
+    A durable root-owned journal binds retries to that exact proof and old marker;
+    only its explicitly superseded verified objects may be deleted. Unverified
+    candidates are never selected by age or by an upload-side request.
+    """
+    if os.geteuid()!=0:raise ValueError('operator_retention_required')
+    if not isinstance(expected_protected_sha256,str) or not DIGEST.fullmatch(expected_protected_sha256):
+        raise ValueError('invalid_protected_digest')
+    directory=Path(directory);protected_file=Path(protected_file);proof_file=Path(proof_file)
+    if any(not path.is_absolute() or '..' in path.parts for path in (directory,protected_file,proof_file)):
+        raise ValueError('invalid_operator_path')
+    if protected_file.is_relative_to(directory) or proof_file.is_relative_to(directory) or proof_file==protected_file:
+        raise ValueError('separate_operator_evidence_required')
+    journal_file=protected_file.with_name(protected_file.name+'.rotation.json')
+    if proof_file==journal_file:raise ValueError('separate_operator_evidence_required')
+    with rotation_handles(directory,protected_file,proof_file) as (archive_fd,control_fd,proof_fd):
+        proof_raw,proof=maintenance_json(proof_file.name,root=True,limit=16384,dir_fd=proof_fd)
+        marker_raw,current=maintenance_json(protected_file.name,root=True,dir_fd=control_fd)
+        anchor_items(current)
+        if (not isinstance(proof,dict) or set(proof)!={'v','type','status','backup','verification'} or
+            type(proof['v']) is not int or proof['v']!=1 or
+            proof['type']!='independent_restore_verification' or proof['status']!='verified'):
+            raise ValueError('independent_restore_proof_required')
+        candidate=proof['backup'];verification=proof['verification']
+        if not isinstance(candidate,dict) or set(candidate)!={'id','bytes','sha256','snapshot_sha256'}:
+            raise ValueError('invalid_restore_proof')
+        new={key:candidate[key] for key in ('id','bytes','sha256')};anchor_items([new])
+        if not isinstance(candidate['snapshot_sha256'],str) or not DIGEST.fullmatch(candidate['snapshot_sha256']):
+            raise ValueError('invalid_restore_proof')
+        checks={'decryption','bundle_integrity','database_restore','table_inventory',
+                'original_hashes','recovery_objects','collectors_quarantined'}
+        if (not isinstance(verification,dict) or
+            set(verification)!={'id','verified_at','schema_version','manifest_sha256','checks'} or
+            not isinstance(verification['id'],str) or not re.fullmatch('[a-f0-9]{32}',verification['id']) or
+            type(verification['schema_version']) is not int or not 1<=verification['schema_version']<=100000 or
+            verification['manifest_sha256']!=candidate['snapshot_sha256'] or
+            not isinstance(verification['checks'],dict) or set(verification['checks'])!=checks or
+            any(value is not True for value in verification['checks'].values())):
+            raise ValueError('independent_restore_proof_required')
+        _,receipt=maintenance_json(new['id']+'.receipt.json',limit=4096,dir_fd=archive_fd)
+        if (not isinstance(receipt,dict) or type(receipt.get('v')) is not int or receipt['v']!=2 or
+            receipt.get('status')!='stored' or any(receipt.get(key)!=value for key,value in candidate.items())):
+            raise ValueError('candidate_receipt_mismatch')
+        try:
+            verified_at=datetime.fromisoformat(verification['verified_at'])
+            received_at=datetime.fromisoformat(receipt['received_at'])
+            if (verified_at.utcoffset() is None or received_at.utcoffset() is None or
+                verified_at>datetime.now(timezone.utc)+timedelta(minutes=5) or verified_at<received_at):
+                raise ValueError('invalid_restore_time')
+        except (KeyError,TypeError,ValueError):raise ValueError('invalid_restore_time') from None
+        if sha_file(new['id']+'.tar.age',dir_fd=archive_fd)!=(new['bytes'],new['sha256']):
+            raise ValueError('candidate_backup_corrupt')
+        proof_sha=hashlib.sha256(proof_raw).hexdigest()
+        journal=None
+        try:
+            _,journal=maintenance_json(journal_file.name,root=True,dir_fd=control_fd)
+        except FileNotFoundError:pass
+        else:
+            if (not isinstance(journal,dict) or set(journal)!={'v','state','proof_sha256','expected_protected_sha256','previous','candidate'} or
+                type(journal['v']) is not int or journal['v']!=1 or journal['state'] not in {'pending','complete'}):
+                raise ValueError('invalid_rotation_journal')
+            anchor_items(journal['previous']);anchor_items([journal['candidate']])
+        matching=bool(journal and journal['proof_sha256']==proof_sha and
+                      journal['expected_protected_sha256']==expected_protected_sha256 and journal['candidate']==new)
+        marker_matches=hashlib.sha256(marker_raw).hexdigest()==expected_protected_sha256
+        resumed=not marker_matches and current==[new] and matching
+        if not marker_matches and not resumed:raise ValueError('protected_marker_changed')
+        if marker_matches:
+            if any(item['id']==new['id'] for item in current):raise ValueError('candidate_already_protected')
+            if journal and journal['state']=='pending' and not matching:raise ValueError('anchor_rotation_incomplete')
+            if matching and journal['previous']!=current:raise ValueError('invalid_rotation_journal')
+            for item in current:
+                if sha_file(item['id']+'.tar.age',dir_fd=archive_fd)!=(item['bytes'],item['sha256']):
+                    raise ValueError('protected_backup_corrupt')
+            journal={'v':1,'state':'pending','proof_sha256':proof_sha,
+                     'expected_protected_sha256':expected_protected_sha256,'previous':current,'candidate':new}
+            write_maintenance_json(journal_file.name,journal,dir_fd=control_fd)
+            write_maintenance_json(protected_file.name,[new],dir_fd=control_fd)
+        else:
+            # A previous replace may have succeeded just before a durability error.
+            # Make the new anchor's directory durable before ANY old deletion.
+            fsync_dir(control_fd)
+        ensure_directory_identity(protected_file.parent,control_fd)
+        ensure_directory_identity(directory,archive_fd)
+        previous=[item for item in journal['previous'] if item['id']!=new['id']]
+        # Validate the entire exact deletion set before removing its first object.
+        for item in previous:
+            try:identity=sha_file(item['id']+'.tar.age',dir_fd=archive_fd)
+            except FileNotFoundError:
+                if resumed:continue
+                raise
+            if identity!=(item['bytes'],item['sha256']):raise ValueError('protected_backup_corrupt')
+        removed=released=0
+        for item in previous:
+            try:os.unlink(item['id']+'.tar.age',dir_fd=archive_fd)
+            except FileNotFoundError:
+                if not resumed:raise
+            else:removed+=1;released+=item['bytes']
+            try:os.unlink(item['id']+'.receipt.json',dir_fd=archive_fd)
+            except FileNotFoundError:pass
+        fsync_dir(archive_fd)
+        journal['state']='complete';write_maintenance_json(journal_file.name,journal,dir_fd=control_fd)
+        return {'status':'rotated','id':new['id'],'protected':1,'removed':removed,
+                'released_bytes':released,'duplicate':resumed,'verification_id':verification['id']}
+
+
 def main():
     parser=argparse.ArgumentParser(description=__doc__)
     parser.add_argument('--directory',type=Path,required=True)
     parser.add_argument('--max-bytes',type=int,default=20*1024**3)
     parser.add_argument('--quota-bytes',type=int,default=30*1024**3)
     parser.add_argument('--timeout-seconds',type=int,default=900)
-    parser.add_argument('--prune',action='store_true')
+    maintenance=parser.add_mutually_exclusive_group()
+    maintenance.add_argument('--prune',action='store_true')
+    maintenance.add_argument('--rotate-anchor',action='store_true')
     parser.add_argument('--protected-file',type=Path)
+    parser.add_argument('--restore-proof',type=Path)
+    parser.add_argument('--expected-protected-sha256')
     parser.add_argument('--max-copies',type=int,help='retain 1..3 copies including all verified anchors')
     args=parser.parse_args();os.umask(0o077)
     def timed_out(*_):raise TimeoutError('receiver_timeout')
     signal.signal(signal.SIGALRM,timed_out);signal.alarm(args.timeout_seconds)
     try:
         # SSH_ORIGINAL_COMMAND is deliberately never parsed or executed.
-        if args.prune:
+        if args.rotate_anchor:
+            if not args.protected_file or not args.restore_proof:raise ValueError('operator_retention_required')
+            result=rotate_anchor(args.directory,args.protected_file,args.restore_proof,
+                                 expected_protected_sha256=args.expected_protected_sha256)
+        elif args.prune:
             if os.geteuid()!=0 or not args.protected_file:raise ValueError('operator_retention_required')
             result=prune(args.directory,args.protected_file,max_copies=args.max_copies)
         else:result=receive(args.directory,sys.stdin.buffer,max_bytes=args.max_bytes,quota_bytes=args.quota_bytes,
