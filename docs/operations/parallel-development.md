@@ -14,8 +14,9 @@ under Review levels in [AGENTS.md](../../AGENTS.md). Do not restate those rules 
 - **Orchestrator** (one at a time) selects ready stories, checks lanes, dispatches
   worker sessions and checks their pull requests before they merge. It writes no
   product code.
-- **Worker session** (Codex or Claude Code) implements exactly one story in its own
+- **Worker session** (Claude Code) implements exactly one story in its own
   worktree, branch, pull request and Tiden intent session or recorded skip.
+  Codex reviews as Astra and gives a second opinion when planning.
 - **Release owner** (one at a time) prepares and applies promotions of `main`.
 
 ## Unit of work
@@ -36,8 +37,10 @@ story (or the goal for a skip), the lane and the review level (`Lane: <lane>`,
 `Review level: <level> — <reason>`) and carries the `Tiden intent branch:` line or
 `Tiden: skip — <reason>`. The draft pull request is the claim. Before dispatching,
 the orchestrator lists open pull requests and open intent branches; an item with a
-claim is taken. A claim without activity for two days is released by the
-orchestrator after asking the owner.
+claim is taken. When a claimed pull request has no activity for two days, the
+orchestrator hands it to a new worker, which continues the same branch, pull
+request and intent session (`tiden intent continue --pr <n>`), and tells the
+owner. A pull request is closed only when its task is cancelled.
 
 ## Lanes
 
@@ -87,7 +90,8 @@ at least important (`AGENTS.md`). Prefer splitting it.
   a conflict goes back to the orchestrator. With the queue, each pull request is
   tested against the latest `main` plus the pull requests ahead of it, and a
   branch is updated only for a conflict or a review.
-- Merge method: **squash**. One story becomes one commit on `main`.
+- Merge method: **squash** only; merge commits and rebase merges are disabled in
+  the repository settings (2026-10-16). One story becomes one commit on `main`.
 - Who merges follows the review level in `AGENTS.md`; a worker also waits for the
   orchestrator's "ok" (Worker protocol). Enqueueing a pull request is merging it.
   Never bypass required checks or use administrator merges.
@@ -108,8 +112,10 @@ at least important (`AGENTS.md`). Prefer splitting it.
 
 ## Releases
 
-- Merging and deploying are independent. A merge never implies a deploy, and a
-  pending deploy never blocks merges.
+- Merging and deploying are independent: without automatic deployment a merge
+  never implies a deploy. A release in flight holds merges from prepare to apply,
+  because apply checks again that its SHA is the current `main`
+  ([production.md](production.md)).
 - The release owner promotes the exact current `main` SHA by
   [production.md](production.md), after that SHA's own push run succeeds; never
   an earlier SHA. The readiness decision in the Tiden workflow is recorded for
@@ -117,20 +123,22 @@ at least important (`AGENTS.md`). Prefer splitting it.
   requires it.
 - A new `main` push cancels the push run still in progress (`ci.yml`
   concurrency), so a SHA merged shortly before another gets no `main` result.
-  When merges come quickly, wait for the latest SHA's run.
+  Until a `release-infra` change stops cancelling `main` runs, wait for the
+  latest SHA's run when merges come quickly.
 - The release owner keeps one release in flight, from prepare to acceptance. The
   host deployment lock only stops two deployment commands from running at once.
-- Release at least weekly while changes are merged, so production does not drift
-  far from `main`. Each release keeps production.md's receipts and the readiness
-  decision for its SHA.
+- Release often; the target is several times a day. Once automatic deployment
+  exists, release after every merge whose checks pass; until then, as often as
+  the rollout allows. Each release keeps production.md's receipts and the
+  readiness decision for its SHA.
 
 ## Orchestrator loop
 
 1. Read Tiden main and open proposal branches; list ready stories by priority.
 2. List open pull requests and intent branches; compute busy lanes.
-3. Dispatch to free lanes, up to the WIP limit. Start with three worker sessions
-   plus the `release-infra` and `process-docs` owners; raise the limit only after
-   the queue and lanes have worked for a week.
+3. Dispatch every story whose paths fit a free lane; there is no fixed number of
+   workers. The real limits are file overlap (lanes), the GitHub CI queue and the
+   owner's attention for owner-level decisions; the orchestrator watches them.
 4. Each brief names: story link or goal, lane, expected paths, review level,
    acceptance criteria, checks to run, the evidence to return and the final result
    its level requires.
@@ -149,12 +157,19 @@ keeps all its state in a handoff file and updates it after every decision, so a
 compaction or a new session loses nothing. A new orchestrator session first reads
 the handoff file and the list of live sessions.
 
+The orchestrator keeps a log of the owner's decisions: its recommendation, the
+owner's choice and whether they matched, so autonomy grows on facts. At the end
+of each session it writes two or three lines to the handoff file: what got in the
+way and what to change. Once a week it reviews the decision log, these notes and
+the measurements under Worker protocol, and proposes rule changes as separate
+pull requests.
+
 ## Worker protocol
 
 The orchestrator starts each worker in its own Superset workspace, with its own
 worktree and branch, and keeps a table: task, dependencies, workspace, branch,
-status, result. Model and effort follow the kind of work; the orchestrator picks
-them for each worker:
+status, result. For Claude Code workers, model and effort follow the kind of
+work; the orchestrator picks them for each worker:
 
 | Work | Model and effort |
 | --- | --- |
@@ -209,7 +224,7 @@ the workspace without asking again, after checking that the worktree has no
 uncommitted changes: archiving deletes the folder, the branch stays.
 
 Claude Code workers and the orchestrator talk through messages between sessions.
-A Codex worker asks in its terminal, which the orchestrator reads and answers in.
+A Codex session asks in its terminal, which the orchestrator reads and answers in.
 The orchestrator checks a silent worker when it gets the idle notice; there are no
 timed reports.
 
