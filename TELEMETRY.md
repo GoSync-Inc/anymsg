@@ -3,12 +3,15 @@
 CI results and runtime error tracking are independent. Runtime events do not add
 test coverage or prove that a feature works. Error tracking is off by default.
 
-DeedKit is the platform name. Messaging events currently use `anymsg@0.9.19`,
-constructed from the retained `anymsg` package version in
-`messaging_service.__version__`. This is not an exact deployment identifier:
-multiple commits can emit the same version. Preserve historical releases and
-their issue links. Any future release-identity change must coordinate runtime,
-CI, environment, source SHA and build URL. See the
+DeedKit is the platform name. A messaging event's release is `deedkit@<sha>`,
+where `<sha>` is the full 40-character lowercase source commit in
+`DEEDKIT_SOURCE_SHA`. Set it only to the commit the running code was built from.
+Without a valid value, for example in a package installation or a local checkout,
+the release keeps the historical `anymsg@` plus `messaging_service.__version__`;
+that version is shared by several commits and does not identify a deployment. An
+invalid value is never sent. Historical `anymsg@` releases and their issue links
+are preserved, not relabelled. An event alone only names its release: the Tiden
+release record's environment, CI build URL and gate are a separate step. See the
 [Tiden readiness workflow](docs/operations/tiden-product-workflow.md).
 
 Install `anymsg[telemetry]` or build the intended Docker target with
@@ -17,7 +20,10 @@ Install `anymsg[telemetry]` or build the intended Docker target with
 
 Store the product ingest DSN in an owner-protected file readable by the runtime
 UID. Set `ANYMSG_TIDEN_ENABLED=1`, `ANYMSG_TIDEN_DSN_FILE` to that file and
-`ANYMSG_TIDEN_ENVIRONMENT` to `production`, `staging` or `synthetic`. Do not use
+`ANYMSG_TIDEN_ENVIRONMENT` to `production` (the default) or, for a local synthetic
+check, `local-synthetic`. Any other value keeps monitoring off with a content-free
+warning, because Tiden silently creates a new environment for an unknown name. The
+historical `synthetic` environment receives no new events (TIDEN-CI.md). Do not use
 an administrative API token as the ingest DSN or commit either credential.
 The optional `deploy/compose.telemetry.yaml` configures the gateway. Keep all
 existing overlays and rebuild/recreate only the intended service. Workers on an
@@ -30,8 +36,11 @@ retries are not automatically reported. The AI inference child is not connected.
 Node/Chromium crashes are reported through the existing Python collector owner;
 there is no second WhatsApp client and no browser session instrumentation.
 
-The payload contains the AnyMsg version, environment, fixed component/error code,
-allowlisted exception type and relative public Python filenames/line numbers.
+The payload contains the release, environment, fixed component/error code,
+allowlisted exception type and public Python filenames/line numbers. Filenames are
+relative to the repository root (`services/messaging/messaging_service/<file>.py`),
+like Tiden component paths. Events sent before this used `messaging_service/<file>.py`;
+a recurring error therefore appears once as a new issue under the new paths.
 It excludes exception text, cause chains, locals, source lines, absolute paths,
 HTTP bodies/headers/URLs, account/chat/person identifiers, search terms, messages,
 files and model inputs/outputs. SDK request/user/breadcrumb extras are discarded.
@@ -46,7 +55,7 @@ not a delivery receipt: verify the event in Tiden Issues. Shutdown joins for at
 most 1.5 seconds. If an ingest DSN is unreadable/invalid or the optional SDK is
 missing, monitoring stays off and a content-free local warning is emitted.
 
-Test with a synthetic exception under environment `synthetic`; confirm receipt
+Test with a synthetic exception under environment `local-synthetic`; confirm receipt
 and resolve that diagnostic issue. Never provoke a real outage or use a personal
 message/file as a test. Disable by removing `ANYMSG_TIDEN_ENABLED` and recreating
 only the monitored service. Core archive functions require no Tiden access.

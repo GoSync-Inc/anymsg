@@ -18,14 +18,25 @@ from . import __version__
 COMPONENTS = {'gateway', 'telegram', 'whatsapp', 'indexer', 'enricher', 'subscriptions'}
 CODES = {'request_failed', 'tool_failed', 'collector_failed', 'indexer_failed',
          'enrichment_failed', 'subscription_match_failed', 'uncaught_exception', 'setup_check'}
+# Tiden run environments; an unknown slug would silently create a duplicate (TIDEN-CI.md).
+ENVIRONMENTS = {'production', 'local-synthetic'}
 ROOT = Path(__file__).resolve().parent
 SOURCE_FILES = frozenset(p.name for p in ROOT.glob('*.py'))
+# Repository-root paths, matching Tiden component paths.
+FRAME_PREFIX = 'services/messaging/messaging_service/'
 EXCEPTION_TYPES = {'RuntimeError', 'ValueError', 'TypeError', 'KeyError', 'AttributeError',
     'OSError', 'TimeoutError', 'ConnectionError', 'PermissionError', 'FileNotFoundError',
     'OperationalError', 'InterfaceError', 'PoolTimeout', 'IntegrityError', 'ProgrammingError',
     'AssertionError', 'MemoryError', 'RecursionError', 'OverflowError', 'IndexError'}
 _reporter = None
 log = logging.getLogger('anymsg.telemetry')
+
+
+def release():
+    """The exact DeedKit source revision built into the image, else the historical package version."""
+    sha = os.environ.get('DEEDKIT_SOURCE_SHA', '')
+    # An invalid value is never sent; it falls back like an absent one.
+    return 'deedkit@' + sha if re.fullmatch('[0-9a-f]{40}', sha) else 'anymsg@' + __version__
 
 
 def safe_event(error, component, code):
@@ -40,13 +51,13 @@ def safe_event(error, component, code):
             break
         filename = Path(tb.tb_frame.f_code.co_filename)
         if filename.parent == ROOT and filename.name in SOURCE_FILES:
-            frames.append({'filename': 'messaging_service/' + filename.name,
+            frames.append({'filename': FRAME_PREFIX + filename.name,
                            'lineno': tb.tb_lineno, 'in_app': True})
         tb = tb.tb_next
     kind = type(error).__name__
     if kind not in EXCEPTION_TYPES:
         kind = 'UnexpectedError'
-    return {'platform': 'python', 'level': 'error', 'release': 'anymsg@' + __version__,
+    return {'platform': 'python', 'level': 'error', 'release': release(),
             'tags': {'component': component, 'error_code': code},
             'exception': {'values': [{'type': kind, 'value': code,
                                      'stacktrace': {'frames': frames[-16:]}}]}}
@@ -58,14 +69,14 @@ def before_send(event):
         tags = event['tags']
         component, code = tags['component'], tags['error_code']
         clean = safe_event(None, component, code)
-        if clean is None or event.get('environment') not in {'production', 'staging', 'synthetic'}:
+        if clean is None or event.get('environment') not in ENVIRONMENTS:
             return None
         value = event['exception']['values'][0]
         clean['exception']['values'][0]['type'] = value['type'] if value['type'] in EXCEPTION_TYPES else 'UnexpectedError'
         frames = []
         for frame in value.get('stacktrace', {}).get('frames', [])[-16:]:
             filename, lineno = frame.get('filename'), frame.get('lineno')
-            if filename not in {'messaging_service/' + f for f in SOURCE_FILES}:
+            if filename not in {FRAME_PREFIX + f for f in SOURCE_FILES}:
                 continue
             if type(lineno) is int and 0 < lineno <= 100000:
                 frames.append({'filename': filename, 'lineno': lineno, 'in_app': True})
@@ -85,7 +96,7 @@ def before_send(event):
 class Reporter:
     """A lossy, bounded diagnostic queue; archive operations never wait on Tiden."""
     def __init__(self, client, component, environment='production'):
-        if component not in COMPONENTS or environment not in {'production', 'staging', 'synthetic'}:
+        if component not in COMPONENTS or environment not in ENVIRONMENTS:
             raise ValueError('invalid_telemetry_configuration')
         self.client, self.component, self.environment = client, component, environment
         self.queue = queue.Queue(maxsize=32)

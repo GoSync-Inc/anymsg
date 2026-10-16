@@ -37,7 +37,7 @@ def error():
 def reporter(transport, component='gateway'):
     client = Client('https://synthetic-key@ingest.example.test/synthetic-project',
                     before_send=telemetry.before_send, transport=transport)
-    return telemetry.Reporter(client, component, 'synthetic')
+    return telemetry.Reporter(client, component, 'local-synthetic')
 
 
 def test_sdk_wire_has_only_allowlisted_diagnostics():
@@ -53,9 +53,9 @@ def test_sdk_wire_has_only_allowlisted_diagnostics():
     assert SECRET not in raw and 'synthetic-key' not in raw
     assert 'abs_path' not in raw and 'locals' not in raw and 'request' not in event
     assert event['exception']['values'][0]['stacktrace']['frames'] == [
-        {'filename': 'messaging_service/app.py', 'lineno': 1, 'in_app': True}]
+        {'filename': 'services/messaging/messaging_service/app.py', 'lineno': 1, 'in_app': True}]
     assert event['tags'] == {'component': 'gateway', 'error_code': 'request_failed'}
-    assert event['environment'] == 'synthetic'
+    assert event['environment'] == 'local-synthetic'
 
 
 def test_exception_stringification_is_never_called():
@@ -69,7 +69,7 @@ def test_exception_stringification_is_never_called():
 
 def test_before_send_removes_nested_extras():
     event = telemetry.safe_event(error(), 'gateway', 'request_failed')
-    event.update(event_id='a'*32, timestamp=1, environment='synthetic', request={'body':SECRET},
+    event.update(event_id='a'*32, timestamp=1, environment='local-synthetic', request={'body':SECRET},
                  breadcrumbs=[SECRET], user={'email':SECRET}, sdk={'secret':SECRET})
     event['tags']['account'] = SECRET
     value = event['exception']['values'][0]
@@ -84,9 +84,98 @@ def test_before_send_removes_nested_extras():
     ('environment',SECRET), ('event_id',SECRET), ('timestamp',float('nan')), ('exception', {})])
 def test_invalid_events_fail_closed(field, value):
     event = telemetry.safe_event(error(), 'gateway', 'request_failed')
-    event.update(event_id='b'*32, timestamp=1, environment='synthetic')
+    event.update(event_id='b'*32, timestamp=1, environment='local-synthetic')
     event[field] = value
     assert telemetry.before_send(event) is None
+
+
+SOURCE_SHA = '0123456789abcdef0123456789abcdef01234567'
+
+
+def test_release_names_the_exact_source_revision(monkeypatch):
+    monkeypatch.setenv('DEEDKIT_SOURCE_SHA', SOURCE_SHA)
+    transport = Transport()
+    worker = reporter(transport)
+    try:
+        assert worker.capture(error(), 'request_failed')
+        assert transport.ready.wait(1)
+    finally:
+        worker.close()
+    event = json.loads(transport.envelopes[0].decode().splitlines()[2])
+    assert event['release'] == 'deedkit@' + SOURCE_SHA
+
+
+@pytest.mark.parametrize('value', [None, '', SOURCE_SHA[:12], SOURCE_SHA.upper(), SOURCE_SHA + '0',
+                                   SOURCE_SHA + '\n', 'g' * 40, SECRET])
+def test_release_without_a_valid_source_revision_keeps_the_package_version(value, monkeypatch):
+    if value is None:
+        monkeypatch.delenv('DEEDKIT_SOURCE_SHA', raising=False)
+    else:
+        monkeypatch.setenv('DEEDKIT_SOURCE_SHA', value)
+    event = telemetry.safe_event(error(), 'gateway', 'request_failed')
+    event.update(event_id='c'*32, timestamp=1, environment='production')
+    result = telemetry.before_send(event)
+    assert result['release'] == 'anymsg@' + telemetry.__version__
+    assert SECRET not in json.dumps(result) and 'deedkit@' not in json.dumps(result)
+
+
+def test_frames_use_repository_root_paths_only():
+    event = telemetry.safe_event(error(), 'gateway', 'request_failed')
+    assert [frame['filename'] for frame in event['exception']['values'][0]['stacktrace']['frames']] == [
+        'services/messaging/messaging_service/app.py']
+    event.update(event_id='d'*32, timestamp=1, environment='production')
+    event['exception']['values'][0]['stacktrace']['frames'] = [
+        {'filename': name, 'lineno': 7, 'in_app': True} for name in (
+            'messaging_service/app.py', 'services/messaging/messaging_service/app.py',
+            'services/messaging/messaging_service/missing.py', str(telemetry.ROOT / 'app.py'),
+            'services/gateway/agent_gateway/app.py')]
+    frames = telemetry.before_send(event)['exception']['values'][0]['stacktrace']['frames']
+    assert frames == [{'filename': 'services/messaging/messaging_service/app.py', 'lineno': 7, 'in_app': True}]
+
+
+@pytest.mark.parametrize('environment,accepted', [('production', True), ('local-synthetic', True),
+    ('staging', False), ('synthetic', False), ('github-actions-synthetic', False), ('Production', False)])
+def test_only_production_and_local_synthetic_environments_are_accepted(environment, accepted):
+    event = telemetry.safe_event(error(), 'gateway', 'request_failed')
+    event.update(event_id='e'*32, timestamp=1, environment=environment)
+    result = telemetry.before_send(event)
+    assert (result is not None and result['environment'] == environment) is accepted
+    client = Client('https://synthetic-key@ingest.example.test/synthetic-project',
+                    before_send=telemetry.before_send, transport=Transport())
+    if accepted:
+        telemetry.Reporter(client, 'gateway', environment).close()
+    else:
+        with pytest.raises(ValueError):
+            telemetry.Reporter(client, 'gateway', environment)
+
+
+@pytest.mark.parametrize('environment,expected', [(None, 'production'), ('local-synthetic', 'local-synthetic'),
+                                                  ('staging', None), ('synthetic', None)])
+def test_configured_environment_defaults_to_production_and_refuses_others(
+        environment, expected, tmp_path, monkeypatch, caplog):
+    monkeypatch.setattr(telemetry, '_reporter', None)
+    monkeypatch.setattr(telemetry.sys, 'excepthook', telemetry.sys.excepthook)
+    monkeypatch.setattr(telemetry.threading, 'excepthook', telemetry.threading.excepthook)
+    monkeypatch.setattr(telemetry.atexit, 'register', lambda callback: None)
+    dsn = tmp_path/'test.dsn'
+    dsn.write_text('https://synthetic-key@ingest.example.test/synthetic-project')
+    monkeypatch.setenv('ANYMSG_TIDEN_ENABLED', '1')
+    monkeypatch.setenv('ANYMSG_TIDEN_DSN_FILE', str(dsn))
+    if environment is None:
+        monkeypatch.delenv('ANYMSG_TIDEN_ENVIRONMENT', raising=False)
+    else:
+        monkeypatch.setenv('ANYMSG_TIDEN_ENVIRONMENT', environment)
+    try:
+        assert telemetry.configure('gateway') is (expected is not None)
+        if expected is None:
+            assert telemetry._reporter is None
+            assert 'telemetry_configuration_unavailable' in caplog.text
+            assert environment not in caplog.text
+        else:
+            assert telemetry._reporter.environment == expected
+    finally:
+        if telemetry._reporter is not None:
+            telemetry._reporter.close()
 
 
 def test_blocked_network_never_blocks_capture_and_close_is_bounded():
