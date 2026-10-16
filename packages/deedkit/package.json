@@ -1,0 +1,51 @@
+{
+  "name": "deedkit",
+  "version": "0.9.19",
+  "description": "GoSync DeedKit JavaScript client and CLI for agents using a self-hosted DeedKit gateway",
+  "type": "module",
+  "engines": {
+    "node": ">=22.14.0"
+  },
+  "exports": {
+    ".": {
+      "types": "./lib/index.d.ts",
+      "import": "./lib/index.js"
+    }
+  },
+  "bin": {
+    "deedkit": "bin/deedkit.js"
+  },
+  "files": [
+    "lib",
+    "bin",
+    "README.md",
+    "LICENSE",
+    "THIRD_PARTY_NOTICES.md"
+  ],
+  "scripts": {
+    "test": "node --test test/*.test.js"
+  },
+  "license": "MIT",
+  "author": "GoSync",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/GoSync-Inc/deedkit.git",
+    "directory": "packages/deedkit"
+  },
+  "homepage": "https://github.com/GoSync-Inc/deedkit#readme",
+  "bugs": {
+    "url": "https://github.com/GoSync-Inc/deedkit/issues"
+  },
+  "keywords": [
+    "mcp",
+    "agents",
+    "messenger",
+    "calendar",
+    "calls",
+    "gateway"
+  ],
+  "publishConfig": {
+    "access": "public",
+    "registry": "https://registry.npmjs.org/"
+  }
+}
