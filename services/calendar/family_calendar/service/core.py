@@ -413,7 +413,10 @@ class FamilyService:
                     expected_etag=row["etag"],
                     before={
                         "start": row["start_at"].isoformat(),
-                        "end": row["end_at"].isoformat(),
+                        # The stored instant span is internal; the source event ends at its start.
+                        "end": (
+                            row["start_at"] if row["details"].get("instant") else row["end_at"]
+                        ).isoformat(),
                         **row["details"],
                     },
                 )

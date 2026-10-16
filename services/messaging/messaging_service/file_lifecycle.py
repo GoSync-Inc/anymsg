@@ -15,6 +15,16 @@ from uuid import uuid4
 LOCK_NAME='attachment-residency-v1'
 RETENTION_DAYS=30
 
+# Used only while holding lifecycle_lock, with the current attachment aliased a.
+# A durable managed transition pauses original-dependent work without spending
+# processing retries. Unknown missing/corrupt originals retain normal diagnostics.
+PROCESSABLE_ORIGINAL='''NOT EXISTS(SELECT FROM attachment_residency residency
+    JOIN attachment_eviction_journal eviction ON eviction.id=residency.eviction_id
+        AND eviction.digest=residency.digest AND eviction.bytes=residency.bytes
+    WHERE residency.digest=a.digest AND residency.bytes=a.bytes
+        AND ((residency.state='evicting' AND eviction.state='prepared')
+            OR (residency.state='evicted' AND eviction.state='completed')))'''
+
 
 def lifecycle_lock(c):
     c.execute('SELECT pg_advisory_xact_lock(hashtextextended(%s,0))',(LOCK_NAME,))
@@ -82,7 +92,9 @@ def _identity(info):
 
 class LifecycleWorker:
     """One bounded pass, dry-run unless apply=True; never scans directories."""
-    def __init__(self,store):self.store=store
+    def __init__(self,store,*,expire_unprocessed=False):
+        if type(expire_unprocessed) is not bool:raise ValueError('invalid_retention_policy')
+        self.store=store;self.expire_unprocessed=expire_unprocessed
 
     def _lock_sources(self,c,digest):
         return c.execute('SELECT public.lock_lifecycle_sources(%s) AS locked',(digest,)).fetchone()['locked']
@@ -93,9 +105,10 @@ class LifecycleWorker:
         old=c.execute("SELECT %s::timestamptz<=clock_timestamp()-interval '30 days' AS old",(row['last_accessed_at'],)).fetchone()['old']
         if not old:return 'recently_requested'
         if not self._lock_sources(c,row['digest']):return 'occurrence_limit'
-        # All current occurrences must preserve usable detail and a current
-        # description. Bytes alone never authorize reuse of another chat's text.
+        # The default policy requires usable detail for every occurrence.
+        # The explicit unprocessed policy instead requires every source to be old.
         rows=c.execute('''SELECT a.id,a.bytes,a.mime,m.revision,u.*,
+            m.sent_at<=clock_timestamp()-interval '30 days' AS source_old,
             t.state AS text_state,t.source_digest AS text_digest,t.source_revision AS text_revision,
             t.source_bytes AS text_bytes,t.text_content AS extracted,t.truncated AS text_truncated,
             t.error_code AS text_error,t.extraction_metadata,
@@ -117,6 +130,10 @@ class LifecycleWorker:
               OR EXISTS(SELECT FROM attachment_enrichment e WHERE e.attachment=a.id AND e.state='leased' AND e.lease_until>clock_timestamp())
               OR EXISTS(SELECT FROM attachment_understanding u WHERE u.attachment=a.id AND u.state='leased' AND u.lease_until>clock_timestamp())) LIMIT 1''',(row['digest'],)).fetchone()
         if active:return 'inflight'
+        # An explicit operator policy may accept losing unprocessed originals.
+        # Every shared occurrence must still be old; all other protections apply.
+        if self.expire_unprocessed:
+            return None if all(item['source_old'] for item in rows) else 'recent_source'
         from .file_understanding import valid_understanding
         for item in rows:
             if (not valid_understanding(c,item) or item['bytes']!=row['bytes'] or item['state']!='ready'
@@ -247,7 +264,7 @@ class LifecycleWorker:
         if (type(apply) is not bool or type(limit) is not int or not 1<=limit<=1000
                 or type(max_bytes) is not int or not 1<=max_bytes<=1024**4):
             raise ValueError('invalid_lifecycle_limit')
-        result={'dry_run':not apply,'candidates':0,'candidate_bytes':0,'evicted':0,'evicted_bytes':0,'blocked':0,'reasons':{}}
+        result={'dry_run':not apply,'expire_unprocessed':self.expire_unprocessed,'candidates':0,'candidate_bytes':0,'evicted':0,'evicted_bytes':0,'blocked':0,'reasons':{}}
         def blocked(reason):
             result['blocked']+=1;result['reasons'][reason]=result['reasons'].get(reason,0)+1
         with self.store.pool.connection() as c:
@@ -337,6 +354,8 @@ def main(argv=None):
     parser.add_argument('--dsn-file',default=os.environ.get('DATABASE_URL_FILE'))
     parser.add_argument('--files',default=os.environ.get('PROBE_FILES','/data/files'))
     parser.add_argument('--apply',action='store_true',help='explicitly enable original deletion')
+    parser.add_argument('--expire-unprocessed',action='store_true',
+        help='allow old unprocessed originals to expire; retain existing text, with best-effort provider recovery')
     parser.add_argument('--limit',type=int,default=100)
     parser.add_argument('--max-bytes',type=int,default=1024**3)
     parser.add_argument('--interval-seconds',type=int,help='repeat until SIGTERM/SIGINT; omit for one pass')
@@ -348,7 +367,7 @@ def main(argv=None):
     if not 1<=args.limit<=1000 or not 1<=args.max_bytes<=1024**4:parser.error('invalid_lifecycle_limit')
     if args.interval_seconds is not None and not 60<=args.interval_seconds<=7*86400:parser.error('invalid_interval')
     if bool(args.digest)!=(args.pin or args.unpin):parser.error('--digest and --pin/--unpin are required together')
-    if (args.pin or args.unpin) and (args.apply or args.interval_seconds):parser.error('pin is a separate one-shot operation')
+    if (args.pin or args.unpin) and (args.apply or args.interval_seconds or args.expire_unprocessed):parser.error('pin is a separate one-shot operation')
     store=Store(Path(args.dsn_file).read_text().strip(),Path(args.files),'http://localhost')
     stopped=threading.Event()
     old_handlers={}
@@ -360,7 +379,7 @@ def main(argv=None):
             with store.pool.connection() as c:result=pin_original(c,args.digest,args.pin)
             print(json.dumps({'operation':'pin' if args.pin else 'unpin',**result}),flush=True)
             return 0
-        worker=LifecycleWorker(store)
+        worker=LifecycleWorker(store,expire_unprocessed=args.expire_unprocessed)
         while not stopped.is_set():
             try:result=worker.run_once(apply=args.apply,limit=args.limit,max_bytes=args.max_bytes)
             except Exception:
