@@ -133,6 +133,40 @@ def test_candidate_rejects_collector_command_even_if_target_is_runtime(tmp_path)
         s.isolate(cfg, docs, {'runtime': IMAGE, 'gateway': IMAGE}, tmp_path, GEN, SHA)
 
 
+def test_root_preparation_makes_each_private_control_directory_runtime_owned(tmp_path, monkeypatch):
+    cfg = settings(tmp_path)
+    release = Path(cfg['state_directory']) / SHA
+    release.mkdir()
+    ownership = []
+    monkeypatch.setattr(s.os, 'geteuid', lambda: 0)
+    monkeypatch.setattr(s.os, 'chown', lambda path, uid, gid: ownership.append((Path(path), uid, gid)))
+
+    document, private = s.isolate(cfg, documents(cfg), {'runtime': IMAGE, 'gateway': IMAGE}, release, GEN, SHA)
+
+    assert ownership == [(release / role, 10001, 10001) for role in ('api', 'gateway')]
+    for role in ('api', 'gateway'):
+        directory = release / role
+        assert directory.is_dir() and directory.stat().st_mode & 0o777 == 0o700
+        assert private['controls'][role] == str(directory / 'control.sock')
+        assert {'type': 'bind', 'source': str(directory), 'target': '/run/deedkit/release'} in document['services']['http-' + role + '-' + GEN]['volumes']
+
+
+def test_root_preparation_aborts_when_private_control_ownership_cannot_be_set(tmp_path, monkeypatch):
+    cfg = settings(tmp_path)
+    release = Path(cfg['state_directory']) / SHA
+    release.mkdir()
+    monkeypatch.setattr(s.os, 'geteuid', lambda: 0)
+    def denied(*_args):
+        raise PermissionError('synthetic ownership denied')
+    monkeypatch.setattr(s.os, 'chown', denied)
+
+    with pytest.raises(PermissionError, match='synthetic ownership denied'):
+        s.isolate(cfg, documents(cfg), {'runtime': IMAGE, 'gateway': IMAGE}, release, GEN, SHA)
+
+    assert not (release / 'gateway').exists()
+    assert not (release / 'http.json').exists()
+
+
 def fixture(tmp_path, monkeypatch):
     cfg = settings(tmp_path)
     release = Path(cfg['state_directory']) / SHA
