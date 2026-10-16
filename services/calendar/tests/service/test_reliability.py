@@ -2,6 +2,7 @@ import pytest
 
 from family_calendar.errors import CalendarError
 from family_calendar.service.core import FamilyService
+from family_calendar.service.store import instant
 from tests.service.test_policy import SCOPES
 
 START = "2026-10-19T08:00:00Z"
@@ -119,6 +120,36 @@ def test_plan_update_diff_omits_kept_fields_and_shows_all_day_conversion(househo
     diff = service.plan(key, [action])["steps"][0]["diff"]
     assert set(diff) == {"start", "end", "all_day"}
     assert diff["all_day"] == {"before": True, "after": False}
+
+
+def test_plan_preview_reports_instant_event_end_as_its_start(household):
+    service, key = setup(household)
+    # A zero-length provider event is stored with the smallest span the projection allows.
+    point = "2026-10-19T08:30:00Z"
+    publish(household, start=point, end=point, busy=False, details={"title": "Reminder", "instant": True})
+    update = {
+        "action": "update",
+        "calendar_ref": "cal-a",
+        "event_ref": "event-cal-a",
+        # Writes are always timed, so an update gives the instant a duration.
+        "event": {"start": point, "end": "2026-10-19T09:00:00Z", "timezone": "UTC"},
+    }
+    [step] = service.plan(key, [update])["steps"]
+    assert step["before"]["end"] == step["before"]["start"]
+    assert instant(step["before"]["end"]) == instant(point)
+    assert set(step["diff"]) == {"end"}
+    assert instant(step["diff"]["end"]["before"]) == instant(point)
+    delete = {"action": "delete", "calendar_ref": "cal-a", "event_ref": "event-cal-a"}
+    [step] = service.plan(key, [delete])["steps"]
+    assert step["before"]["end"] == step["before"]["start"] == step["diff"]["end"]["before"]
+
+
+def test_plan_preview_keeps_stored_end_of_timed_event(household):
+    service, key = setup(household)
+    publish(household)
+    delete = {"action": "delete", "calendar_ref": "cal-a", "event_ref": "event-cal-a"}
+    [step] = service.plan(key, [delete])["steps"]
+    assert instant(step["before"]["end"]) == instant("2026-10-19T09:00:00Z")
 
 
 def test_plan_multi_action_removes_deleted_and_reports_proposed_overlap(household):
