@@ -16,7 +16,8 @@ under Review levels in [AGENTS.md](../../AGENTS.md). Do not restate those rules 
   product code.
 - **Worker session** (Claude Code) implements exactly one story in its own
   worktree, branch, pull request and Tiden intent session or recorded skip.
-  Codex reviews as Astra and gives a second opinion when planning.
+- **Codex** reviews as Astra and gives a second opinion when planning;
+  development goes to Claude Code workers.
 - **Release owner** (one at a time) prepares and applies promotions of `main`.
 
 ## Unit of work
@@ -38,9 +39,13 @@ story (or the goal for a skip), the lane and the review level (`Lane: <lane>`,
 `Tiden: skip — <reason>`. The draft pull request is the claim. Before dispatching,
 the orchestrator lists open pull requests and open intent branches; an item with a
 claim is taken. When a claimed pull request has no activity for two days, the
-orchestrator hands it to a new worker, which continues the same branch, pull
-request and intent session (`tiden intent continue --pr <n>`), and tells the
-owner. A pull request is closed only when its task is cancelled.
+orchestrator hands it to a new worker on the same branch and pull request and
+tells the owner. Git allows one worktree per branch, so the orchestrator first
+saves uncommitted work in the old worktree (a pushed work-in-progress commit or a
+patch) and archives that workspace. The new worker continues a closed intent
+session with `tiden intent continue --pr <n>`; a recorded skip stays a skip, and
+anything else goes back to the orchestrator. A pull request is closed only when
+its task is cancelled.
 
 ## Lanes
 
@@ -115,7 +120,8 @@ at least important (`AGENTS.md`). Prefer splitting it.
 - Merging and deploying are independent: without automatic deployment a merge
   never implies a deploy. A release in flight holds merges from prepare to apply,
   because apply checks again that its SHA is the current `main`
-  ([production.md](production.md)).
+  ([production.md](production.md)). The release owner tells the orchestrator
+  before prepare and after apply, and the orchestrator gives no "ok" in between.
 - The release owner promotes the exact current `main` SHA by
   [production.md](production.md), after that SHA's own push run succeeds; never
   an earlier SHA. The readiness decision in the Tiden workflow is recorded for
@@ -128,9 +134,9 @@ at least important (`AGENTS.md`). Prefer splitting it.
 - The release owner keeps one release in flight, from prepare to acceptance. The
   host deployment lock only stops two deployment commands from running at once.
 - Release often; the target is several times a day. Once automatic deployment
-  exists, release after every merge whose checks pass; until then, as often as
-  the rollout allows. Each release keeps production.md's receipts and the
-  readiness decision for its SHA.
+  exists, release after every merge whose checks and production.md gates pass;
+  until then, as often as the rollout allows. Each release keeps production.md's
+  receipts and the readiness decision for its SHA.
 
 ## Orchestrator loop
 
@@ -180,9 +186,10 @@ work; the orchestrator picks them for each worker:
 | Documents and settings | Sonnet, medium |
 | Code exploration | Haiku or Sonnet, low |
 
-Reviewers follow Review levels in `AGENTS.md` whatever the worker's model. For the
-first week the orchestrator measures usage-limit spend by role, review findings
-per pull request and the share of pull requests with green CI from the first push.
+Reviewers follow Review levels in `AGENTS.md` whatever the worker's model. The
+orchestrator measures usage-limit spend by role, review findings per pull request
+and the share of pull requests with green CI from the first push; the weekly
+review reads these measurements.
 
 The worker writes and waits for the answer:
 
