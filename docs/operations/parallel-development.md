@@ -79,9 +79,10 @@ at least important (`AGENTS.md`). Prefer splitting it.
   lands.
 - Until then a pull request must be up to date with `main` to merge. Update a
   branch only when that blocks its merge, to resolve a real conflict or when a
-  review asks for it, never just to stay current. A worker brings its branch up to
-  date before "ready to merge", waits for CI and then closes the intent session on
-  its own commit range ([Claude Code guide](claude-code-tiden.md)). If `main`
+  review asks for it, never just to stay current. A worker whose branch is behind
+  `main` brings it up to date before "ready to merge", waits for CI and then
+  closes the intent session on its own commit range
+  ([Claude Code guide](claude-code-tiden.md)). If `main`
   moves again after the "ok", the branch is updated and merged once CI is green;
   a conflict goes back to the orchestrator. With the queue, each pull request is
   tested against the latest `main` plus the pull requests ahead of it, and a
