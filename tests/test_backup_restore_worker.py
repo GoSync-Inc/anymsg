@@ -126,3 +126,47 @@ def test_large_stream_keeps_original_ciphertext_source_distinct_from_tar_members
         if process.poll() is None:
             os.killpg(process.pid,signal.SIGKILL);process.wait(timeout=5)
     assert hashlib.sha256((tmp_path/'large-restore/files'/digest).read_bytes()).hexdigest()==digest
+
+
+@pytest.mark.parametrize('actual,manifest',[('34',31),('31',34),('35',35),('corrupt',34),(None,34)])
+def test_restored_database_schema_must_match_manifest_before_quarantine_or_proof(actual,manifest):
+    from messaging_service import backup_restore_worker as worker
+    class Lease:
+        def __enter__(self):return SimpleNamespace(execute=lambda query:SimpleNamespace(fetchone=lambda:({'value':actual} if actual is not None else None)))
+        def __exit__(self,*args):pass
+    store=SimpleNamespace(pool=SimpleNamespace(connection=Lease))
+    with pytest.raises(ValueError,match='restored_schema_mismatch'):worker.restored_schema_version(store,manifest)
+
+
+def test_restored_database_schema_reports_actual_verified_version():
+    from messaging_service import backup_restore_worker as worker
+    class Lease:
+        def __enter__(self):return SimpleNamespace(execute=lambda query:SimpleNamespace(fetchone=lambda:{'value':'34'}))
+        def __exit__(self,*args):pass
+    assert worker.restored_schema_version(SimpleNamespace(pool=SimpleNamespace(connection=Lease)),34)==34
+
+
+def test_worker_mismatched_dump_schema_never_enters_inventory_quarantine_or_result(tmp_path,monkeypatch):
+    import psycopg_pool
+    from messaging_service import backup_restore_worker as worker
+    data,manifest=bundle();manifest['schema_version']=31
+    restored=tmp_path/'verified-bundle';restored.mkdir(mode=0o700);(restored/'files').mkdir(mode=0o700)
+    (restored/'database.dump').write_bytes(b'UNIT_DUMP_NOT_A_DATABASE')
+    raw=json.dumps(manifest).encode();(restored/'manifest.json').write_bytes(raw)
+    monkeypatch.setattr(worker,'decrypt_snapshot_stream',lambda *a,**kw:restored)
+    monkeypatch.setattr(worker.subprocess,'run',lambda *a,**kw:None)
+    class Lease:
+        def __enter__(self):return SimpleNamespace(execute=lambda query:SimpleNamespace(fetchone=lambda:{'value':'34'}))
+        def __exit__(self,*args):pass
+    class Pool:
+        connection=Lease
+        def __enter__(self):return self
+        def __exit__(self,*args):pass
+    monkeypatch.setattr(psycopg_pool,'ConnectionPool',lambda *a,**kw:Pool())
+    later=[]
+    monkeypatch.setattr(worker.backup,'verify_snapshot',lambda *a:later.append('inventory'))
+    monkeypatch.setattr(worker.backup,'quarantine_restore',lambda *a:later.append('quarantine'))
+    config={'v':1,'identity_file':'/run/restore/identity','work_directory':'/work','database_host':'restore-postgres',
+            'database_password':'a'*64,'snapshot_sha256':hashlib.sha256(raw).hexdigest(),'max_plaintext_bytes':len(data)}
+    with pytest.raises(worker.RestoreStageError,match='restore_snapshot_failed'):worker.run(config,io.BytesIO(data))
+    assert later==[] and not (restored/'result.json').exists()

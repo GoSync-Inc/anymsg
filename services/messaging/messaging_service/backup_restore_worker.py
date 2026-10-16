@@ -28,6 +28,17 @@ def stage(code,operation):
     except Exception:raise RestoreStageError(code) from None
 
 
+def restored_schema_version(store,manifest_version):
+    """Bind the proof/quarantine policy to the actual restored metadata row."""
+    with store.pool.connection() as connection:
+        row=connection.execute("SELECT value FROM probe_metadata WHERE name='schema_version'").fetchone()
+    actual=row.get('value') if row else None
+    if (not isinstance(actual,str) or not actual.isascii() or not actual.isdigit() or len(actual)>3 or
+            int(actual) not in range(2,35) or type(manifest_version) is not int or int(actual)!=manifest_version):
+        raise ValueError('restored_schema_mismatch')
+    return int(actual)
+
+
 def assert_quarantined(store, version):
     """Check committed disabled state rather than trusting the UPDATE result."""
     predicates = {
@@ -87,10 +98,11 @@ def run(config, source=None):
                      password=config['database_password'],connect_timeout='10')
     with ConnectionPool(dsn,min_size=1,max_size=1,kwargs={'row_factory':dict_row},timeout=30) as pool:
         store=SimpleNamespace(pool=pool,files=restored/'files')
+        actual_version=stage('restore_snapshot_failed',lambda:restored_schema_version(store,manifest['schema_version']))
         stage('restore_snapshot_failed',lambda:backup.verify_snapshot(store,restored))
         stage('restore_quarantine_failed',lambda:backup.quarantine_restore(store))
-        stage('restore_quarantine_failed',lambda:assert_quarantined(store,manifest['schema_version']))
-    result={'v':1,'status':'verified','schema_version':manifest['schema_version'],'manifest_sha256':manifest_sha,
+        stage('restore_quarantine_failed',lambda:assert_quarantined(store,actual_version))
+    result={'v':1,'status':'verified','schema_version':actual_version,'manifest_sha256':manifest_sha,
             'checks':{name:True for name in ('decryption','bundle_integrity','database_restore','table_inventory',
                                             'original_hashes','recovery_objects','collectors_quarantined')}}
     # This is a helper result, NOT a trusted root proof. The host independently
