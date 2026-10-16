@@ -15,10 +15,11 @@ for recovery and route routine changes through this tool.
 ## Required CI and main protection
 
 `CI gate` runs even when dependencies fail or skip and accepts only success from
-the shared package/module checks, native Go race tests/vet, and all seven
+the shared package/module checks, native Go race tests/vet, and all eight
 production image builds with isolated imports. The existing shared checks cover
 synthetic PostgreSQL, Python/Node, installed distributions, release inventories,
-gateway/calendar/calls and load budgets. Tiden reports actual outcomes separately.
+gateway/calendar/calls, the isolated native backup restore and load budgets.
+Tiden reports actual outcomes separately.
 No test receives a provider session or production database.
 
 Protect `main` with required GitHub Actions `CI gate` and `checks / verify`,
@@ -50,7 +51,9 @@ the currently running application services to replace. Obtain those paths from
 overlays. Do not replace the host's Compose topology with the example.
 
 Available build targets are `runtime` (API, Telegram, subscriptions), `indexer`,
-`enricher-local`, `whatsapp-native`, `gateway`, `calendar` and `calls`. The two
+`enricher-local`, `whatsapp-native`, `gateway`, `calendar`, `calls` and `backup`.
+The backup target supplies the producer and isolated restore helper; building it
+does not start a capture or a restore. The two
 calendar services share the `calendar` image; a legacy service named `voice`
 can select `calls`. Explicitly select only the deployed native WhatsApp adapter;
 this tool does not convert browser sessions. Databases and unrelated services
