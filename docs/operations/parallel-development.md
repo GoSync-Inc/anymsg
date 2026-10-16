@@ -1,0 +1,243 @@
+# Parallel development and releases
+
+This document covers how several agent sessions work at once and how their work
+reaches production. Tiden usage is defined in
+[tiden-product-workflow.md](tiden-product-workflow.md), promotion in
+[production.md](production.md), and review levels, reviews and merge authority
+under Review levels in [AGENTS.md](../../AGENTS.md). Do not restate those rules here.
+
+## Roles
+
+- **Owner** sets priorities, decides owner-level pull requests, authorizes
+  production apply and every live provider action. Nothing below delegates that
+  authority implicitly.
+- **Orchestrator** (one at a time) selects ready stories, checks lanes, dispatches
+  worker sessions and checks their pull requests before they merge. It writes no
+  product code.
+- **Worker session** (Claude Code) implements exactly one story in its own
+  worktree, branch, pull request and Tiden intent session or recorded skip.
+- **Codex** reviews as Astra and gives a second opinion when planning;
+  development goes to Claude Code workers.
+- **Release owner** (one at a time) prepares and applies promotions of `main`.
+
+## Unit of work
+
+A story is **ready** when its Tiden record has the fields the Tiden workflow
+requires (acceptance criteria, dependencies, priority, evidence to close) plus its
+**lane** and expected paths. Stories that are not ready go back to the owner. A
+change that takes `tiden intent skip` has no story; its brief names the goal and
+paths instead.
+
+One story maps to one Git branch, one pull request and one intent session. Split
+larger work into stories that merge independently. A pull request should merge
+within about a day; the older a branch, the more it conflicts.
+
+**Claim.** A worker opens a draft pull request with its first push; a branch push
+alone runs no CI, the pull request run verifies it. Its description names the
+story (or the goal for a skip), the lane and the review level (`Lane: <lane>`,
+`Review level: <level> — <reason>`) and carries the `Tiden intent branch:` line or
+`Tiden: skip — <reason>`. The draft pull request is the claim. Before dispatching,
+the orchestrator lists open pull requests and open intent branches; an item with a
+claim is taken. When a claimed pull request has no activity for two days, the
+orchestrator hands it to a new worker on the same branch and pull request and
+tells the owner. Git allows one worktree per branch, so the orchestrator first
+saves uncommitted work in the old worktree (a pushed work-in-progress commit or a
+patch) and archives that workspace. The new worker continues a closed intent
+session with `tiden intent continue --pr <n>`; a recorded skip stays a skip, and
+anything else goes back to the orchestrator. A pull request is closed only when
+its task is cancelled.
+
+## Lanes
+
+A lane never has more concurrent pull requests than its limit in the table; where
+two are allowed, their files must not overlap. The lane is recorded in the story
+and in the pull request description. Before dispatch the orchestrator compares the
+planned paths with the expected paths in active workers' briefs and with the
+changed paths of open pull requests (`gh pr diff <n> --name-only`).
+
+| Lane | Paths | Concurrent PRs |
+| --- | --- | --- |
+| `schema` | `services/messaging/messaging_service/migrations/`, any `schema.sql` or `*_role.sql` | 1 |
+| `messaging-mcp` | `services/messaging/messaging_service/app.py` | 1 |
+| `messaging-store` | `services/messaging/messaging_service/store.py` | 1 |
+| `telegram-ops` | `services/messaging/messaging_service/telegram_operations.py`, `telegram_collector.py` | 1 |
+| `whatsapp-native` | `whatsapp/whatsmeow/` | 1 |
+| `release-infra` | `deploy/`, `scripts/production.py`, `scripts/seamless_release.py`, `services/release-router/`, `.github/workflows/`, Dockerfiles, lock files | 1 |
+| `process-docs` | `AGENTS.md`, `CLAUDE.md`, `.claude/`, `TIDEN-CI.md`, `BACKLOG.md`, `docs/operations/` | 2, disjoint files |
+| module lanes | `services/calendar/`, `services/calls/`, `services/gateway/`, `packages/`, `whatsapp/` browser collector | 2 each, disjoint files |
+
+The first five lanes exist because single large functions or numbered files make
+parallel edits collide: `create_app` holds every messaging MCP tool, provider
+operations live in one dispatcher per provider, and migration numbers are
+sequential with immutable checksums. Splitting those functions is itself a
+`messaging-mcp` / provider-lane story and would raise the limits afterwards.
+
+A story that needs two lanes holds both, and several lanes make its review level
+at least important (`AGENTS.md`). Prefer splitting it.
+
+## Merging
+
+- **Merge queue: not applied yet.** CI already runs the required checks on the
+  `merge_group` event, and a queue run publishes nothing to Tiden
+  ([TIDEN-CI.md](../../TIDEN-CI.md)). As of 2026-10-16 the repository has no
+  ruleset: `main` keeps the classic protection in `deploy/main-protection.json`,
+  with strict up-to-date branches. Moving `main` to a ruleset with the merge queue
+  changes branch protection, so it is an owner-level change in the `release-infra`
+  lane, together with `deploy/main-protection.json`. Update this section when it
+  lands.
+- Until then a pull request must be up to date with `main` to merge. Update a
+  branch only when that blocks its merge, to resolve a real conflict or when a
+  review asks for it, never just to stay current. A worker whose branch is behind
+  `main` brings it up to date before "ready to merge", waits for CI and then
+  closes the intent session on its own commit range
+  ([Claude Code guide](claude-code-tiden.md)). If `main`
+  moves again after the "ok", the branch is updated and merged once CI is green;
+  a conflict goes back to the orchestrator. With the queue, each pull request is
+  tested against the latest `main` plus the pull requests ahead of it, and a
+  branch is updated only for a conflict or a review.
+- Merge method: **squash** only; merge commits and rebase merges are disabled in
+  the repository settings (2026-10-16). One story becomes one commit on `main`.
+- Who merges follows the review level in `AGENTS.md`; a worker also waits for the
+  orchestrator's "ok" (Worker protocol). Enqueueing a pull request is merging it.
+  Never bypass required checks or use administrator merges.
+- Merging the Git pull request never merges its Tiden branch. That branch merges
+  separately, under the same review level and conditions.
+
+## Schema compatibility
+
+- **Expand, then contract.** A migration must work with both the currently deployed
+  code and the new code. Dropping, renaming or narrowing happens in a later release,
+  after no deployed code uses the old shape. Blue-green handoff and image rollback
+  depend on this.
+- Never edit a merged migration. Reserve the next migration number in the pull
+  request title while the `schema` lane is held.
+- A schema migration is owner-level (`AGENTS.md`). Its pull request states its
+  backup prerequisite, and its release waits for the backup gate in
+  [production.md](production.md).
+
+## Releases
+
+- Merging and deploying are independent: without automatic deployment a merge
+  never implies a deploy. A release in flight holds merges from prepare to apply,
+  because apply checks again that its SHA is the current `main`
+  ([production.md](production.md)). The release owner tells the orchestrator
+  before prepare and after apply, and the orchestrator gives no "ok" in between.
+- The release owner promotes the exact current `main` SHA by
+  [production.md](production.md), after that SHA's own push run succeeds; never
+  an earlier SHA. The readiness decision in the Tiden workflow is recorded for
+  that SHA first, and live-session authority exists where the changed service
+  requires it.
+- A new `main` push cancels the push run still in progress (`ci.yml`
+  concurrency), so a SHA merged shortly before another gets no `main` result.
+  Until a `release-infra` change stops cancelling `main` runs, wait for the
+  latest SHA's run when merges come quickly.
+- The release owner keeps one release in flight, from prepare to acceptance. The
+  host deployment lock only stops two deployment commands from running at once.
+- Release often; the target is several times a day. Once automatic deployment
+  exists, release after every merge whose checks and production.md gates pass;
+  until then, as often as the rollout allows. Each release keeps production.md's
+  receipts and the readiness decision for its SHA.
+
+## Orchestrator loop
+
+1. Read Tiden main and open proposal branches; list ready stories by priority.
+2. List open pull requests and intent branches; compute busy lanes.
+3. Dispatch every story whose paths fit a free lane; there is no fixed number of
+   workers. The real limits are file overlap (lanes), the GitHub CI queue and the
+   owner's attention for owner-level decisions; the orchestrator watches them.
+4. Each brief names: story link or goal, lane, expected paths, review level,
+   acceptance criteria, checks to run, the evidence to return and the final result
+   its level requires.
+5. Answer workers' questions and check each pull request before its "ok" (Worker
+   protocol).
+6. After merge: confirm the worker's post-merge check, update the story, free the
+   lane.
+7. Escalate to the owner: priority conflicts, owner-level pull requests, every
+   escalation condition under Review levels in `AGENTS.md`, any story that is not
+   ready.
+
+The orchestrator starts no new worker when its context is above about 60%, at the
+end of the working day or when the current wave of tasks is done. Running workers
+still reach their final result: merge, post-merge check, archive. The orchestrator
+keeps all its state in a handoff file and updates it after every decision, so a
+compaction or a new session loses nothing. A new orchestrator session first reads
+the handoff file and the list of live sessions.
+
+The orchestrator keeps a log of the owner's decisions: its recommendation, the
+owner's choice and whether they matched, so autonomy grows on facts. At the end
+of each session it writes two or three lines to the handoff file: what got in the
+way and what to change. Once a week it reviews the decision log, these notes and
+the measurements under Worker protocol, and proposes rule changes as separate
+pull requests.
+
+## Worker protocol
+
+The orchestrator starts each worker in its own Superset workspace, with its own
+worktree and branch, and keeps a table: task, dependencies, workspace, branch,
+status, result. For Claude Code workers, model and effort follow the kind of
+work; the orchestrator picks them for each worker:
+
+| Work | Model and effort |
+| --- | --- |
+| Orchestrator | Opus, high |
+| Code and CI | Opus, high; xhigh only for an autonomous task longer than about 30 minutes |
+| Security, unclear root cause | Opus, xhigh, or Fable, high |
+| Tiden specs and backlog | Opus, medium |
+| Documents and settings | Sonnet, medium |
+| Code exploration | Haiku or Sonnet, low |
+
+Reviewers follow Review levels in `AGENTS.md` whatever the worker's model. The
+orchestrator measures usage-limit spend by role, review findings per pull request
+and the share of pull requests with green CI from the first push; the weekly
+review reads these measurements.
+
+The worker writes and waits for the answer:
+
+- before `tiden intent start`: its objective and promises, which cannot be edited
+  after the start;
+- before going out of scope: another task's file, an owner-level action, or a fork
+  without an obvious answer;
+- before merging: "ready to merge" with the pull request, CI, review results and
+  the Tiden verdict or recorded skip. The orchestrator checks CI, the diff and the
+  Tiden merge preview (the recorded skip when there is no Tiden branch) itself and
+  only then answers "ok"; it hands an owner-level pull request to the owner.
+
+The worker writes without waiting: at the start, when it opens the pull request,
+and its final result. The result ends with a `SUPERSET_WORKER_DONE` or
+`SUPERSET_WORKER_BLOCKED` block. Both list `task`, `summary`, `files` and `checks`;
+DONE adds `handoff`, BLOCKED adds `reason` and `needs`.
+
+The final result depends on the level:
+
+- micro: merged after green CI;
+- normal and important: the pull request and its Tiden branch, if any, merged and
+  checked after the merge, the intent session closed with PASS or a recorded skip;
+- owner: the pull request ready (not draft, green CI, reviews with no open
+  findings, Tiden closed or skipped) and a summary for the owner in its
+  description.
+
+The owner decides an owner-level pull request and its Tiden branch together: an
+explicit "merge <n>" covers both, and the orchestrator may carry it out. Without
+that explicit word neither the worker nor the orchestrator merges them. After the
+merge the worker checks it and reports.
+
+Checked after the merge means a successful `main` push run on the squash commit
+or a later one and, for a change with a Tiden branch, Tiden main and drift read
+back as in [tiden-product-workflow.md](tiden-product-workflow.md).
+
+After its final result the worker stays open until its pull request is merged and
+checked after the merge. The orchestrator then closes its terminal and archives
+the workspace without asking again, after checking that the worktree has no
+uncommitted changes: archiving deletes the folder, the branch stays.
+
+Claude Code workers and the orchestrator talk through messages between sessions.
+A Codex session asks in its terminal, which the orchestrator reads and answers in.
+The orchestrator checks a silent worker when it gets the idle notice; there are no
+timed reports.
+
+## Sessions
+
+- Every session uses its own worktree and branch. Never share a worktree and never
+  use bare `git stash`; the stash stack is shared across worktrees.
+- Codex and Claude Code follow the same rules. Tool-specific setup lives in
+  `CLAUDE.md` and the [Claude Code Tiden guide](claude-code-tiden.md).
