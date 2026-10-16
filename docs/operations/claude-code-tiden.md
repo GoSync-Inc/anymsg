@@ -33,8 +33,8 @@ workspace `1dc18e09-4a09-4d74-8300-cd4302622357` and product
 4. Open the pull request with the exact `Tiden intent branch:` line from the
    contract in its description, on a line of its own rather than inside a list or
    quote, then run `tiden intent link-pr`. CI publishes the pull request's evidence
-   to that intent branch; without a matching line it lands on a branch named after
-   the Git branch (TIDEN-CI.md).
+   to that intent branch; without a matching line nothing is published to Tiden
+   until the merged code runs on `main` (TIDEN-CI.md).
 5. Evidence comes from CI. While a run is in progress, answer the stop hook with the
    current `tiden intent progress` status and the run you are waiting for. A local
    run that bypasses the reporter does not change the gate.
