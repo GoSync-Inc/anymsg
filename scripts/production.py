@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import argparse
-from contextlib import contextmanager
+from contextlib import ExitStack, contextmanager
 import fcntl
 import hashlib
 import json
@@ -23,13 +23,14 @@ REPOSITORY = "GoSync-Inc/deedkit"
 REQUIRED_JOBS = {"checks / verify", "native / synthetic", "CI gate"}
 MIN_FREE_BYTES = 15 * 1024**3
 BUILDS = {
-    "runtime": (".", "services/messaging/Dockerfile", "runtime", "import messaging_service, telegram_broker, telegram_session_owner"),
+    "runtime": (".", "services/messaging/Dockerfile", "runtime", "import messaging_service, telegram_broker, telegram_session_owner, platform_contracts.release"),
     "indexer": (".", "services/messaging/Dockerfile", "indexer", "import messaging_service.file_index"),
     "enricher-local": (".", "services/messaging/Dockerfile", "enricher-local", "import messaging_service.enrichment"),
     "whatsapp-native": (".", "services/messaging/Dockerfile", "whatsapp-native", "import messaging_service.whatsapp_collector"),
-    "gateway": (".", "services/gateway/Dockerfile", "", "import agent_gateway"),
+    "gateway": (".", "services/gateway/Dockerfile", "", "import agent_gateway, platform_contracts.release"),
     "calendar": ("services/calendar", "services/calendar/Dockerfile", "", "import family_calendar"),
     "calls": ("services/calls", "services/calls/Dockerfile", "", "import fastapi, pipecat"),
+    "http-router": (".", "services/release-router/Dockerfile", "", ""),
 }
 
 
@@ -337,19 +338,56 @@ def build_image(source, sha, target):
                "--tag", tag, "--file", str(source / dockerfile)]
     if stage:
         command += ["--target", stage, "--build-arg", "ANYMSG_INSTALL_TELEMETRY=1"]
+    if target == "http-router":
+        command += ["--build-arg", "VERSION_REF=" + sha]
     run(command + [str(source / context)])
     image = run(["docker", "image", "inspect", "--format", "{{.Id}}", tag]).strip()
     if not re.fullmatch(r"sha256:[0-9a-f]{64}", image):
         raise Refused("build did not produce an immutable image ID")
     name = f"deedkit-smoke-{target}-{uuid.uuid4().hex[:12]}"
     try:
-        run(["docker", "run", "--name", name, "--rm", "--network", "none", "--read-only", "--cap-drop", "ALL",
-             "--security-opt", "no-new-privileges", "--entrypoint", "python", image, "-c", smoke])
+        isolated = ["docker", "run", "--name", name, "--rm", "--network", "none", "--read-only", "--cap-drop", "ALL",
+                    "--security-opt", "no-new-privileges", "--entrypoint"]
+        if target == "http-router":
+            run(isolated + ["/deedkit-release-router", image, "--version"])
+        else:
+            run(isolated + ["python", image, "-c", smoke])
     except Exception:
         # This name was created by this invocation; never stop a shared runtime.
         subprocess.run(["docker", "stop", "--time", "10", name], capture_output=True, timeout=20)
         raise
     return image
+
+
+def prepare_router(settings, sha):
+    """Build enrollment infrastructure from fetched main, without touching serving units."""
+    if not re.fullmatch(r"[0-9a-f]{40}", sha):
+        raise Refused("an exact lowercase 40-character commit SHA is required")
+    verify(sha)
+    state = Path(settings["state_directory"])
+    check_space(state)
+    docker_root = run(["docker", "info", "--format", "{{.DockerRootDir}}"]).strip()
+    if not docker_root or not Path(docker_root).is_dir():
+        raise Refused("preparation requires the local production Docker engine")
+    check_space(docker_root)
+    release = state / ("router-" + sha)
+    if release.exists():
+        raise Refused("router directory already exists; inspect it before a new preparation")
+    release.mkdir(mode=0o700)
+    source = release / "source"
+    run(["git", "init", "--quiet", str(source)])
+    run(["git", "-C", str(source), "remote", "add", "origin", "https://github.com/" + REPOSITORY + ".git"])
+    run(["git", "-C", str(source), "fetch", "--depth=1", "origin", "refs/heads/main"])
+    if run(["git", "-C", str(source), "rev-parse", "FETCH_HEAD"]).strip() != sha:
+        raise Refused("main moved while retrieving source; prepare the new verified commit")
+    run(["git", "-C", str(source), "checkout", "--quiet", "--detach", sha], umask=0o022)
+    image = build_image(source, sha, "http-router")
+    if not re.fullmatch(r"sha256:[0-9a-f]{64}", image):
+        raise Refused("router build did not produce an immutable image ID")
+    evidence = verify(sha)
+    receipt = {"version": 1, "target": "http-router", "sha": sha, "image": image, "ci": evidence}
+    write(release / "router-build.json", receipt)
+    return receipt
 
 
 def prepare(settings, sha):
@@ -456,7 +494,7 @@ def apply(settings, sha):
 
 def main(argv=None):
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("action", choices=["verify", "prepare", "apply", "status", "check-image"])
+    parser.add_argument("action", choices=["verify", "prepare", "prepare-router", "apply", "status", "check-image"])
     parser.add_argument("--sha")
     parser.add_argument("--target", choices=sorted(BUILDS))
     parser.add_argument("--config", default="/etc/deedkit/production.json")
@@ -474,13 +512,22 @@ def main(argv=None):
         else:
             settings = config(args.config)
             state = Path(settings["state_directory"])
-            with lock(state):
+            with ExitStack() as locks:
+                if args.action == "prepare-router":
+                    if os.geteuid() != 0:
+                        raise Refused("router preparation requires the production host operator")
+                    canonical = Path("/var/lib/deedkit-production")
+                    locks.enter_context(lock(canonical))
+                    if state.resolve() != canonical.resolve():
+                        locks.enter_context(lock(state))
+                else:
+                    locks.enter_context(lock(state))
                 if args.action == "status":
                     result = read(state / "current.json") if (state / "current.json").exists() else {"status": "not promoted by this tool"}
                 else:
                     if not re.fullmatch(r"[0-9a-f]{40}", args.sha or ""):
                         raise Refused("an exact lowercase 40-character commit SHA is required")
-                    result = {"prepare": prepare, "apply": apply}[args.action](settings, args.sha)
+                    result = {"prepare": prepare, "prepare-router": prepare_router, "apply": apply}[args.action](settings, args.sha)
         # Receipts contain revisions/image IDs, never resolved Compose environments.
         if args.action == "prepare":
             result = {key: result[key] for key in ("sha", "ci", "images")}

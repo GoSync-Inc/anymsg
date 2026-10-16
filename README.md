@@ -156,3 +156,4 @@ Report vulnerabilities privately through [GitHub security advisories](https://gi
 not by posting session data or tokens in an issue. See [SECURITY.md](SECURITY.md).
 
 Platform operations: [profiles, access, backup, cutover and rollback](docs/operations/platform-cutover.md).
+Verified gateway/API promotions: [ready-before-route HTTP releases](docs/operations/seamless-release.md).

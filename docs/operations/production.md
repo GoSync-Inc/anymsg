@@ -1,5 +1,11 @@
 # Verified production promotion
 
+For ready-before-route gateway and messaging HTTP promotion, use the opt-in
+[seamless HTTP release protocol](seamless-release.md). It preserves the existing
+main/CI gate and keeps provider/session owners outside overlap. The `apply`
+sequence described below still performs an explicit stop/start of selected
+services; it is not a seamless HTTP promotion.
+
 Production changes follow PR → required CI → merge into `main` → CI on the
 actual main SHA → prepare → explicit apply. Use `scripts/production.py` for
 promotion. Direct source copies, ad hoc image overrides and `compose up --build`

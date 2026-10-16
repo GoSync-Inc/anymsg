@@ -67,9 +67,13 @@ class FileResponse(StreamingResponse):
 
 
 class Tickets:
-    def __init__(self, policy, clients, public_url, capacity=4096):
+    def __init__(self, policy, clients, public_url, capacity=4096, *, release_id=None):
         self.policy, self.clients, self.public_url = policy, clients, public_url
         self.capacity, self.entries = capacity, {}
+        self.release_id = release_id
+
+    def pending(self):
+        return sum(row["expires"] > time.time() for row in self.entries.values())
 
     def clear(self):
         self.entries.clear()
@@ -125,7 +129,9 @@ class Tickets:
         }
         return {
             **result,
-            "download_url": self.public_url + "/v1/files/" + token,
+            "download_url": self.public_url + (
+                "/_releases/" + self.release_id if self.release_id else ""
+            ) + "/v1/files/" + token,
             "download_expires_in": max(0, int(expires - now)),
             "notice": "Temporary bearer link; current access and expiry are checked when downloading. Do not share or log.",
         }
