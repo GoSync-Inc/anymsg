@@ -131,6 +131,8 @@ export declare class DeedKitError extends Error {
   readonly reason: string | null;
   readonly backendError: string | null;
   readonly backendStatus: number | null;
+  /** Downloads only: a staging file of this call that could not be removed. */
+  readonly stagingLeft: string | null;
   toJSON(): Record<string, string | number | boolean | null>;
 }
 

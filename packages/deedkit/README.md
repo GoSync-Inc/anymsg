@@ -75,14 +75,17 @@ gateway; any other URL is refused before a request. The ticket is the temporary
 credential, so the gateway key is not sent with it. The client writes a
 private (mode 600) staging file beside the output, checks the byte count and
 SHA-256 from the grant, and only then links it to the output name, which never
-replaces an existing file. On any failure it removes the staging file and leaves
-the output path untouched. Before and after publishing it checks that the
-staging and output names still refer to the file it wrote; otherwise it fails
-with `output_unavailable` and a `reason`. The output directory must support hard
-links and must be writable only by trusted users: anyone who can rename entries
-there could also replace the file after the call returns. A staging file
-(`.deedkit-<hex>.part`) remains if the process dies mid-transfer, or if removal
-keeps failing (the result then names it in `staging_left`); it is safe to delete.
+replaces an existing file. A failure before publication removes the staging file
+and leaves the output path untouched. Before linking it checks that the staging
+name still refers to the file it wrote (`reason: staging_replaced`). After
+linking it checks the output name the same way: `published_file_replaced` or
+`published_unverified` means an entry now exists at the output path that the
+client did not verify, so it is left alone and must not be trusted. The output
+directory must support hard links and must be writable only by trusted users:
+anyone who can rename entries there could also replace the file after the call
+returns. A staging file (`.deedkit-<hex>.part`) remains if the process dies
+mid-transfer, or if removal keeps failing; the result or the error then names it
+in `staging_left`. It is safe to delete.
 On Windows, output names with `:` (alternate data streams) are refused, and file
 modes are not POSIX permissions. Do not
 log or share the ticket URL.

@@ -171,6 +171,18 @@ test('a replaced staging file is never published or deleted', async () => {
   } finally { rmSync(dir, {recursive: true, force: true}); }
 });
 
+test('an output path ending in a separator is refused before any request', async () => {
+  const dir = directory();
+  try {
+    let calls = 0;
+    const client = new DeedKitClient({baseUrl: 'https://gateway.example/deedkit', token,
+      fetch: async () => { calls++; return fileResponse(); }});
+    await assert.rejects(client.downloadFile(grant(), join(dir, 'name') + '/'), TypeError);
+    assert.equal(calls, 0);
+    assert.deepEqual(readdirSync(dir), []);
+  } finally { rmSync(dir, {recursive: true, force: true}); }
+});
+
 test('a Windows alternate-stream output name is refused', {skip: process.platform !== 'win32'}, async () => {
   const client = new DeedKitClient({baseUrl: 'https://gateway.example/deedkit', token, fetch: async () => fileResponse()});
   await assert.rejects(client.downloadFile(grant(), 'file.bin:stream'), TypeError);

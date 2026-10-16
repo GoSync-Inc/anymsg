@@ -50,6 +50,8 @@ export class DeedKitError extends Error {
     this.reason = reason;
     this.backendError = backendError;
     this.backendStatus = backendStatus;
+    // Set by downloads when a staging file of this call could not be removed.
+    this.stagingLeft = null;
   }
   get unknownOutcome() { return this.outcome === 'unknown'; }
   toJSON() {
@@ -58,7 +60,8 @@ export class DeedKitError extends Error {
     for (const [key, value] of [['request_id', this.requestId], ['gateway_request_id', this.gatewayRequestId],
       ['next_action', this.nextAction], ['retry_after_seconds', this.retryAfterSeconds],
       ['operation_sent', this.operationSent], ['phase', this.phase], ['reason', this.reason],
-      ['backend_error', this.backendError], ['backend_status', this.backendStatus]])
+      ['backend_error', this.backendError], ['backend_status', this.backendStatus],
+      ['staging_left', this.stagingLeft]])
       if (value !== null) result[key] = value;
     return result;
   }
@@ -114,7 +117,8 @@ async function removeStaging(staging, same) {
   for (let attempt = 0; attempt < 3; attempt++) {
     const current = await lstat(staging).catch(error => error.code === 'ENOENT' ? null : undefined);
     if (current === null || current && !same(current)) return true;
-    if (await unlink(staging).then(() => true, () => false)) return true;
+    // Unlink only after a positive identity match; an unreadable entry is retried.
+    if (current && await unlink(staging).then(() => true, () => false)) return true;
     await delay(50 * (attempt + 1));
   }
   return false;
@@ -253,7 +257,7 @@ export class DeedKitClient {
     if (signal?.aborted) throw new DeedKitError('request_aborted');
     const name = basename(output);
     // A Windows name with ':' addresses an alternate data stream, not a new file.
-    if (!name || name === '.' || name === '..' || process.platform === 'win32' && name.includes(':'))
+    if (!name || name === '.' || name === '..' || /[\\/]$/.test(output) || process.platform === 'win32' && name.includes(':'))
       throw new TypeError('Invalid output path');
     // Resolve the existing directory through the filesystem, so the staging file and
     // the output share one real directory (no lexical '..' or drive-relative surprises).
@@ -270,9 +274,11 @@ export class DeedKitClient {
     const handle = await open(staging, constants.O_WRONLY | constants.O_CREAT | constants.O_EXCL |
       (constants.O_NOFOLLOW ?? 0), 0o600).catch(() => { throw new DeedKitError('output_unavailable'); });
     const created = await handle.stat().catch(async () => {
+      // Without its identity the file cannot be removed safely; report it instead.
       await handle.close().catch(() => {});
-      await unlink(staging).catch(() => {});
-      throw new DeedKitError('output_unavailable');
+      const error = new DeedKitError('output_unavailable', {reason: 'unexpected'});
+      error.stagingLeft = staging;
+      throw error;
     });
     const same = value => Boolean(value?.isFile()) && value.dev === created.dev && value.ino === created.ino;
     const controller = new AbortController();
@@ -333,16 +339,19 @@ export class DeedKitClient {
       if (!same(await lstat(staging).catch(() => null)))
         throw new DeedKitError('output_unavailable', {reason: 'staging_replaced'});
       await link(staging, target).catch(() => { throw new DeedKitError('output_unavailable'); });
-      // A swap between the check and link() is detected here; the unknown file is left alone.
-      if (!same(await lstat(target).catch(() => null)))
-        throw new DeedKitError('output_unavailable', {reason: 'published_file_replaced'});
+      // After link() the output name exists. A swap between the check and link(), or an
+      // unreadable result, is reported; the entry at the output path is left alone.
+      const published = await lstat(target).catch(() => null);
+      if (!same(published))
+        throw new DeedKitError('output_unavailable', {reason: published ? 'published_file_replaced'
+          : 'published_unverified'});
       const result = {path: output, bytes: total, sha256: grant.sha256};
       if (!await removeStaging(staging, same)) result.staging_left = staging;
       return result;
     } catch (caught) {
-      const error = caught instanceof DeedKitError ? caught : new DeedKitError('output_unavailable');
+      const error = caught instanceof DeedKitError ? caught : new DeedKitError('output_unavailable', {reason: 'unexpected'});
       await handle.close().catch(() => {});
-      if (!await removeStaging(staging, same) && !error.reason) error.reason = 'staging_not_removed';
+      if (!await removeStaging(staging, same)) error.stagingLeft = staging;
       throw error;
     } finally {
       clearTimeout(timer);
