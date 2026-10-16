@@ -18,6 +18,7 @@ Backlog/Review status is not a gate exclusion. Keep current defects and unresolv
 production incidents in readiness review. Preserve existing spec IDs/history;
 do not delete/recreate already merged plans to simulate a branch move.
 Claude Code starts with docs/operations/claude-code-tiden.md.
+Parallel sessions and releases follow docs/operations/parallel-development.md.
 
 Production upgrades follow docs/operations/production.md. Use the verified
 promotion tool with an exact current main SHA and successful required CI;
