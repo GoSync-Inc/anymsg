@@ -36,8 +36,8 @@ that `intent/` branch must be open. Exactly one such branch becomes an explicit
 target; any other link is ignored. The event is captured when a run starts and a
 re-run reuses it, so add the line before opening or pushing the pull request.
 Without a usable link, a pull request run publishes nothing: the
-`tiden-route.json` receipt records `skipped` with the reason, the job log shows a
-notice, and the check stays green. The merged code reaches Tiden through the main
+`tiden-route.json` receipt records `skipped` with the reason, and the job log shows a notice when the
+line is missing or a warning when its link is unusable; the check stays green. The merged code reaches Tiden through the main
 push run. Any other run without an explicit target, such as a manual dispatch
 without `tiden_branch`, is reported under its own Git branch name. Tiden skips
 live-doc sync for a branch name it does not know, so the publisher first creates a

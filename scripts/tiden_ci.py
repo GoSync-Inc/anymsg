@@ -214,6 +214,17 @@ def publish(directory: Path, manifest: dict, branch: str | None, product: str, c
             raise RuntimeError(f"Tiden {label} failed without a test verdict")
         return value
 
+    def skip(reason: str, level: str) -> dict:
+        # Without its intent branch a pull request has no Tiden home; main publishes the merged code.
+        (directory / "tiden-route.json").write_text(json.dumps({"branch": None, "source": "skipped",
+                                                                "reason": reason}))
+        print(f"::{level} title=Tiden evidence not published::{reason}; main CI publishes it after merge")
+        return {"seqNum": None, "status": "skipped", "branchName": None, "branchId": None,
+                "buildSha": manifest["sha"], "stats": {}, "liveDocStatus": None}
+
+    pull_request = manifest.get("event") == "pull_request"
+    if routed and pull_request and not manifest.get("pr_tiden_links"):
+        return skip("pull request description has no Tiden intent branch link", "notice")
     branches = call(["branch", "list"], "branches")["branches"]
     source = "routed" if routed else "explicit"
     if routed and manifest.get("pr_tiden_links"):
@@ -221,14 +232,9 @@ def publish(directory: Path, manifest: dict, branch: str | None, product: str, c
         linked = linked_intent_branch(manifest["pr_tiden_links"], branches, product, workspace)
         if linked:
             branch, routed, source = linked, False, "pull-request-link"
-    if routed and manifest.get("event") == "pull_request":
-        # Without its intent branch a pull request has no Tiden home; main publishes the merged code.
-        reason = "pull request description has no usable Tiden intent branch link"
-        (directory / "tiden-route.json").write_text(json.dumps({"branch": None, "source": "skipped",
-                                                                "reason": reason}))
-        print(f"::notice title=Tiden evidence not published::{reason}; main CI publishes it after merge")
-        return {"seqNum": None, "status": "skipped", "branchName": None, "branchId": None,
-                "buildSha": manifest["sha"], "stats": {}, "liveDocStatus": None}
+    if routed and pull_request:
+        return skip("the pull request's Tiden intent branch link is not usable: it must name exactly one "
+                    "open intent branch of this workspace and product", "warning")
     if branch is None:
         raise ValueError("No Tiden branch mapping, no usable pull request intent link, and the Git branch "
                          "is not a valid Tiden branch name; register this Git branch before publishing evidence")

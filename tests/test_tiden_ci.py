@@ -404,7 +404,13 @@ def test_pull_request_without_usable_link_publishes_nothing(tmp_path, monkeypatc
     assert not any(call[1:3] in (["branch", "create"], ["run", "create"]) for call in calls)
     receipt = json.loads((tmp_path / "tiden-route.json").read_text())
     assert receipt["source"] == "skipped" and receipt["branch"] is None and "intent branch link" in receipt["reason"]
-    assert "::notice title=Tiden evidence not published::" in capsys.readouterr().out
+    out = capsys.readouterr().out
+    if lines:
+        # A link that stopped resolving is surfaced as a warning, not a quiet notice.
+        assert "::warning title=Tiden evidence not published::" in out and "not usable" in receipt["reason"]
+    else:
+        # A pull request without a link needs no Tiden call at all.
+        assert calls == [] and "::notice title=Tiden evidence not published::" in out
 
 
 def test_linked_pull_request_still_publishes_to_its_intent_branch(tmp_path, monkeypatch):
@@ -455,3 +461,15 @@ def test_prepare_records_the_ci_event_name(tmp_path, monkeypatch):
                                       "--source-root", str(tmp_path)])
     assert tiden_ci.main() == 0
     assert json.loads((tmp_path / "manifest.json").read_text())["event"] == "pull_request"
+
+
+def test_pull_request_branch_map_entry_still_publishes(tmp_path, monkeypatch):
+    mapped = {"id": "mapped-id", "name": "intent/mapped", "status": "open"}
+    calls, manifest = routed_cli(monkeypatch, tmp_path, created=mapped["name"], final_id="mapped-id",
+                                 final_branches=(), existing=(mapped,))
+    assert route_branch({**manifest, "event": "pull_request"}, {"codex/feature": "intent/mapped"}) == ("intent/mapped", False)
+    result = publish(tmp_path, pull_request_manifest(manifest), "intent/mapped", PRODUCT, workspace=WORKSPACE)
+    assert result["branchId"] == "mapped-id"
+    creation = next(call for call in calls if call[1:3] == ["run", "create"])
+    assert creation[creation.index("--branch") + 1] == "intent/mapped"
+    assert json.loads((tmp_path / "tiden-route.json").read_text())["source"] == "explicit"
