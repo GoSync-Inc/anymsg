@@ -21,3 +21,5 @@ Implemented contracts and their limits:
 Source implementation, published packages and operational acceptance have separate
 states. Consult [README.md](README.md) for versions and the central backlog for
 remaining work; old version-specific plans do not override them.
+
+<!-- Throwaway probe for PR 60: a documentation-only change must skip image builds. -->
