@@ -98,10 +98,12 @@ Examples of boundaries that must stay explicit:
   local reply dismissal are different evidence. Passive reads do not send a
   provider read receipt.
 - Original deduplication and context-bound derivative reuse are implemented.
-  Opt-in managed eviction of processed, unpinned originals and best-effort
-  recovery through the collector are implemented. A cold archive before
-  eviction with verified rehydration, and independent AI artifact reuse,
-  remain planned. An unavailable original is not a download guarantee.
+  Opt-in managed eviction of unpinned originals and best-effort recovery
+  through the collector are implemented; eviction requires usable current
+  processing unless the operator explicitly expires old unprocessed originals.
+  A cold archive before eviction with verified rehydration, and independent AI
+  artifact reuse, remain planned. An unavailable original is not a download
+  guarantee.
 - Container defaults describe the deployment template. Synthetic tests do not
   prove current provider completeness, transcription quality, server capacity
   or health of an off-site backup receiver.
