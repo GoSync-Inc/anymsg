@@ -128,7 +128,8 @@ ENV HOME=/tmp PUPPETEER_SKIP_DOWNLOAD=true
 USER probe
 CMD ["python", "-m", "messaging_service.whatsapp_collector", "--config", "/run/secrets/whatsapp_config"]
 
-# Operator-only image. Never receives Docker socket, SSH key or age private key.
+# Operator-only image; no Docker socket or SSH key. The producer receives no
+# recovery key; only the isolated restore helper gets an explicit read-only key.
 FROM ${POSTGRES_IMAGE} AS backup
 USER root
 RUN apt-get update && apt-get install -y --no-install-recommends ca-certificates \

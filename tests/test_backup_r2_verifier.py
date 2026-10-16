@@ -1,0 +1,338 @@
+"""Synthetic server verifier state transitions; no live cloud/daemon/key use."""
+import hashlib
+import io
+import json
+import os
+from pathlib import Path
+from types import SimpleNamespace
+
+import pytest
+
+from messaging_service import backup_r2_receiver as r2
+
+
+def module():
+    from messaging_service import backup_r2_verifier
+    return backup_r2_verifier
+
+
+def test_server_verifier_disk_preflight_counts_plaintext_database_and_reserve(tmp_path,monkeypatch):
+    v=module();calls=[]
+    monkeypatch.setattr(v.shutil,'disk_usage',lambda path:SimpleNamespace(free=100))
+    config={'directory':str(tmp_path),'max_plaintext_bytes':80,'postgres_headroom_bytes':20,'reserve_bytes':10}
+    with pytest.raises(ValueError,match='restore_disk_capacity'):
+        v.preflight_disk(config,{'wire':{'bytes':80}},tmp_path)
+
+
+def test_server_verifier_proof_requires_exact_helper_facts_and_cloud_identity():
+    v=module();receipt={'wire':{'id':'20261016T091703Z-fedcba9876543210','bytes':100,'sha256':'a'*64,'snapshot_sha256':'b'*64}}
+    facts={'v':1,'status':'verified','schema_version':34,'manifest_sha256':'b'*64,'checks':{k:True for k in r2.CHECKS}}
+    proof=v.make_proof(receipt,facts,'c'*32)
+    assert proof['backup']==receipt['wire'] and proof['verification']['checks']==facts['checks']
+    facts['checks']['collectors_quarantined']=False
+    with pytest.raises(ValueError,match='invalid_helper_result'):v.make_proof(receipt,facts,'c'*32)
+
+
+def test_server_verifier_cleanup_refuses_unowned_name_collision():
+    v=module()
+    class Engine:
+        def __init__(self):self.deleted=[]
+        def inspect_owned(self,kind,name,run):raise ValueError('unowned_restore_resource')
+        def remove(self,kind,name):self.deleted.append((kind,name))
+    engine=Engine()
+    with pytest.raises(ValueError,match='unowned_restore_resource'):v.cleanup_resources(engine,'a'*32)
+    assert not engine.deleted
+
+
+def test_server_verifier_config_rejects_nonroot_before_client_or_docker(monkeypatch):
+    v=module();monkeypatch.setattr(os,'geteuid',lambda:12345)
+    with pytest.raises(ValueError,match='root_verifier_required'):v.load_config('/never/read')
+
+
+def test_official_postgres_repo_digest_can_omit_configured_tag(monkeypatch):
+    v=module();image='sha256:'+'a'*64;revision='b'*40
+    engine=v.Docker()
+    def command(*args):
+        if args[0]=='info':return b'/var/lib/docker\n'
+        if args[-1]==image:return r2.encoded([{'Id':image,'Config':{'Labels':{'org.opencontainers.image.revision':revision,'org.opencontainers.image.source':'https://github.com/GoSync-Inc/deedkit'}}}])
+        return r2.encoded([{'RepoDigests':['postgres@sha256:'+v.POSTGRES_IMAGE.split('sha256:')[1]]}])
+    monkeypatch.setattr(engine,'command',command)
+    assert engine.preflight({'helper_image':image,'helper_revision':revision,'postgres_image':v.POSTGRES_IMAGE})=='/var/lib/docker'
+
+
+@pytest.fixture
+def operator(tmp_path,monkeypatch):
+    # Virtualize root ownership/trust only; retain real FDs, links, modes, flock,
+    # JSON hashing/fsync and conditional cloud operations. Native drill uses real UID.
+    from test_backup_r2 import Cloud,write_json,receive,BID
+    v=module();original_fstat=os.fstat;original_stat=Path.stat
+    ancestors={(original_stat(p).st_dev,original_stat(p).st_ino) for p in (tmp_path,*tmp_path.parents)}
+    def root_info(info):
+        values=list(info);values[4]=0
+        if (info.st_dev,info.st_ino) in ancestors:values[0]&=~0o022
+        return os.stat_result(values)
+    monkeypatch.setattr(os,'fstat',lambda fd:root_info(original_fstat(fd)))
+    monkeypatch.setattr(Path,'stat',lambda p,*a,**kw:root_info(original_stat(p,*a,**kw)))
+    monkeypatch.setattr(os,'geteuid',lambda:0)
+    state=tmp_path/'state';state.mkdir(mode=0o700)
+    control=tmp_path/'control';control.mkdir(mode=0o700)
+    work=tmp_path/'verifier';work.mkdir(mode=0o700)
+    cred=control/'credentials.json';write_json(cred,{'access_key_id':'a'*32,'secret_access_key':'b'*64})
+    receiver={'v':1,'endpoint':'https://'+'1'*32+'.r2.cloudflarestorage.com','bucket':'synthetic','prefix':'test',
+              'state_directory':str(state),'credentials_file':str(cred),'max_bytes':10*1024**2,'quota_bytes':20*1024**2,
+              'max_objects':2,'part_bytes':5*1024**2,'timeout_seconds':900}
+    receiver_path=control/'receiver.json';write_json(receiver_path,receiver)
+    identity=control/'identity';identity.write_text('SYNTHETIC_NOT_A_KEY');identity.chmod(0o600)
+    config={'v':1,'receiver_config_file':str(receiver_path),'directory':str(work),'identity_file':str(identity),
+            'protected_file':str(control/'protected.json'),'helper_image':'sha256:'+'a'*64,'helper_revision':'b'*40,
+            'postgres_image':v.POSTGRES_IMAGE,'max_plaintext_bytes':v.GIB,'postgres_headroom_bytes':2*v.GIB,
+            'reserve_bytes':v.GIB,'timeout_seconds':900}
+    cloud=Cloud();receive(receiver,cloud)
+    class Engine:
+        def __init__(self):self.runs=[];self.failure=None;self.resources={};self.deleted=[]
+        def preflight(self,config):return str(work)
+        def inspect_owned(self,kind,name,run):return self.resources.get((kind,name))
+        def remove(self,kind,name):self.deleted.append((kind,name));self.resources.pop((kind,name))
+        def restore(self,config,receiver,client,receipt,run,payload,secret_dir):
+            self.runs.append(run)
+            for kind,name in v.names(run).items():self.resources[(kind,name)]={'Labels':{v.LABEL:run}}
+            r2.verify_object(receiver,client,receipt,io.BytesIO())
+            if self.failure:raise self.failure
+            return {'v':1,'status':'verified','schema_version':34,'manifest_sha256':receipt['wire']['snapshot_sha256'],
+                    'checks':{k:True for k in r2.CHECKS}}
+    engine=Engine()
+    monkeypatch.setattr(v.shutil,'disk_usage',lambda path:SimpleNamespace(free=100*v.GIB))
+    return v,config,receiver,cloud,engine,write_json
+
+
+def test_server_run_protects_only_after_full_stream_restore_and_cleans_exact_resources(operator):
+    v,config,receiver,cloud,engine,_=operator
+    result=v.run(config,client=cloud,engine=engine)
+    assert result['status']=='verified' and len(result['verification_id'])==32
+    assert not engine.resources and len(engine.deleted)==4
+    assert Path(config['protected_file']).exists()
+    assert len(list(Path(config['directory']).glob('proof-*.json')))==1
+    assert not (Path(config['directory'])/'active.json').exists()
+    assert v.run(config,client=cloud,engine=engine)['status']=='idle'
+    assert len(engine.runs)==1
+
+
+def test_failed_restore_preserves_old_point_and_retries_exact_run(operator):
+    v,config,receiver,cloud,engine,_=operator
+    engine.failure=RuntimeError('restore_quarantine_failed')
+    with pytest.raises(RuntimeError,match='restore_quarantine_failed'):v.run(config,client=cloud,engine=engine)
+    active=json.loads((Path(config['directory'])/'active.json').read_text())
+    assert not Path(config['protected_file']).exists() and not list(Path(config['directory']).glob('proof-*'))
+    assert not engine.resources and not list(Path(config['directory']).glob('payload-*'))
+    engine.failure=None
+    result=v.run(config,client=cloud,engine=engine)
+    assert result['verification_id']==active['run'] and engine.runs==[active['run']]*2
+
+
+def test_failed_promotion_retries_identical_proof_without_second_restore(operator,monkeypatch):
+    v,config,receiver,cloud,engine,_=operator
+    original=r2.protect;calls=[]
+    def lost_response(*args,**kwargs):
+        calls.append(Path(args[2]).read_bytes());original(*args,**kwargs)
+        raise TimeoutError('lost promotion result')
+    monkeypatch.setattr(r2,'protect',lost_response)
+    with pytest.raises(TimeoutError):v.run(config,client=cloud,engine=engine)
+    proof=next(Path(config['directory']).glob('proof-*')).read_bytes()
+    monkeypatch.setattr(r2,'protect',original)
+    assert v.run(config,client=cloud,engine=engine)['status']=='verified'
+    assert len(engine.runs)==1 and calls==[proof]
+
+
+def test_deadline_handles_service_stop_with_cleanup_exception():
+    import subprocess,sys
+    code='from messaging_service.backup_r2_verifier import deadline; import signal\ntry:\n with deadline(30): signal.raise_signal(signal.SIGTERM)\nexcept InterruptedError: pass\nelse: raise RuntimeError(\"stop not observed\")'
+    result=subprocess.run([sys.executable,'-c',code],capture_output=True)
+    assert result.returncode==0
+
+
+def test_failure_status_distinguishes_capacity_timeout_and_quarantine(operator):
+    v,config,receiver,cloud,engine,_=operator
+    for error,code in [(ValueError('restore_disk_capacity'),'restore_disk_capacity'),
+                       (TimeoutError('synthetic'),'restore_deadline'),
+                       (RuntimeError('restore_quarantine_failed'),'restore_quarantine_failed')]:
+        engine.failure=error
+        with pytest.raises(type(error)):v.run(config,client=cloud,engine=engine)
+        assert json.loads((Path(config['directory'])/'status.json').read_text())['error']==code
+
+
+def test_two_generation_rotation_and_lost_delete_result_retry_only_exact_cloud_keys(operator):
+    from test_backup_r2 import receive,THIRD
+    v,config,receiver,cloud,engine,_=operator
+    v.run(config,client=cloud,engine=engine)
+    old_marker=Path(config['protected_file']).read_bytes()
+    receive(receiver,cloud,bid=THIRD)
+    cloud.fail['delete_response']=True
+    with pytest.raises(RuntimeError,match='storage_unavailable'):v.run(config,client=cloud,engine=engine)
+    root=Path(config['directory']);active=json.loads((root/'active.json').read_text());proof=(root/('proof-'+active['run']+'.json')).read_bytes()
+    assert Path(config['protected_file']).read_bytes()!=old_marker
+    assert v.run(config,client=cloud,engine=engine)['backup_id']==THIRD
+    assert len(engine.runs)==2 and (root/('proof-'+active['run']+'.json')).read_bytes()==proof
+    assert len([key for key in cloud.objects if '/objects/' in key])==1
+
+
+@pytest.mark.parametrize('failure',['mpu','orphan','unresolved','corrupt_body','unowned_resource'])
+def test_unresolved_or_corrupt_candidate_never_protects_or_removes_old_data(operator,failure):
+    v,config,receiver,cloud,engine,_=operator
+    before=dict(cloud.objects)
+    if failure=='mpu':cloud.uploads['unknown']={'key':receiver['prefix']+'/objects/unresolved'}
+    elif failure=='orphan':cloud.objects[receiver['prefix']+'/objects/orphan']=b'unknown'
+    elif failure=='unresolved':
+        path=next(Path(receiver['state_directory']).glob('*.attempt.json'));value=json.loads(path.read_text());value['phase']='uploading';path.write_text(json.dumps(value))
+    elif failure=='corrupt_body':
+        key=next(k for k in cloud.objects if '/objects/' in k);cloud.objects[key]=b'x'*len(cloud.objects[key])
+    else:
+        def collision(*args):raise ValueError('unowned_restore_resource')
+        engine.inspect_owned=collision
+    with pytest.raises((ValueError,RuntimeError)):v.run(config,client=cloud,engine=engine)
+    assert not Path(config['protected_file']).exists() and not list(Path(config['directory']).glob('proof-*'))
+    assert not any(call=='delete_object' for call in cloud.calls)
+    assert all(key in cloud.objects for key in before)
+
+
+@pytest.mark.parametrize('attack',['key_public','key_link','key_hardlink','work_public','config_duplicate','unknown_option','state_key','work_key','unpinned_image'])
+def test_root_config_rejects_unsafe_authority_paths_and_bounds(operator,attack):
+    v,config,receiver,cloud,engine,write_json=operator
+    path=Path(config['receiver_config_file']).parent/'verifier-config.json'
+    if attack=='key_public':Path(config['identity_file']).chmod(0o644)
+    elif attack=='key_link':
+        key=Path(config['identity_file']);key.rename(key.with_suffix('.real'));key.symlink_to(key.with_suffix('.real'))
+    elif attack=='key_hardlink':os.link(config['identity_file'],str(config['identity_file'])+'-link')
+    elif attack=='work_public':Path(config['directory']).chmod(0o755)
+    elif attack=='unknown_option':config['sender_maintenance']=True
+    elif attack=='state_key':config['identity_file']=str(Path(receiver['state_directory'])/'key')
+    elif attack=='work_key':config['identity_file']=str(Path(config['directory'])/'key')
+    elif attack=='unpinned_image':config['helper_image']='deedkit:latest'
+    write_json(path,config)
+    if attack=='config_duplicate':path.write_text(path.read_text().replace('"v":1','"v":1,"v":1'))
+    with pytest.raises((ValueError,OSError)):v.load_config(path)
+
+
+def test_valid_config_root_ancestry_and_key_are_accepted_without_network(operator):
+    v,config,receiver,cloud,engine,write_json=operator
+    path=Path(config['receiver_config_file']).parent/'verifier-config.json';write_json(path,config)
+    assert v.load_config(path)==config
+
+
+def test_restore_deadline_expires_then_cleans_owned_resources_with_fresh_budget(operator,monkeypatch):
+    v,config,receiver,cloud,engine,_=operator
+    config['timeout_seconds']=0.01
+    def timeout(*args):
+        import time
+        engine.resources={('helper',v.names(args[4])['helper']):{'owned':True}}
+        time.sleep(0.1)
+    engine.restore=timeout
+    with pytest.raises(TimeoutError):v.run(config,client=cloud,engine=engine)
+    assert not engine.resources and not Path(config['protected_file']).exists()
+    assert json.loads((Path(config['directory'])/'status.json').read_text())['error']=='restore_deadline'
+
+
+def test_postgres_readiness_waits_for_final_tcp_listener_not_temporary_init_server(tmp_path,monkeypatch):
+    v=module();engine=v.Docker();calls=[]
+    monkeypatch.setattr(engine,'command',lambda *args:calls.append(args) or b'')
+    engine.setup({'postgres_image':v.POSTGRES_IMAGE,'helper_image':'sha256:'+'a'*64,'identity_file':'/private/key'},'a'*32,tmp_path,tmp_path)
+    ready=next(call for call in calls if 'pg_isready' in call)
+    assert '-h' in ready and '127.0.0.1' in ready
+    helper=next(call for call in calls if 'messaging_service.backup_restore_worker' in call)
+    assert '--read-only' in helper and '--cap-drop=ALL' in helper and '--security-opt=no-new-privileges' in helper
+    assert '--publish' not in helper and '-p' not in helper
+    assert all('docker.sock' not in arg for arg in helper)
+
+
+def test_docker_failed_helper_reads_bounded_safe_failure_fact(tmp_path,monkeypatch):
+    v=module();engine=v.Docker()
+    monkeypatch.setattr(engine,'setup',lambda *args:None)
+    monkeypatch.setattr(engine,'inspect_owned',lambda *args:{})
+    monkeypatch.setattr(v,'validate_helper_layout',lambda *args:None)
+    class Process:
+        stdin=io.BytesIO()
+        def wait(self,timeout):return 1
+        def poll(self):return 1
+    monkeypatch.setattr(v.subprocess,'Popen',lambda *a,**kw:Process())
+    monkeypatch.setattr(r2,'verify_object',lambda *a:None)
+    monkeypatch.setattr(v,'private_file',lambda *a:r2.encoded({'v':1,'status':'failed','error':'restore_quarantine_failed'}))
+    with pytest.raises(RuntimeError,match='restore_quarantine_failed'):
+        engine.restore({}, {},None,{},'a'*32,tmp_path,tmp_path)
+
+
+def test_reserve_monitor_rejects_growth_during_restore(tmp_path,monkeypatch):
+    v=module();engine=v.Docker();engine.disk_roots=[tmp_path];engine.reserve_bytes=100
+    monkeypatch.setattr(v.shutil,'disk_usage',lambda path:SimpleNamespace(free=99))
+    with pytest.raises(ValueError,match='restore_disk_capacity'):engine.check_reserve()
+
+
+def test_pending_retry_cannot_change_protected_marker_path(operator):
+    v,config,receiver,cloud,engine,_=operator
+    engine.failure=RuntimeError('restore_quarantine_failed')
+    with pytest.raises(RuntimeError):v.run(config,client=cloud,engine=engine)
+    config['protected_file']=str(Path(config['protected_file']).with_name('different-protected.json'))
+    engine.failure=None
+    with pytest.raises(ValueError,match='verifier_control_changed_during_retry'):v.run(config,client=cloud,engine=engine)
+    assert len(engine.runs)==1
+
+
+def test_helper_explicit_tmpfs_overrides_inherited_pg_image_volume(tmp_path,monkeypatch):
+    v=module();engine=v.Docker();calls=[]
+    monkeypatch.setattr(engine,'command',lambda *args:calls.append(args) or b'')
+    engine.setup({'postgres_image':v.POSTGRES_IMAGE,'helper_image':'sha256:'+'a'*64,'identity_file':'/private/key'},'a'*32,tmp_path,tmp_path)
+    helper=next(call for call in calls if 'messaging_service.backup_restore_worker' in call)
+    tmpfs=[helper[i+1] for i,value in enumerate(helper[:-1]) if value=='--tmpfs']
+    assert '/var/lib/postgresql:ro,noexec,nosuid,nodev,size=1m,mode=0700' in tmpfs
+
+
+def test_unexpected_image_volume_is_rejected_before_any_resource_creation(monkeypatch):
+    v=module();engine=v.Docker();image='sha256:'+'a'*64;revision='b'*40
+    helper={'Id':image,'Config':{'Labels':{'org.opencontainers.image.revision':revision,
+             'org.opencontainers.image.source':'https://github.com/GoSync-Inc/deedkit'},'Volumes':{'/var/lib/postgresql':{},'/unexpected':{}}}}
+    monkeypatch.setattr(engine,'inspect_image',lambda value:helper if value==image else {'RepoDigests':['postgres@'+v.POSTGRES_IMAGE.split('@')[1]]})
+    monkeypatch.setattr(engine,'command',lambda *args:b'/var/lib/docker\n')
+    with pytest.raises(ValueError,match='unexpected_restore_image_volume'):
+        engine.preflight({'helper_image':image,'helper_revision':revision,'postgres_image':v.POSTGRES_IMAGE})
+
+
+def test_exact_owned_container_cleanup_removes_anonymous_not_named_volumes(monkeypatch):
+    v=module();engine=v.Docker();calls=[]
+    monkeypatch.setattr(engine,'command',lambda *args:calls.append(args) or b'')
+    engine.remove('helper','owned-helper')
+    engine.remove('volume','owned-pg-data')
+    assert ('container','rm','--volumes','owned-helper') in calls
+    assert calls[-1]==('volume','rm','owned-pg-data')
+
+
+def test_runtime_helper_layout_rejects_anonymous_volume_before_input(tmp_path):
+    v=module();run='a'*32
+    config={'identity_file':'/root/private-identity'}
+    with pytest.raises(ValueError,match='unexpected_restore_helper_layout'):
+        v.validate_helper_layout(config,run,tmp_path,tmp_path,{'Mounts':[{'Type':'volume','Destination':'/var/lib/postgresql','Name':'untracked-anonymous'}]})
+
+
+def helper_layout(v,config,run,payload,secret_dir):
+    return {'Mounts':[{'Type':'bind','Source':str(payload),'Destination':'/work','RW':True},
+                     {'Type':'bind','Source':config['identity_file'],'Destination':'/run/restore/identity','RW':False},
+                     {'Type':'bind','Source':str(secret_dir/'worker.json'),'Destination':'/run/restore/config.json','RW':False}],
+            'HostConfig':{'Tmpfs':dict(v.HELPER_TMPFS),'ReadonlyRootfs':True,'PortBindings':{},
+                          'Privileged':False,'NetworkMode':v.names(run)['network']}}
+
+
+def test_runtime_helper_layout_accepts_only_explicit_binds_and_bounded_tmpfs(tmp_path):
+    v=module();run='a'*32;config={'identity_file':'/root/key'}
+    v.validate_helper_layout(config,run,tmp_path,tmp_path,helper_layout(v,config,run,tmp_path,tmp_path))
+
+
+@pytest.mark.parametrize('attack',['unknown_mount','writable_key','wrong_source','rw_root','external_network','host_ports','unbounded_tmpfs'])
+def test_runtime_layout_changes_block_helper_before_ciphertext_input(tmp_path,attack):
+    v=module();run='a'*32;config={'identity_file':'/root/key'}
+    value=helper_layout(v,config,run,tmp_path,tmp_path)
+    if attack=='unknown_mount':value['Mounts'].append({'Type':'volume','Destination':'/unexpected','Name':'orphan'})
+    elif attack=='writable_key':value['Mounts'][1]['RW']=True
+    elif attack=='wrong_source':value['Mounts'][0]['Source']='/shared-production'
+    elif attack=='rw_root':value['HostConfig']['ReadonlyRootfs']=False
+    elif attack=='external_network':value['HostConfig']['NetworkMode']='bridge'
+    elif attack=='host_ports':value['HostConfig']['PortBindings']={'5432/tcp':[{'HostPort':'5432'}]}
+    elif attack=='unbounded_tmpfs':value['HostConfig']['Tmpfs'][v.PG_DATA_PATH]='rw'
+    with pytest.raises(ValueError,match='unexpected_restore_helper_layout'):
+        v.validate_helper_layout(config,run,tmp_path,tmp_path,value)
