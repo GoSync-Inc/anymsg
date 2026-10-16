@@ -83,6 +83,22 @@ main reports `BLOCKED` for those coverage gaps. Status is not a release-scope
 filter. Preserve that result and inspect its per-spec causes; do not fabricate
 coverage or weaken CI to make a planning inventory pass a release gate.
 
+Create new future-only specs on independent proposal branches. The existing
+merged backlog needs a verified identity/history-preserving relocation; COW
+updates or deleting/recreating cards do not establish that preservation. Keep
+real defects and required operational acceptance visible in the current scope.
+
+Readiness also requires a captured candidate release gate and an explicit review
+of unresolved production issues, including unattributed ones. The native main
+gate's production-issue signal is not a replacement for release-scope triage.
+Missing release evidence is unknown. Report the native verdict separately from
+the project's readiness decision. See the workflow's readiness section.
+
+Messaging telemetry currently emits `anymsg@0.9.19` from its package version.
+DeedKit is the platform name; this string does not identify an exact deployed
+commit. Preserve historical release/test identities and require an explicit
+SHA/environment/build association before claiming a release is verified.
+
 Review spec and test-link changes in the matching Tiden branch before merging
 them to main. A Git merge does not by itself merge the spec branch. After both
 merges, verify the actual main gate and its evidence, rather than using a feature
