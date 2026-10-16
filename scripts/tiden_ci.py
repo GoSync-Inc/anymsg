@@ -24,6 +24,7 @@ MODULE_REPORTS = {
     "calendar": ("calendar.xml", "python", "services/calendar"),
     "calls": ("calls.xml", "python", "services/calls"),
     "calls_frontend": ("calls-frontend.xml", "node", "services/calls/frontend"),
+    "backup_restore": ("backup-restore.xml", "python", ""),
 }
 MAX_BYTES = 20 * 1024 * 1024
 # Tiden branch names: lowercase letters, digits, slashes, underscores and hyphens.

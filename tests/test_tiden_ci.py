@@ -121,9 +121,9 @@ def test_publisher_refuses_partial_results_even_when_tiden_returns_passed(tmp_pa
 
 
 def test_publisher_counts_additive_module_checks_without_changing_legacy_checks(tmp_path, monkeypatch):
-    _, manifest = cli_fixture(monkeypatch, tmp_path, attempts="12")
-    manifest["module_checks"] = {name: "success" for name in ("gateway", "calendar", "calls", "calls_frontend", "load")}
-    manifest["check_counts"] = {"passed": 12}
+    _, manifest = cli_fixture(monkeypatch, tmp_path, attempts="13")
+    manifest["module_checks"] = {name: "success" for name in ("gateway", "calendar", "calls", "calls_frontend", "load", "backup_restore")}
+    manifest["check_counts"] = {"passed": 13}
     assert publish(tmp_path, manifest, "intent/feature", "product")["status"] == "passed"
 
 

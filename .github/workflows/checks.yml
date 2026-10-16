@@ -161,7 +161,24 @@ jobs:
           p.write_text('postgresql://probe_owner:synthetic-ci-password@127.0.0.1:5432/messaging_probe_test')
           p.chmod(0o600)
           PY
-          uv run pytest --tb=short -o junit_family=xunit1 --junitxml="$RUNNER_TEMP/ci-evidence/python.xml" tests
+          uv run pytest --tb=short -o junit_family=xunit1 --junitxml="$RUNNER_TEMP/ci-evidence/python.xml" --ignore=tests/test_backup_r2_verifier_native.py tests
+      - name: Isolated server backup restore with real age and PostgreSQL
+        id: backup_restore
+        if: ${{ !cancelled() && steps.build.outcome == 'success' }}
+        run: |
+          python3 scripts/production.py check-image --target backup > "$RUNNER_TEMP/backup-image.json"
+          restore_image="$(python3 -c 'import json,sys; print(json.load(open(sys.argv[1]))["image"])' "$RUNNER_TEMP/backup-image.json")"
+          restore_revision="$(git rev-parse HEAD)"
+          set +e
+          sudo env DEEDKIT_TEST_BACKUP_IMAGE="$restore_image" DEEDKIT_TEST_BACKUP_REVISION="$restore_revision" \
+            "$PWD/.venv/bin/python" -m pytest --tb=short -o junit_family=xunit1 \
+            --junitxml="$RUNNER_TEMP/ci-evidence/backup-restore.xml" tests/test_backup_r2_verifier_native.py
+          restore_test_exit=$?
+          set -e
+          if test -f "$RUNNER_TEMP/ci-evidence/backup-restore.xml"; then
+            sudo chown "$(id -u):$(id -g)" "$RUNNER_TEMP/ci-evidence/backup-restore.xml"
+          fi
+          exit "$restore_test_exit"
       - name: Node collector tests
         id: collector
         if: ${{ !cancelled() && steps.build.outcome == 'success' }}
@@ -201,7 +218,7 @@ jobs:
           CHECK_OUTCOMES: >-
             {"build":"${{ steps.build.outcome }}","release":"${{ steps.release.outcome }}","python":"${{ steps.python.outcome }}","collector":"${{ steps.collector.outcome }}","npm":"${{ steps.npm.outcome }}","smoke":"${{ steps.smoke.outcome }}","distributions":"${{ steps.distributions.outcome }}"}
           MODULE_OUTCOMES: >-
-            {"gateway":"${{ steps.gateway.outcome }}","calendar":"${{ steps.calendar.outcome }}","calls":"${{ steps.calls.outcome }}","calls_frontend":"${{ steps.calls_frontend.outcome }}","load":"${{ steps.load.outcome }}"}
+            {"gateway":"${{ steps.gateway.outcome }}","calendar":"${{ steps.calendar.outcome }}","calls":"${{ steps.calls.outcome }}","calls_frontend":"${{ steps.calls_frontend.outcome }}","load":"${{ steps.load.outcome }}","backup_restore":"${{ steps.backup_restore.outcome }}"}
           SOURCE_BRANCH: ${{ github.head_ref || github.ref_name }}
           TIDEN_BRANCH_OVERRIDE: ${{ inputs.tiden_branch }}
         run: |
