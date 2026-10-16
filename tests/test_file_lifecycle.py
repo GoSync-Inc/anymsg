@@ -641,6 +641,12 @@ def test_unprocessed_policy_preserves_current_use_pins_fences_and_shared_recent_
             c.execute(sql.SQL("UPDATE {} SET state='leased',lease_until=clock_timestamp()+interval '1 hour' WHERE attachment=%s").format(sql.Identifier(table)),(fid,))
     result=api.LifecycleWorker(s,expire_unprocessed=True).run_once(apply=True)
     assert result['evicted']==0
+    if blocker in ('pin','recent_access'):
+        assert result['candidates']==0 and result['reasons']=={}
+    else:
+        reason=('backup_active' if blocker=='backup' else
+            'recent_source' if blocker in ('recent_source','shared_recent_source') else 'inflight')
+        assert result['reasons']=={reason:1}
     assert (s.files/blob.digest).exists()
     with s.pool.connection() as c:assert not api.is_managed_evicted(c,blob.digest,blob.bytes)
 
@@ -724,6 +730,7 @@ def test_unprocessed_expiry_defers_original_processing_without_spending_retries_
         c.execute('TRUNCATE enrichment_budget')
         text_before=dict(c.execute('SELECT * FROM attachment_text WHERE attachment=%s',(fid,)).fetchone())
         enrichment_before=dict(c.execute('SELECT * FROM attachment_enrichment WHERE attachment=%s',(fid,)).fetchone())
+        budget_before=c.execute('SELECT coalesce(sum(attempts),0) AS used FROM processing_budget').fetchone()['used']
     assert api.LifecycleWorker(s,expire_unprocessed=True).run_once(apply=True)['evicted']==1
     if stage=='extraction':
         worker=FileIndexer(s.pool.conninfo,s.files)
@@ -735,6 +742,8 @@ def test_unprocessed_expiry_defers_original_processing_without_spending_retries_
     with s.pool.connection() as c:
         assert dict(c.execute('SELECT * FROM attachment_text WHERE attachment=%s',(fid,)).fetchone())==text_before
         assert dict(c.execute('SELECT * FROM attachment_enrichment WHERE attachment=%s',(fid,)).fetchone())==enrichment_before
+        assert c.execute('SELECT coalesce(sum(attempts),0) AS used FROM enrichment_budget').fetchone()['used']==0
+        assert c.execute('SELECT coalesce(sum(attempts),0) AS used FROM processing_budget').fetchone()['used']==budget_before
     assert s.request_file_download(key,fid)['request_status']=='queued'
     media=ar.claim_media('synthetic-processing-recovery');writer=BlobWriter(s.files,reserve_bytes=0)
     ar.finish_media(media,writer.write([b'Synthetic retained contract']),writer)

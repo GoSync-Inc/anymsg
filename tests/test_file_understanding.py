@@ -605,9 +605,17 @@ def test_revision_cancels_summary_lease_without_refunding_attempt_or_daily_budge
 @pytest.mark.parametrize('limit,attempt',[(2,2),(5,3)])
 def test_cancelled_extraction_obeys_its_configured_attempt_limit(archive,limit,attempt):
     from uuid import uuid4
+    from messaging_service.blobs import BlobWriter
+    from messaging_service.file_lifecycle import register_resident_original
     from messaging_service.file_index import FileIndexer
     from messaging_service.file_extract import Extraction
-    ar,s,_,_=archive;original,fid,_,_,_=retained_original(archive,'document')
+    ar,s,_,_=archive;original,fid,blob,_,_=retained_original(archive,'document')
+    # Extraction requires resident bytes; managed absence deliberately pauses it.
+    # Re-publish this exact synthetic original before exercising cancellation.
+    recovered=BlobWriter(s.files,reserve_bytes=0).write([b'Synthetic caption-independent document'])
+    assert recovered.digest==blob.digest and recovered.bytes==blob.bytes
+    with s.pool.connection() as c:
+        assert register_resident_original(c,recovered.digest,recovered.bytes)
     token=uuid4()
     with s.pool.connection() as c:
         c.execute("UPDATE attachment_text SET state='unsupported' WHERE attachment<>%s",(fid,))
