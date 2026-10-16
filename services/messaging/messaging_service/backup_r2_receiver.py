@@ -369,9 +369,18 @@ def reconcile(config, client, attempt, state_fd):
     if attempt['phase'] in {'creating', 'uploading'}:
         if attempt['phase'] == 'creating':
             raise RuntimeError('creation_outcome_unknown')
-        # Complete was never attempted: only this exact known own MPU may be
-        # aborted. A failed abort retains evidence and blocks another capture.
-        cloud_call(client.abort_multipart_upload, Bucket=config['bucket'], Key=attempt['key'], UploadId=attempt['upload_id'])
+        # Durable `uploading` proves Complete was never attempted. Only this
+        # exact known own MPU may be aborted. Its successful abort response can
+        # be lost; an authoritative NoSuchUpload on retry (also after lifecycle
+        # cleanup) confirms that this pre-completion resource is gone. Generic
+        # 404s, auth/transport errors and every completing-state uncertainty keep
+        # their evidence and cannot authorize a fresh physical attempt.
+        try:
+            client.abort_multipart_upload(Bucket=config['bucket'], Key=attempt['key'], UploadId=attempt['upload_id'])
+        except Exception as exc:
+            response = getattr(exc, 'response', {})
+            if code(exc) != 'NoSuchUpload' or response.get('ResponseMetadata', {}).get('HTTPStatusCode') != 404:
+                raise RuntimeError('storage_unavailable') from None
         os.unlink(attempt_name(bid), dir_fd=state_fd); local.fsync_dir(state_fd)
         raise RuntimeError('incomplete_upload_aborted_retry')
     try:

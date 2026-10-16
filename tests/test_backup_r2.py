@@ -39,7 +39,7 @@ def config(tmp_path,monkeypatch):
 
 class CloudError(Exception):
     def __init__(self,code):
-        self.response={'Error':{'Code':str(code)},'ResponseMetadata':{'HTTPStatusCode':int(code) if str(code).isdigit() else 500}}
+        self.response={'Error':{'Code':str(code)},'ResponseMetadata':{'HTTPStatusCode':int(code) if str(code).isdigit() else (404 if code=='NoSuchUpload' else 500)}}
         super().__init__('cloud diagnostic must never reach wire')
 
 class Cloud:
@@ -81,7 +81,11 @@ class Cloud:
         if self.fail.pop('complete_response',False):raise TimeoutError('lost complete reply')
         return {'ETag':'multipart-not-sha256'}
     def abort_multipart_upload(self,**kw):
-        self.hit('abort_multipart_upload');self.uploads.pop(kw['UploadId'],None);return {}
+        self.hit('abort_multipart_upload')
+        if kw['UploadId'] not in self.uploads:raise CloudError('NoSuchUpload')
+        self.uploads.pop(kw['UploadId'])
+        if self.fail.pop('abort_response',False):raise TimeoutError('lost abort reply')
+        return {}
     def put_object(self,**kw):
         self.hit('put_object');assert kw['IfNoneMatch']=='*'
         if kw['Key'] in self.objects:raise CloudError(412)
@@ -478,3 +482,39 @@ def test_object_inventory_paginates_without_ignoring_previous_pages(config):
     cloud.list_objects_v2=pages
     with pytest.raises(RuntimeError,match='receiver_quota'):receive(config,cloud)
     assert calls==[None,'next']
+
+
+def test_lost_abort_response_reconciles_authoritative_no_such_upload_before_retry(config):
+    cloud=Cloud();cloud.fail['abort_response']=True
+    with pytest.raises(RuntimeError,match='storage_unavailable'):
+        receive(config,cloud,tail=b'invalid')
+    journal=Path(config['state_directory'])/r2.attempt_name(BID)
+    assert json.loads(journal.read_bytes())['phase']=='uploading'
+    assert not cloud.uploads and not cloud.objects
+    with pytest.raises(RuntimeError,match='incomplete_upload_aborted_retry'):
+        receive(config,cloud)
+    assert not journal.exists()
+    assert cloud.calls.count('create_multipart_upload')==1
+    assert receive(config,cloud)['status']=='stored'
+    assert len([k for k in cloud.objects if '/objects/' in k])==1
+
+
+@pytest.mark.parametrize('error',[CloudError(403),CloudError(404),CloudError('NoSuchBucket'),TimeoutError('lost retry')])
+def test_abort_retry_preserves_precompletion_evidence_for_other_errors(config,error):
+    cloud=Cloud();cloud.fail['abort_response']=True
+    with pytest.raises(RuntimeError):receive(config,cloud,tail=b'invalid')
+    journal=Path(config['state_directory'])/r2.attempt_name(BID);before=journal.read_bytes()
+    cloud.fail['abort_multipart_upload']=error
+    with pytest.raises(RuntimeError,match='storage_unavailable'):receive(config,cloud)
+    assert journal.read_bytes()==before
+    assert cloud.calls.count('create_multipart_upload')==1 and not cloud.objects
+
+
+def test_no_such_upload_cannot_clear_uncertain_completion_evidence(config):
+    cloud=Cloud();cloud.fail['complete_multipart_upload']=TimeoutError('completion may arrive later')
+    with pytest.raises(RuntimeError):receive(config,cloud)
+    journal=Path(config['state_directory'])/r2.attempt_name(BID);before=journal.read_bytes()
+    cloud.fail['head_object']=CloudError('NoSuchUpload')
+    with pytest.raises(RuntimeError,match='storage_unavailable'):receive(config,cloud)
+    assert journal.read_bytes()==before
+    assert cloud.calls.count('create_multipart_upload')==1 and 'abort_multipart_upload' not in cloud.calls
