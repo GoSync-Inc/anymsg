@@ -30,19 +30,22 @@ One story maps to one Git branch, one pull request and one intent session. Split
 larger work into stories that merge independently. A pull request should merge
 within about a day; the older a branch, the more it conflicts.
 
-**Claim.** A worker opens a draft pull request with its first push. Its description
-names the lane and review level (`Lane: <lane>`, `Review level: <level> — <reason>`)
-and carries the `Tiden intent branch:` line or `Tiden: skip — <reason>`. The draft
-pull request is the claim. Before dispatching, the orchestrator lists open pull
-requests and open intent branches; an item with a claim is taken. A claim without
-activity for two days is released by the orchestrator after asking the owner.
+**Claim.** A worker opens a draft pull request with its first push; a branch push
+alone runs no CI, the pull request run verifies it. Its description names the
+story (or the goal for a skip), the lane and the review level (`Lane: <lane>`,
+`Review level: <level> — <reason>`) and carries the `Tiden intent branch:` line or
+`Tiden: skip — <reason>`. The draft pull request is the claim. Before dispatching,
+the orchestrator lists open pull requests and open intent branches; an item with a
+claim is taken. A claim without activity for two days is released by the
+orchestrator after asking the owner.
 
 ## Lanes
 
-Two concurrent sessions must not share a lane. The lane is recorded in the story
-and in the pull request description. The orchestrator compares the planned paths
-with the changed paths of open pull requests (`gh pr diff <n> --name-only`) before
-dispatch.
+A lane never has more concurrent pull requests than its limit in the table; where
+two are allowed, their files must not overlap. The lane is recorded in the story
+and in the pull request description. Before dispatch the orchestrator compares the
+planned paths with the expected paths in active workers' briefs and with the
+changed paths of open pull requests (`gh pr diff <n> --name-only`).
 
 | Lane | Paths | Concurrent PRs |
 | --- | --- | --- |
@@ -76,11 +79,13 @@ at least important (`AGENTS.md`). Prefer splitting it.
   lands.
 - Until then a pull request must be up to date with `main` to merge. Update a
   branch only when that blocks its merge, to resolve a real conflict or when a
-  review asks for it, never just to stay current. With the queue, each pull
-  request is tested against the latest `main` plus the pull requests ahead of it,
-  and a branch is updated only for a conflict or a review. After merging `main`
-  into a branch, close the intent session on its own commit range
-  ([Claude Code guide](claude-code-tiden.md)).
+  review asks for it, never just to stay current. A worker brings its branch up to
+  date before "ready to merge", waits for CI and then closes the intent session on
+  its own commit range ([Claude Code guide](claude-code-tiden.md)). If `main`
+  moves again after the "ok", the branch is updated and merged once CI is green;
+  a conflict goes back to the orchestrator. With the queue, each pull request is
+  tested against the latest `main` plus the pull requests ahead of it, and a
+  branch is updated only for a conflict or a review.
 - Merge method: **squash**. One story becomes one commit on `main`.
 - Who merges follows the review level in `AGENTS.md`; a worker also waits for the
   orchestrator's "ok" (Worker protocol). Enqueueing a pull request is merging it.
@@ -104,13 +109,16 @@ at least important (`AGENTS.md`). Prefer splitting it.
 
 - Merging and deploying are independent. A merge never implies a deploy, and a
   pending deploy never blocks merges.
-- The release owner promotes an exact `main` SHA by [production.md](production.md)
-  once the readiness decision in the Tiden workflow is recorded for that SHA, with
-  live-session authority where the changed service requires it.
-- One release is in flight at a time; the host deployment lock enforces it.
-- A new `main` push run cancels the one still running (`ci.yml` concurrency), so a
-  SHA merged shortly before another has no successful run and cannot be promoted.
-  Promote the latest SHA whose run succeeded.
+- The release owner promotes the exact current `main` SHA by
+  [production.md](production.md), after that SHA's own push run succeeds; never
+  an earlier SHA. The readiness decision in the Tiden workflow is recorded for
+  that SHA first, and live-session authority exists where the changed service
+  requires it.
+- A new `main` push cancels the push run still in progress (`ci.yml`
+  concurrency), so a SHA merged shortly before another gets no `main` result.
+  When merges come quickly, wait for the latest SHA's run.
+- The release owner keeps one release in flight, from prepare to acceptance. The
+  host deployment lock only stops two deployment commands from running at once.
 - Release at least weekly while changes are merged, so production does not drift
   far from `main`. Each release keeps production.md's receipts and the readiness
   decision for its SHA.
@@ -127,26 +135,38 @@ at least important (`AGENTS.md`). Prefer splitting it.
    its level requires.
 5. Answer workers' questions and check each pull request before its "ok" (Worker
    protocol).
-6. After merge: read back Tiden main and drift, update the story, free the lane.
+6. After merge: confirm the worker's post-merge check, update the story, free the
+   lane.
 7. Escalate to the owner: priority conflicts, owner-level pull requests, every
    escalation condition under Review levels in `AGENTS.md`, any story that is not
    ready.
+
+The orchestrator starts no new worker when its context is above about 60%, at the
+end of the working day or when the current wave of tasks is done. Running workers
+still reach their final result: merge, post-merge check, archive. The orchestrator
+keeps all its state in a handoff file and updates it after every decision, so a
+compaction or a new session loses nothing. A new orchestrator session first reads
+the handoff file and the list of live sessions.
 
 ## Worker protocol
 
 The orchestrator starts each worker in its own Superset workspace, with its own
 worktree and branch, and keeps a table: task, dependencies, workspace, branch,
-status, result. It picks the worker's model and effort by the kind of work:
+status, result. Model and effort follow the kind of work; the orchestrator picks
+them for each worker:
 
-| Work | Model | Effort |
-| --- | --- | --- |
-| Code, CI, security | Opus | xhigh |
-| Tiden specs and backlog | Opus | high |
-| Documents and settings | Sonnet | high |
-| Orchestrator | Opus | high |
+| Work | Model and effort |
+| --- | --- |
+| Orchestrator | Opus, high |
+| Code and CI | Opus, high; xhigh only for an autonomous task longer than about 30 minutes |
+| Security, unclear root cause | Opus, xhigh, or Fable, high |
+| Tiden specs and backlog | Opus, medium |
+| Documents and settings | Sonnet, medium |
+| Code exploration | Haiku or Sonnet, low |
 
-Reviewers follow Review levels in `AGENTS.md` (Astra and Fable) whatever the
-worker's model.
+Reviewers follow Review levels in `AGENTS.md` whatever the worker's model. For the
+first week the orchestrator measures usage-limit spend by role, review findings
+per pull request and the share of pull requests with green CI from the first push.
 
 The worker writes and waits for the answer:
 
@@ -155,9 +175,9 @@ The worker writes and waits for the answer:
 - before going out of scope: another task's file, an owner-level action, or a fork
   without an obvious answer;
 - before merging: "ready to merge" with the pull request, CI, review results and
-  the Tiden verdict. The orchestrator checks CI, the diff and the Tiden merge
-  preview itself and only then answers "ok"; it hands an owner-level pull request
-  to the owner.
+  the Tiden verdict or recorded skip. The orchestrator checks CI, the diff and the
+  Tiden merge preview (the recorded skip when there is no Tiden branch) itself and
+  only then answers "ok"; it hands an owner-level pull request to the owner.
 
 The worker writes without waiting: at the start, when it opens the pull request,
 and its final result. The result ends with a `SUPERSET_WORKER_DONE` or
@@ -167,11 +187,20 @@ DONE adds `handoff`, BLOCKED adds `reason` and `needs`.
 The final result depends on the level:
 
 - micro: merged after green CI;
-- normal and important: the pull request and its Tiden branch merged and checked
-  after the merge, the intent session closed with PASS or a recorded skip;
+- normal and important: the pull request and its Tiden branch, if any, merged and
+  checked after the merge, the intent session closed with PASS or a recorded skip;
 - owner: the pull request ready (not draft, green CI, reviews with no open
   findings, Tiden closed or skipped) and a summary for the owner in its
-  description. After the owner merges it, the worker finishes the Tiden steps.
+  description.
+
+The owner decides an owner-level pull request and its Tiden branch together: an
+explicit "merge <n>" covers both, and the orchestrator may carry it out. Without
+that explicit word neither the worker nor the orchestrator merges them. After the
+merge the worker checks it and reports.
+
+Checked after the merge means a successful `main` push run on the squash commit
+or a later one and, for a change with a Tiden branch, Tiden main and drift read
+back as in [tiden-product-workflow.md](tiden-product-workflow.md).
 
 After its final result the worker stays open until its pull request is merged and
 checked after the merge. The orchestrator then closes its terminal and archives
@@ -179,8 +208,8 @@ the workspace without asking again, after checking that the worktree has no
 uncommitted changes: archiving deletes the folder, the branch stays.
 
 Claude Code workers and the orchestrator talk through messages between sessions.
-A Codex worker asks in its terminal, which the orchestrator reads. The
-orchestrator checks a silent worker when it gets the idle notice; there are no
+A Codex worker asks in its terminal, which the orchestrator reads and answers in.
+The orchestrator checks a silent worker when it gets the idle notice; there are no
 timed reports.
 
 ## Sessions
