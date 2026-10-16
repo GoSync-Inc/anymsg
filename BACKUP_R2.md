@@ -116,6 +116,13 @@ directories, root control and proof paths root-owned without group/other write
 access. Control and proof paths must be outside upload state. Shared temporary
 directories are unsuitable. Do not weaken these checks to fit a deployment.
 
+Before root maintenance, let the first receive initialize `.receiver.lock` in
+the shared upload-state directory, or provision that regular single-link file
+as the upload user with mode `0600`. Root maintenance refuses a missing lock in
+upload-owned state (`uploader_lock_initialization_required`) and never creates
+a root-owned lock that would prevent later uploads. Preserve the existing lock;
+replacing it while a process holds it would break shared exclusion.
+
 The example uses 40 GiB/object, 80 GiB/total, two objects and 64 MiB parts. These
 are explicit example limits, not measured deployment settings. Size the receiver
 deadline, producer `timeout_seconds` and scheduler deadline together from
