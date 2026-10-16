@@ -56,6 +56,14 @@ CI runs on `push` only for `main`. A feature branch is verified by its pull
 request run, so a push does not repeat CI or publish a second copy of the
 evidence to a same-named Tiden branch.
 
+A merge queue run (`merge_group`, Git branch `gh-readonly-queue/...`) verifies
+the temporary group commit with the same required checks, `CI gate` and
+`checks / verify`, but publishes nothing to Tiden and creates no Tiden branch,
+whatever an override, map entry or pull request link names. Before any Tiden call
+the reporting job records `skipped` with the reason in `tiden-route.json`, logs a
+notice and stays green; the merged code reaches Tiden through the main push run.
+Each queue run has its own concurrency group and cancels no other run.
+
 For an explicit baseline rerun, dispatch `CI` on the reporting-code branch with
 `source_ref` set to the exact source revision and `tiden_branch` to the matching
 existing spec branch. The checkout SHA, rather than the workflow SHA, is recorded.

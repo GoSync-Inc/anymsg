@@ -473,3 +473,71 @@ def test_pull_request_branch_map_entry_still_publishes(tmp_path, monkeypatch):
     creation = next(call for call in calls if call[1:3] == ["run", "create"])
     assert creation[creation.index("--branch") + 1] == "intent/mapped"
     assert json.loads((tmp_path / "tiden-route.json").read_text())["source"] == "explicit"
+
+
+QUEUE_BRANCH = "gh-readonly-queue/main/pr-51-" + "b" * 40
+
+
+@pytest.mark.parametrize("change, branch, routed", [
+    ({"event": "merge_group", "git_branch": QUEUE_BRANCH}, QUEUE_BRANCH, True),
+    ({"event": "workflow_dispatch", "git_branch": QUEUE_BRANCH}, QUEUE_BRANCH, True),
+    ({"event": "merge_group", "git_branch": QUEUE_BRANCH, "tiden_branch": "intent/explicit",
+      "pr_tiden_links": intent_links(intent_line())}, "intent/explicit", False),
+], ids=["merge-group", "queue-branch", "explicit-target-and-link"])
+def test_merge_queue_run_publishes_nothing_to_tiden(tmp_path, monkeypatch, capsys, change, branch, routed):
+    calls, manifest = routed_cli(monkeypatch, tmp_path, existing=(INTENT, {"id": "explicit-id", "name": "intent/explicit",
+                                                                           "status": "open"}))
+    result = publish(tmp_path, {**manifest, **change}, branch, PRODUCT, routed=routed, workspace=WORKSPACE)
+    assert result["status"] == "skipped" and result["branchName"] is None and result["buildSha"] == "a" * 40
+    # No branch listing, branch creation or run: the queue never touches Tiden.
+    assert calls == []
+    receipt = json.loads((tmp_path / "tiden-route.json").read_text())
+    assert receipt["branch"] is None and receipt["source"] == "skipped" and "merge queue" in receipt["reason"]
+    assert "::notice title=Tiden evidence not published::" in capsys.readouterr().out
+
+
+def test_merge_queue_run_skips_before_the_branch_map_and_routing(tmp_path, monkeypatch, capsys):
+    import sys
+    from scripts import tiden_ci
+    calls, _ = routed_cli(monkeypatch, tmp_path)
+    # A base branch Tiden cannot name and a malformed map must not turn the queue red.
+    queue_branch = "gh-readonly-queue/Release/1.2/pr-7-" + "b" * 40
+    (tmp_path / "metadata.json").write_text(json.dumps({**metadata(), "git_branch": queue_branch}))
+    event = tmp_path / "event.json"
+    event.write_text(json.dumps({"merge_group": {"head_sha": "a" * 40, "head_ref": "refs/heads/" + queue_branch}}))
+    monkeypatch.setenv("GITHUB_EVENT_PATH", str(event))
+    monkeypatch.setenv("GITHUB_EVENT_NAME", "merge_group")
+    monkeypatch.setattr(sys, "argv", ["tiden_ci.py", "prepare", "--directory", str(tmp_path),
+                                      "--source-root", str(tmp_path)])
+    assert tiden_ci.main() == 0
+    monkeypatch.setenv("TIDEN_BRANCH_MAP", '{"codex/feature": "intent/mapped",}')
+    monkeypatch.setenv("TIDEN_PRODUCT_ID", PRODUCT)
+    monkeypatch.setenv("TIDEN_WORKSPACE_ID", WORKSPACE)
+    monkeypatch.setattr(sys, "argv", ["tiden_ci.py", "publish", "--directory", str(tmp_path)])
+    assert tiden_ci.main() == 0
+    assert calls == []
+    assert json.loads((tmp_path / "tiden-route.json").read_text())["source"] == "skipped"
+    assert "::notice title=Tiden evidence not published::" in capsys.readouterr().out
+
+
+def test_ci_reports_required_checks_for_merge_queue_runs_without_cancelling_them():
+    import yaml
+    root = Path(__file__).resolve().parents[1]
+    ci = yaml.safe_load((root / ".github/workflows/ci.yml").read_text())
+    checks = yaml.safe_load((root / ".github/workflows/checks.yml").read_text())
+    trigger = ci.get("on", ci.get(True))
+    assert "merge_group" in trigger and trigger["push"] == {"branches": ["main"]}
+    assert "pull_request" in trigger and "workflow_dispatch" in trigger
+    # The required `CI gate` and `checks / verify` run for every trigger, the queue included.
+    assert ci["jobs"]["gate"]["name"] == "CI gate" and ci["jobs"]["gate"]["if"] == "${{ always() }}"
+    assert set(ci["jobs"]["gate"]["needs"]) == {"checks", "native", "images"}
+    assert ci["jobs"]["checks"]["uses"] == "./.github/workflows/checks.yml"
+    assert not any("if" in ci["jobs"][job] for job in ("checks", "native", "images"))
+    assert "if" not in checks["jobs"]["verify"]
+    step_ids = {step.get("id") for step in checks["jobs"]["verify"]["steps"]}
+    assert set(CHECKS) <= step_ids
+    # A queue run gets its own group and cancels nothing; other runs keep their groups.
+    assert ci["concurrency"] == {
+        "group": "ci-${{ github.event_name == 'merge_group' && format('merge-queue-{0}', github.run_id) "
+                 "|| github.event.pull_request.number || github.ref }}",
+        "cancel-in-progress": "${{ github.event_name != 'merge_group' }}"}

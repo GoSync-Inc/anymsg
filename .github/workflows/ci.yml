@@ -5,6 +5,9 @@ on:
   push:
     branches: [main]
   pull_request:
+  # The merge queue needs the required checks on its group commit; such a run
+  # publishes nothing to Tiden (TIDEN-CI.md).
+  merge_group:
   workflow_dispatch:
     inputs:
       source_ref:
@@ -18,8 +21,10 @@ on:
 permissions:
   contents: read
 concurrency:
-  group: ci-${{ github.event.pull_request.number || github.ref }}
-  cancel-in-progress: true
+  # Each merge queue run has a group of its own and cancels nothing; the queue
+  # itself decides when a group run is no longer needed. Other runs are unchanged.
+  group: ci-${{ github.event_name == 'merge_group' && format('merge-queue-{0}', github.run_id) || github.event.pull_request.number || github.ref }}
+  cancel-in-progress: ${{ github.event_name != 'merge_group' }}
 jobs:
   checks:
     uses: ./.github/workflows/checks.yml
