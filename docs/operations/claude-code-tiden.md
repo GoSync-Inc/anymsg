@@ -22,8 +22,9 @@ workspace `1dc18e09-4a09-4d74-8300-cd4302622357` and product
 ## Session sequence
 
 1. Answer the per-prompt start directive yourself: continue a listed candidate,
-   start a new intent, look up, or skip. Documentation, process and read-only work
-   use skip.
+   start a new intent, look up, or skip. Agent rules, process documents, wording
+   and read-only work use skip; a change of meaning in a product contract document
+   runs the full loop (`AGENTS.md`).
 2. Before `tiden intent start`, run `product-context` for each independent part and
    read the code its results point to. Promises are frozen at start and cannot be
    edited; a promise written before reading the code may later need a waiver.
@@ -38,10 +39,11 @@ workspace `1dc18e09-4a09-4d74-8300-cd4302622357` and product
 5. Evidence comes from CI. While a run is in progress, answer the stop hook with the
    current `tiden intent progress` status and the run you are waiting for. A local
    run that bypasses the reporter does not change the gate.
-6. After CI, run `tiden intent progress`, link reviewed tests, then use
-   `capture-intent` (candidates, settle, waive) and `tiden intent close`. Defer a
-   connected item that has no test yet with `--propose-tests`; never accept risk to
-   clear an unrelated Backlog card.
+6. After CI and the reviews, in the order in `AGENTS.md`, run
+   `tiden intent progress`, link reviewed tests, then use `capture-intent`
+   (candidates, settle, waive) and `tiden intent close`. Defer a connected item
+   that has no test yet with `--propose-tests`; never accept risk to clear an
+   unrelated Backlog card.
 7. After merging `main` into the branch, pass the session's own commit range to
    `progress`, `candidates` and `close` with `--changes`
    (`startSha` = merge base with `origin/main`, `endSha` = `HEAD`). Otherwise the
@@ -49,9 +51,10 @@ workspace `1dc18e09-4a09-4d74-8300-cd4302622357` and product
 8. On a non-`main` branch, `tiden test link-spec` creates a link proposal; check it
    with `tiden branch link-proposals list --name <intent-branch>`, not `test links`.
    The close gate reads the latest run in the product, so close right after your
-   own run when other pull requests are publishing evidence.
-9. Merge the pull request and then its Tiden branch yourself only under the merge
-   delegation rule in `AGENTS.md`; otherwise hand the decision to the owner.
+   own final run when other pull requests are publishing evidence.
+9. The review level, its reviews and who merges follow the review levels in
+   `AGENTS.md`. Merge the pull request and then its Tiden branch yourself only when
+   they allow it; otherwise hand the decision to the owner.
 
 ## Where work goes
 
