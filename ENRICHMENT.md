@@ -24,6 +24,119 @@ The Codex connector is implemented locally but not deployed or enabled. Read
 [its isolation and rollout requirements](CODEX_ENRICHMENT.md) before using it;
 it is cloud inference and shares subscription usage with other Codex work.
 
+## Retained descriptions and video (schema 34)
+
+`messaging_service.file_understanding` is a separate optional worker for a
+descriptive title and a factual search summary. It does not replace extracted
+PDF/Office/spreadsheet text, OCR, full audio transcripts, or timestamp segments.
+Audio summaries consume the existing current transcript; document summaries
+consume existing current extraction. A current image description may be reused,
+with its original provider/model and an explicit `reused_description` label.
+These steps never retranscribe audio or silently choose a different model.
+
+The independent `attachment_understanding` table retains descriptions and coverage
+with the source digest, message revision and a hash of the actual input detail.
+Replacing media, deleting its message and actual transcript/extraction changes
+invalidate old descriptions in the same transaction. A caption or formatting edit
+with the same active CAS occurrence carries completed extraction, ASR segments
+and descriptions to the new message revision without reopening the original.
+The content hash excludes that caption revision; the separate source revision
+and cancelled lease still reject results from an old in-flight attempt. Unchanged
+file jobs also retain attempt counts, errors, profile identity and retry backoff.
+For model jobs, cancelling the third in-flight attempt marks the job `failed` /
+`retry_exhausted`; the parser applies its configured limit on its next queue poll.
+Cancellation does not grant new attempts or refund daily budgets. A profile
+change, an in-flight refresh, worker shutdown or a failed refresh preserves the last good description and its
+published provider/model. Search can label that artifact as belonging to an older
+profile; changing configuration cannot erase the only description of an evicted
+video. Job state and last successful publication are separate: `indexed_at` and
+`published_*` describe the retained artifact while `state`, `profile_hash` and
+`error_code` describe the current attempt. Worker liveness expiry does not delete
+retained content. Original retention and explicit pins are described in
+[MEDIA_STORAGE.md](MEDIA_STORAGE.md).
+
+Coverage is explicit for every modality:
+
+| Kind | Retained detail | Description coverage |
+| --- | --- | --- |
+| Audio | Existing full ASR text and any real timestamp segments | `transcript_summary`, retained/input character counts, timestamp availability |
+| Document | Existing PDF pages, Office text, workbook sheet/cell spans | `extracted_text_summary`, retained/input character counts; parser limits still apply |
+| Image | Existing OCR/description remains separate | `image_description`, including whether a prior description was reused |
+| Video | A description of bounded sampled frames | `sampled_frames`, exact sampled times, frame count and duration; `complete=false`, `audio_transcribed=false` |
+
+Video descriptions cover selected frames only. They do not claim speech
+transcription, continuous viewing or events between samples. The default samples
+four frames at 0%, 25%, 50% and 75% of a finite known duration. ffprobe and ffmpeg
+accept only an explicit list of local video containers with `file,pipe` protocols;
+playlists and network inputs are rejected. Original size and SHA-256 are checked
+before sampling. Decoder dimensions are capped at 8192 per side and 16,777,216
+pixels; generated frame edges default to 384 pixels. The contact sheet is bounded
+to 8 MiB. Every native process runs inside the isolated child's process group,
+CPU/address-space/file bounds and overall timeout. Missing native tools or invalid
+media report a failure, without claiming an empty successful description.
+
+The video profile accepts `video_frames` (1..8), `video_frame_edge` (64..512),
+`video_max_seconds` (1..14400) and `max_input_bytes` (up to 1 GiB; default 128 MiB).
+Larger originals remain available but unprocessed. Other model profiles retain
+their existing 32 MiB input ceiling and 100,000-character summary-input ceiling.
+The full already extracted/transcribed detail stays in the database when a
+summary uses a shorter prefix. Partial input, parser truncation or partial ASR
+metadata produces `complete=false` and `truncated=true`; such a summary cannot
+turn incomplete source processing into permission to evict the original.
+
+Apply `deploy/file_understanding_role.sql` as the database owner after migration
+34, and give a dedicated login membership in `messaging_file_understanding`.
+The role reads current source/detail and residency but cannot change transcripts,
+messages, sessions, original files, agent keys or permissions. Mount originals
+read-only, the private configuration/key files, and the same precreated
+`PROCESSING_LOCK_DIR` used by extraction/ASR. The worker inherits the shared
+`local-heavy` host lock and durable resource lease for local models and all video
+sampling, including video processing with an explicitly selected cloud model.
+Use container CPU/memory/process limits; a separate Ollama daemon also needs its
+own limits and cloud-disabled configuration.
+
+Create a mode-0600 JSON configuration with `enabled`, an explicit account list,
+`max_jobs_per_day`, and `profiles` keyed by `audio`, `document`, `image`, or
+`video`. Audio/document profiles select a text model; image/video profiles select
+a vision model. For example, after the operator has installed actual local
+models and disabled cloud features on the Ollama daemon:
+
+```json
+{
+  "enabled": true,
+  "accounts": ["operator-selected-account"],
+  "max_jobs_per_day": 20,
+  "profiles": {
+    "audio": {"provider": "ollama", "model": "installed-text-model", "local_only_daemon": true},
+    "document": {"provider": "ollama", "model": "installed-text-model", "local_only_daemon": true},
+    "video": {"provider": "ollama", "model": "installed-vision-model", "local_only_daemon": true,
+      "video_frames": 4, "video_max_seconds": 600}
+  }
+}
+```
+
+Run `python -m messaging_service.file_understanding --config /run/secrets/understanding.json`
+with `DATABASE_URL_FILE` pointing at that worker's private DSN and `PROBE_FILES`
+pointing at read-only originals. Models are never installed or downloaded by the
+worker. Cloud text/vision profiles require the existing explicit `allow_cloud`
+opt-in and private API-key file; no automatic fallback or subscription CLI is
+used. An empty `profiles` object enables observation without enabling a model.
+Missing profiles remain `not_configured`; configured audio/document jobs waiting
+for retained detail report `queued` with `waiting_for_transcript` or
+`waiting_for_text`, and unsupported source extraction reports `unsupported` /
+`source_unsupported`. Waiting does not consume a model attempt.
+
+Understanding shares `enrichment_budget` with ASR and existing enrichment.
+Configure the same global UTC-day cap on all workers. Optional
+`profile_max_jobs_per_day` (including `video`) and `account_max_jobs_per_day`
+provide additional caps; profile changes do not reset the day's counters.
+Failures count, retries stop after three attempts for an input/profile, and
+authentication/rate-limit pauses use the existing durable controls. Fairness
+between modalities/accounts prevents a continuous audio backlog from hiding
+video work. All of this is source functionality; production enablement requires
+the verified promotion and applicable live-session authority in
+[docs/operations/production.md](docs/operations/production.md).
+
 Choose an actual model that supports the requested modality. Compatibility is
 tested with mocked protocol responses, not every hosted model. There is no
 automatic provider fallback or model download. API credentials are mounted from
@@ -56,9 +169,10 @@ minutes for a long recording. This does not remove input, memory or audio limits
 
 An original is verified by its size and SHA-256 before processing. Results are
 committed only while the worker still owns its lease and the original digest and
-message revision remain current. An edited or deleted source invalidates its
-derived result. Failed jobs have bounded retries. The API reports extraction and
-enrichment states independently and labels model-derived content.
+message revision remain current. Replaced media or a deleted source invalidates
+its derived result; caption-only revisions retain completed file artifacts and
+cancel old processing leases. Failed jobs have bounded retries. The API reports
+extraction and enrichment states independently and labels model-derived content.
 
 ## Launch
 
@@ -134,6 +248,13 @@ are separate from enabled/configured state and from source history coverage.
 To resume a corrected profile, the operator can update its matching
 `processing_control` row to `pause_reason=NULL, paused_until=NULL`; this is not
 an MCP tool, and no automatic fallback sends private data to another provider.
+
+Completed source-current ASR/image/document artifacts are reused when a profile
+changes. Automatic retries target failed or unsupported work; they do not erase
+a usable transcript or image description to try another model. Independent file
+understanding keeps its last successful title and summary during refreshes and
+reports the current refresh state and published model separately. This also
+preserves useful content when the original has been deliberately evicted.
 
 Whisper, Ollama requests and native PDF/image OCR share one `local-heavy` slot.
 The database lease records ownership and expiry. All local worker containers

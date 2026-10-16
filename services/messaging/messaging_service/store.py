@@ -263,7 +263,7 @@ class Store:
                     'indexed_content':['message_text','filename','bounded_file_text','configured_model_results'],
                     'model_processing':'optional_operator_configured_local_or_api',
                     'file_content_search':True,'file_indexing':'asynchronous_local_worker',
-                    'file_search_sources':['extracted','enriched','message_context'],
+                    'file_search_sources':['extracted','enriched','understanding','message_context'],
                     'file_caption_provenance':'current_parent_message_revision_only',
                     'chat_coverage':True,'provider_id_lookup':'resolve_reference',
                     'empty_result_diagnostics':True,'message_conflicts':'scoped_active_and_historical'},
@@ -654,13 +654,18 @@ class Store:
                         'message_id':pending['message'],'reason':fields['download_reason'],
                         **self.dataset(c,p)})
                 raise APIError('not_found', 404)
-            from .file_index import _available
+            from .file_index import _available,_absent
             from .attachment_metadata import attachment_fields,processing_phases
+            from .file_lifecycle import lifecycle_lock,touch_original
+            lifecycle_lock(c)
             row.update(processing_phases(c,row))
             if not _available(self.files,{'sha256':row['digest'],'bytes':row['bytes']}):
+                if not _absent(self.files,{'sha256':row['digest']}):
+                    row['original_residency']='missing'
                 targets(p,[row['id']])
                 return serial({**attachment_fields(row,original_present=False),
-                    'status':'unavailable','reason':'original_missing',**self.dataset(c,p)})
+                    'status':'unavailable',**self.dataset(c,p)})
+            touch_original(c,row['digest'],row['bytes'])
             grant = secrets.token_urlsafe(32)
             c.execute('DELETE FROM download_grants WHERE expires_at<now()')
             c.execute('''INSERT INTO download_grants VALUES (%s,%s,%s,%s,now()+interval '120 seconds')''',
@@ -692,6 +697,8 @@ class Store:
                 error=APIError('not_found',404);error.audit_identity=p;raise error
             return p
         with self.access('download',resolve) as (c,p):
+            from .file_lifecycle import lifecycle_lock,touch_original
+            lifecycle_lock(c)
             where,args=scope_filter(p,'m')
             columns='''a.*,m.provider_id AS provider_message_id,
                 (SELECT platform FROM accounts WHERE id=m.account) AS provider_platform,
@@ -715,6 +722,7 @@ class Store:
             path = self.files/row['digest']
             if path.is_symlink() or not path.is_file() or path.stat().st_size != row['bytes']:
                 raise APIError('attachment_unavailable', 503)
+            touch_original(c,row['digest'],row['bytes'])
             targets(p,[row['id']])
             return row, path, (p['key_digest'],p['scope_version'],row['id'])
 
@@ -819,8 +827,8 @@ class Store:
             c.execute("SET LOCAL statement_timeout='180s'")
             c.execute(Path(__file__).with_name('schema.sql').read_text())
             version=int(c.execute("SELECT value FROM probe_metadata WHERE name='schema_version'").fetchone()['value'])
-            if version>32: raise RuntimeError('database_newer_than_runtime')
-            for target,name in [(2,'002_archive.sql'),(3,'003_collectors.sql'),(4,'004_whatsapp.sql'),(5,'005_access.sql'),(6,'006_reviews.sql'),(7,'007_search_indexes.sql'),(8,'008_people.sql'),(9,'009_file_index.sql'),(10,'010_search_audit.sql'),(11,'011_telegram_window.sql'),(12,'012_search.sql'),(13,'013_file_search.sql'),(14,'014_collector_health.sql'),(15,'015_enrichment.sql'),(16,'016_file_content.sql'),(17,'017_chat_evidence.sql'),(18,'018_collector_operations.sql'),(19,'019_whatsapp_identities.sql'),(20,'020_processing_admission.sql'),(21,'021_media_storage.sql'),(22,'022_outgoing.sql'),(23,'023_receipts.sql'),(24,'024_formatting.sql'),(25,'025_operations.sql'),(26,'026_subscriptions.sql'),(27,'027_reply_queue.sql'),(28,'028_send_reference.sql'),(29,'029_file_uploads.sql'),(30,'030_whatsapp_native_identities.sql'),(31,'031_media_requests.sql'),(32,'032_event_delivery.sql')]:
+            if version>34: raise RuntimeError('database_newer_than_runtime')
+            for target,name in [(2,'002_archive.sql'),(3,'003_collectors.sql'),(4,'004_whatsapp.sql'),(5,'005_access.sql'),(6,'006_reviews.sql'),(7,'007_search_indexes.sql'),(8,'008_people.sql'),(9,'009_file_index.sql'),(10,'010_search_audit.sql'),(11,'011_telegram_window.sql'),(12,'012_search.sql'),(13,'013_file_search.sql'),(14,'014_collector_health.sql'),(15,'015_enrichment.sql'),(16,'016_file_content.sql'),(17,'017_chat_evidence.sql'),(18,'018_collector_operations.sql'),(19,'019_whatsapp_identities.sql'),(20,'020_processing_admission.sql'),(21,'021_media_storage.sql'),(22,'022_outgoing.sql'),(23,'023_receipts.sql'),(24,'024_formatting.sql'),(25,'025_operations.sql'),(26,'026_subscriptions.sql'),(27,'027_reply_queue.sql'),(28,'028_send_reference.sql'),(29,'029_file_uploads.sql'),(30,'030_whatsapp_native_identities.sql'),(31,'031_media_requests.sql'),(32,'032_event_delivery.sql'),(33,'033_file_lifecycle.sql'),(34,'034_file_understanding.sql')]:
                 migration=Path(__file__).with_name('migrations')/name
                 sha=hashlib.sha256(migration.read_bytes()).hexdigest()
                 if version<target:

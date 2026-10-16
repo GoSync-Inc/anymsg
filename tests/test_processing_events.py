@@ -240,7 +240,8 @@ def test_expired_multi_account_publication_does_not_deadlock_ingestion_or_queue_
                     return getattr(c, name)
                 def execute(self, query, params=None, **kwargs):
                     if 'pg_advisory_xact_lock(hashtextextended' in query:
-                        trace.append((transaction_id, 'account', params[0]))
+                        lock_kind = 'lifecycle' if params[0] == 'attachment-residency-v1' else 'account'
+                        trace.append((transaction_id, lock_kind, params[0]))
                     elif query.startswith('UPDATE feed_counter'):
                         trace.append((transaction_id, 'feed', None))
                         first_feed.set()
@@ -272,7 +273,9 @@ def test_expired_multi_account_publication_does_not_deadlock_ingestion_or_queue_
     assert not contender.is_alive() and not failures
     assert len(processing_rows(store, 'expired-a')) == len(processing_rows(store, 'expired-b')) == 1
     feed_index = next(i for i, item in enumerate(trace) if item[1] == 'feed')
-    assert [item[2] for item in trace[:feed_index] if item[1] == 'account'] == [
-        'archive:telegram-demo', 'archive:whatsapp-demo-1']
+    assert [(item[1], item[2]) for item in trace[:feed_index]] == [
+        ('lifecycle', 'attachment-residency-v1'),
+        ('account', 'archive:telegram-demo'), ('account', 'archive:whatsapp-demo-1')]
     assert {item[0] for item in trace if item[1] == 'feed'} == {0}
     assert {item[0] for item in trace if item[1] == 'candidate'} == {1}
+    assert next(item[1:] for item in trace if item[0] == 1) == ('lifecycle', 'attachment-residency-v1')

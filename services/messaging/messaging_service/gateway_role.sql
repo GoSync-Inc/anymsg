@@ -55,3 +55,8 @@ GRANT SELECT,INSERT,UPDATE,DELETE ON subscription_delivery TO messaging_gateway;
 GRANT SELECT,INSERT ON subscription_outbox TO messaging_gateway;
 GRANT UPDATE(state,finished_at,error_code) ON subscription_outbox TO messaging_gateway;
 GRANT SELECT,INSERT ON agent_feedback TO messaging_gateway;
+-- Managed originals and descriptions are separate from immutable receipts.
+GRANT SELECT ON attachment_residency,attachment_eviction_journal,
+    attachment_understanding,file_understanding_profiles TO messaging_gateway;
+GRANT EXECUTE ON FUNCTION public.touch_original(text,bigint) TO messaging_gateway;
+GRANT EXECUTE ON FUNCTION public.queue_managed_original(text) TO messaging_gateway;

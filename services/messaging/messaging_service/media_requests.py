@@ -5,7 +5,7 @@ cooldowns or change source references. The shared demand lock precedes job locks
 this path never acquires the collector/capacity lock while holding either one.
 """
 from .attachment_metadata import attachment_fields, processing_phases
-from .file_index import _available
+from .file_index import _available,_absent
 from .policy import scope_filter, targets
 from .store import APIError, serial
 
@@ -32,6 +32,9 @@ def occurrence(c,p,attachment_id,*,lock=False):
 
 
 def request(store,c,p,attachment_id):
+    from .file_lifecycle import lifecycle_lock,is_managed_evicted,touch_original
+    # Lifecycle precedes demand/job locks and protects presence/touch/requeue.
+    lifecycle_lock(c)
     # Quota and idempotency must serialize across HTTP workers and credentials.
     c.execute("SELECT pg_advisory_xact_lock(hashtextextended('media-demand-admission',0))")
     row=occurrence(c,p,attachment_id,lock=True)
@@ -47,16 +50,26 @@ def request(store,c,p,attachment_id):
         if row is None:raise APIError('not_found',404)
     targets(p,[attachment_id])
     present=None
+    managed=False
     if row.get('digest'):
         present=_available(store.files,{'sha256':row['digest'],'bytes':row['bytes']})
-    result=attachment_fields({**row,**processing_phases(c,row)},original_present=present)
+        managed=not present and _absent(store.files,{'sha256':row['digest']}) and is_managed_evicted(c,row['digest'],row['bytes'])
+    row.update(processing_phases(c,row))
+    if present is False and not managed:
+        row['original_residency']='missing'
+    result=attachment_fields(row,original_present=present)
     result.update(attachment_id=attachment_id,changes_provider_state=False,
         poll_operation='get_attachment',poll_after_seconds=3)
     if row.get('digest'):
+        touch_original(c,row['digest'],row['bytes'])
+    if row.get('digest') and not managed:
         result.update(request_status='ready' if present else 'unavailable',
             reason='original_downloaded' if present else 'original_missing',requested_until=None)
         return serial(result)
-    if row['job_state']=='ready':
+    if managed and 'job_state' not in row:
+        result.update(request_status='unavailable',reason='provider_source_unavailable',requested_until=None)
+        return serial(result)
+    if row['job_state']=='ready' and not managed:
         result.update(request_status='unavailable',reason='original_not_registered',requested_until=None)
         return serial(result)
     if (not row['collection_enabled'] or row['provider_chat_id'] in row['exclude_chats'] or
@@ -93,6 +106,10 @@ def request(store,c,p,attachment_id):
     until=c.execute('''UPDATE media_jobs SET requested_until=clock_timestamp()+interval '1 hour',
         request_key_digest=%s WHERE id=%s RETURNING requested_until''',
         (p['key_digest'],attachment_id)).fetchone()['requested_until']
+    if managed and row['job_state']=='ready':
+        changed=c.execute('SELECT public.queue_managed_original(%s) AS queued',(attachment_id,)).fetchone()['queued']
+        if not changed:raise APIError('original_requeue_conflict',409)
     result.update(request_status='queued',requested_until=until,
         download_request={'state':'requested','until':until},next_action='get_attachment')
+    if managed:result['reason']='managed_original_evicted'
     return serial(result)

@@ -1,5 +1,96 @@
 # Media storage admission
 
+## Managed original retention (schema 33/34)
+
+The separate lifecycle worker can expire **processed, unpinned originals after
+30 days without an original request**. Search and reading retained text do not
+refresh that clock. An authorized original request does. Existing originals get
+a full 30-day grace period when residency tracking is first installed; message
+age alone never authorizes immediate deletion.
+
+Residency belongs to shared SHA-256 bytes, while descriptions and source links
+belong to individual occurrences. An operator pin protects all occurrences of
+the same bytes. Eviction retains messages, filenames, titles, summaries,
+extracted detail, ASR text and timestamp segments. Every active occurrence must
+have usable current processing evidence. Unprocessed, stale, failed or
+incompletely extracted/transcribed files are retained. A video description is
+explicitly based on sampled frames and does not claim a complete transcript.
+
+Destructive retention is opt-in and defaults to a dry run. Each pass has file
+and byte limits. It rechecks pins, recent access, active downloads/grants,
+processing and durable backup fences, verifies the exact regular file's size
+and SHA-256, and journals the transition before unlinking. A failed or
+interrupted transition is reconciled by the lifecycle worker; it never scans
+and deletes arbitrary files, Docker volumes or other projects' data.
+
+Only a completed managed eviction allows authorized file search and retained
+text/segment reads while the original is absent. Unexpected missing bytes
+retain their existing unavailable/corruption behavior. Metadata identifies
+`original_evicted` separately and suggests `request_file_download`. Recovery
+uses the existing bounded collector queue and checks the retained digest. It
+does not guarantee that Telegram or WhatsApp can supply an old original.
+Failed/exhausted requests, ACLs, provider cooldowns and storage limits still
+apply. Accepted best-effort recovery does not imply a cold archive exists.
+
+Backup fences are durable, without automatic expiry, from capture through
+confirmed delivery. Pending captures from older runtimes must be reconciled
+before enabling retention; the new worker cannot assume they are fenced.
+Do not clear a fence while any retry still references its originals.
+See [backup streaming](BACKUP_STREAMING.md) for replacement verification and
+[the backlog](BACKLOG.md) for source versus live status.
+
+### Activation and operator controls
+
+Apply schemas 033/034 and their role grants through a reviewed release from the
+exact verified main revision, after a fresh compatible backup has been restored
+independently. Keep migrations 001..032 unchanged. Reconcile all older pending
+backup jobs and snapshots before enabling retention; do not release a durable
+fence merely because it is old. The receiver must retain a verified protected
+anchor while its replacement is captured, delivered, decrypted and restored.
+
+Install `file_lifecycle_role.sql` as the trusted migration owner and grant its
+NOLOGIN role to a dedicated runtime login. Store that login's DSN in the private
+`file-lifecycle.dsn` file. The runtime cannot edit source identities or remove
+backup fences. `deploy/compose.file-lifecycle.yaml` is an optional overlay; its
+profile starts with dry-run reports and bounded daily passes. Inspect the bounded
+preview and blocked-reason report before explicitly adding `--apply` to the
+reviewed runtime command. Repeated previews inspect the same first batch; they
+do not constitute a full catalog audit. Dry runs never update the access clock
+or traversal cursor. Apply passes advance a separate inspection cursor so blocked
+old files cannot starve eligible files later in the catalog.
+
+For an individual CAS digest, use the same restricted operator runtime:
+
+```sh
+python -m messaging_service.file_lifecycle --dsn-file /run/secrets/database_url --files /data/files --digest SHA256 --pin
+python -m messaging_service.file_lifecycle --dsn-file /run/secrets/database_url --files /data/files --digest SHA256 --unpin
+```
+
+Install the independent understanding role/configuration separately, following
+[ENRICHMENT.md](ENRICHMENT.md). The optional
+`deploy/compose.file-understanding.yaml` overlay does not start a model daemon or
+download weights. A local endpoint must be reachable in the worker's permitted
+network namespace; container loopback refers to that container. Text/vision
+profiles and their processing limits require explicit configuration. Existing
+ASR results remain retained when model profiles change. Originals without usable
+current processing evidence continue to occupy disk; enabling TTL alone cannot
+reclaim a backlog of unprocessed videos.
+
+### Optional object storage
+
+Object storage can be cheaper for originals than another fixed-size block
+volume, but it adds a second copy policy, encryption keys, upload verification,
+rehydration and access controls. It is not enabled by the retention worker.
+As checked on 2026-10-16, Cloudflare R2 Standard lists $0.015/GB-month with a
+10 GB account-level free storage allowance; 34 GB would be about $0.36/month
+for storage if that allowance is available. Requests and taxes are separate.
+R2 Infrequent Access lists $0.01/GB-month with retrieval charges and a 30-day
+minimum, so its lower storage rate alone does not establish a lower total cost.
+See [R2 pricing](https://developers.cloudflare.com/r2/pricing/).
+No new bucket, storage subscription or upload is part of this implementation.
+
+## Download admission and prefetch
+
 Telegram and WhatsApp collector configurations use `media_prefetch_days: 7` by
 default: automatically download originals from the rolling last seven days.
 Set an integer from 1 to 36500 for another window, `0` for explicit requests
@@ -122,9 +213,10 @@ statuses. `get_attachment` verifies local presence before issuing a temporary
 link; an absent registered original returns `original_missing`, without resetting
 the download receipt or discarding the recorded processing statuses.
 
-The seven-day prefetch window is **not** an eviction TTL. Already stored originals
-are retained. A future cold-storage lifecycle must verify a durable copy before
-eviction, retain independently readable text/analysis, and test rehydration.
+The seven-day prefetch window is **not** an eviction TTL. Original expiry is the
+separate opt-in 30-idle-day policy described above. It preserves readable
+text/analysis and requires the documented processing and safety checks; it does
+not require a cold copy under the owner's accepted best-effort recovery policy.
 Provider history/CDN availability alone is not a durable backup.
 
 Sync status (`get_sync_status`, chat `resolve_reference.sync`, file search evidence)

@@ -180,12 +180,18 @@ def test_real_content_change_or_deletion_invalidates_derivatives(derivatives,del
     assert ar.ingest(candidate)['outcome']==('deleted' if deleted else 'edited')
     extracted,enriched=rows(s,attachment)
     assert extracted['source_revision']==enriched['source_revision']==2
-    assert extracted['state']==('superseded' if deleted else 'queued')
-    assert enriched['state']==('superseded' if deleted else 'unconfigured')
-    assert extracted['text_content']==enriched['text_content']==''
-    assert enriched['title']==enriched['summary']==''
-    assert s.search_files(key,'deepformatneedle')['items']==[]
-    assert s.search_files(key,'deepmodelneedle')['items']==[]
+    if deleted:
+        assert extracted['state']==enriched['state']=='superseded'
+        assert extracted['text_content']==enriched['text_content']==''
+        assert enriched['title']==enriched['summary']==''
+        assert s.search_files(key,'deepformatneedle')['items']==[]
+        assert s.search_files(key,'deepmodelneedle')['items']==[]
+    else:
+        # Editing the parent caption does not change this active CAS file.
+        assert extracted['state']==enriched['state']=='ready'
+        assert extracted['text_content']==OCR_TEXT and enriched['text_content']==MODEL_TEXT
+        assert s.search_files(key,'deepformatneedle')['items']
+        assert s.search_files(key,'deepmodelneedle')['items']
 
 
 @pytest.mark.parametrize('table',['attachment_text','attachment_enrichment'])
@@ -201,6 +207,12 @@ def test_format_only_revision_does_not_promote_stale_derivative_proof(derivative
     retained=enriched if table=='attachment_text' else extracted
     assert stale['state']==('queued' if table=='attachment_text' else 'unconfigured')
     assert stale['text_content']=='' and stale['source_revision']==2
+    with s.pool.connection() as c:
+        current=c.execute('SELECT digest,filename,mime,bytes FROM attachments WHERE id=%s',(attachment,)).fetchone()
+    assert stale['source_digest']==current['digest']
+    if table=='attachment_text':
+        assert (stale['source_filename'],stale['source_mime'],stale['source_bytes'])==(
+            current['filename'],current['mime'],current['bytes'])
     assert retained['state']=='ready' and retained['source_revision']==2
 
 
@@ -215,13 +227,14 @@ def test_format_only_revision_cancels_leases_and_rejects_old_worker_publication(
     extracted,enriched=rows(s,attachment)
     assert extracted['state']==enriched['state']=='queued'
     assert extracted['lease_token'] is enriched['lease_token'] is None
-    assert extracted['attempts']==enriched['attempts']==0
+    assert extracted['attempts']==enriched['attempts']==1
     assert indexer.finish(old_extracted,Extraction('ready','stale-ocr','test-v1'))=='superseded'
     assert not enrichment.finish(old_enriched,normalize_result({'text':'stale-model'}))
     assert s.search_files(key,'stale-ocr')['items']==[]
     assert s.search_files(key,'stale-model')['items']==[]
     fresh_extracted=indexer.claim();fresh_enriched,_=enrichment.claim()
     assert fresh_extracted['source_revision']==fresh_enriched['source_revision']==2
+    assert fresh_extracted['attempts']==fresh_enriched['attempts']==2
     assert indexer.finish(fresh_extracted,Extraction('ready',OCR_TEXT,'test-v1'))=='ready'
     assert enrichment.finish(fresh_enriched,normalize_result({'text':MODEL_TEXT}))
 
@@ -233,8 +246,9 @@ def test_legacy_unproven_hash_and_direct_body_change_do_not_reuse_derivatives(de
         c.execute('UPDATE messages SET content_hash=%s WHERE id=%s',(old_hash,mid))
         c.execute("UPDATE messages SET revision=revision+1,body='directly changed' WHERE id=%s",(mid,))
     extracted,enriched=rows(s,attachment)
-    assert extracted['state']=='queued' and enriched['state']=='unconfigured'
-    assert extracted['text_content']==enriched['text_content']==''
+    # Message caption hashes do not replace current immutable file identity.
+    assert extracted['state']==enriched['state']=='ready'
+    assert extracted['text_content']==OCR_TEXT and enriched['text_content']==MODEL_TEXT
 
 
 def test_same_hash_with_direct_body_change_invalidates_derivatives(derivatives):
@@ -242,8 +256,9 @@ def test_same_hash_with_direct_body_change_invalidates_derivatives(derivatives):
     with s.pool.connection() as c:
         c.execute("UPDATE messages SET revision=revision+1,body='directly changed' WHERE id=%s",(mid,))
     extracted,enriched=rows(s,attachment)
-    assert extracted['state']=='queued' and enriched['state']=='unconfigured'
-    assert extracted['text_content']==enriched['text_content']==''
+    # Message caption hashes do not replace current immutable file identity.
+    assert extracted['state']==enriched['state']=='ready'
+    assert extracted['text_content']==OCR_TEXT and enriched['text_content']==MODEL_TEXT
 
 
 def test_derivative_rebind_uses_existing_trigger_privileges_without_collector_access(derivatives):
