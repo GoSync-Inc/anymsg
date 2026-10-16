@@ -180,6 +180,11 @@ test('an output path ending in a separator is refused before any request', async
     await assert.rejects(client.downloadFile(grant(), join(dir, 'name') + '/'), TypeError);
     assert.equal(calls, 0);
     assert.deepEqual(readdirSync(dir), []);
+    // A trailing backslash is a separator only on Windows; elsewhere it is a valid name.
+    if (process.platform !== 'win32') {
+      await client.downloadFile(grant(), join(dir, 'name\\'));
+      assert.deepEqual(readdirSync(dir), ['name\\']);
+    }
   } finally { rmSync(dir, {recursive: true, force: true}); }
 });
 

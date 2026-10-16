@@ -257,7 +257,7 @@ export class DeedKitClient {
     if (signal?.aborted) throw new DeedKitError('request_aborted');
     const name = basename(output);
     // A Windows name with ':' addresses an alternate data stream, not a new file.
-    if (!name || name === '.' || name === '..' || /[\\/]$/.test(output) || process.platform === 'win32' && name.includes(':'))
+    if (!name || name === '.' || name === '..' || (process.platform === 'win32' ? /[\\/]$/ : /\/$/).test(output) || process.platform === 'win32' && name.includes(':'))
       throw new TypeError('Invalid output path');
     // Resolve the existing directory through the filesystem, so the staging file and
     // the output share one real directory (no lexical '..' or drive-relative surprises).

@@ -79,8 +79,8 @@ replaces an existing file. A failure before publication removes the staging file
 and leaves the output path untouched. Before linking it checks that the staging
 name still refers to the file it wrote (`reason: staging_replaced`). After
 linking it checks the output name the same way: `published_file_replaced` or
-`published_unverified` means an entry now exists at the output path that the
-client did not verify, so it is left alone and must not be trusted. The output
+`published_unverified` means an entry the client did not verify may exist at the
+output path; it is left alone, and any entry there must not be trusted. The output
 directory must support hard links and must be writable only by trusted users:
 anyone who can rename entries there could also replace the file after the call
 returns. A staging file (`.deedkit-<hex>.part`) remains if the process dies
