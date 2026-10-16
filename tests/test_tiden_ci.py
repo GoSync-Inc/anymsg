@@ -719,27 +719,33 @@ def test_image_build_job_is_gated_only_by_the_change_decision():
 def dockerfile_sources(dockerfile, stage):
     """Paths a target stage copies from its build context, following FROM and COPY --from stages."""
     import re
-    stages, current = {}, None
+    stages, names = [], {}
     for line in re.sub(r"\\\n", " ", dockerfile.read_text()).splitlines():
         line = line.strip()
         if match := re.match(r"FROM\s+(?:--\S+\s+)*(\S+)(?:\s+AS\s+(\S+))?$", line, re.I):
-            current = match.group(2) or f"#{len(stages)}"
-            stages[current] = {"parents": {match.group(1)}, "sources": []}
-        elif current and (match := re.match(r"(?:COPY|ADD)\s+(.+)$", line, re.I)):
+            if match.group(2):
+                names[match.group(2).lower()] = len(stages)
+            stages.append({"parents": {match.group(1)}, "sources": []})
+        elif stages and (match := re.match(r"(?:COPY|ADD)\s+(.+)$", line, re.I)):
             words = match.group(1).split()
             options = [word for word in words if word.startswith("--")]
             sources = [word for word in words if not word.startswith("--")][:-1]
             parent = [option.split("=", 1)[1] for option in options if option.startswith("--from=")]
-            stages[current]["parents"].update(parent)
+            stages[-1]["parents"].update(parent)
             if not parent:
-                stages[current]["sources"].extend(sources)
-    pending, seen, sources = [stage or list(stages)[-1]], set(), []
+                stages[-1]["sources"].extend(sources)
+
+    def index(reference):
+        # A stage is referenced by name (case-insensitive) or by its zero-based position.
+        return int(reference) if reference.isdigit() else names.get(reference.lower())
+
+    pending, seen, sources = [len(stages) - 1 if not stage else index(stage)], set(), []
     while pending:
-        name = pending.pop()
-        if name in stages and name not in seen:
-            seen.add(name)
-            sources += stages[name]["sources"]
-            pending += stages[name]["parents"]
+        number = pending.pop()
+        if number is not None and number < len(stages) and number not in seen:
+            seen.add(number)
+            sources += stages[number]["sources"]
+            pending += [index(parent) for parent in stages[number]["parents"]]
     return sources
 
 
@@ -766,5 +772,8 @@ def test_image_inputs_cover_every_source_the_image_targets_build_from(tmp_path):
     assert not covered("deploy/compose.yaml") and not covered("docs/README.md")
     # Continued COPY lines and FROM options are parsed too, so a later Dockerfile edit cannot hide a source.
     (tmp_path / "Dockerfile").write_text("FROM --platform=linux/amd64 base AS build\nCOPY a \\\n    b ./\n"
-                                         "FROM build AS final\nCOPY --from=build /out /out\n")
-    assert dockerfile_sources(tmp_path / "Dockerfile", "final") == ["a", "b"]
+                                         "FROM base AS Tools\nCOPY c ./\nFROM scratch\nCOPY d ./\n"
+                                         "FROM build AS final\nCOPY --from=build /out /out\nCOPY --from=tools /t /t\n"
+                                         "COPY --from=2 /s /s\n")
+    assert sorted(dockerfile_sources(tmp_path / "Dockerfile", "final")) == ["a", "b", "c", "d"]
+    assert dockerfile_sources(tmp_path / "Dockerfile", "") == dockerfile_sources(tmp_path / "Dockerfile", "final")
