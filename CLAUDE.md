@@ -70,7 +70,7 @@ uv run python scripts/smoke.py --dsn-file <file>      # synthetic MCP/HTTP drill
   owner's terminal. Tests and health checks never send, ACK, call or pair.
 - Required checks: `CI gate` and `checks / verify`. Desired protection:
   `deploy/main-ruleset.json` (merge queue); the classic rule in
-  `deploy/main-protection.json` stays live until the owner applies it
+  `deploy/main-protection.json` stays live until the owner applies the ruleset
   (docs/operations/production.md).
   `checks.yml` step ids `build release python collector npm smoke distributions`
   are the seven `anymsg-ci::*` Tiden checks; do not rename them.
