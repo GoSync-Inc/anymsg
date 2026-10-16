@@ -20,7 +20,7 @@ import urllib.parse
 import urllib.request
 
 REPOSITORY = "GoSync-Inc/deedkit"
-REQUIRED_JOBS = {"checks / verify", "native / synthetic", "CI gate"}
+REQUIRED_JOBS = {"checks / verify", "native / synthetic", "images / build (backup)", "CI gate"}
 MIN_FREE_BYTES = 15 * 1024**3
 BUILDS = {
     "runtime": (".", "services/messaging/Dockerfile", "runtime", "import messaging_service, telegram_broker, telegram_session_owner, platform_contracts.release"),
@@ -30,6 +30,9 @@ BUILDS = {
     "gateway": (".", "services/gateway/Dockerfile", "", "import agent_gateway, platform_contracts.release"),
     "calendar": ("services/calendar", "services/calendar/Dockerfile", "", "import family_calendar"),
     "calls": ("services/calls", "services/calls/Dockerfile", "", "import fastapi, pipecat"),
+    "backup": (".", "services/messaging/Dockerfile", "backup",
+               "import messaging_service.backup_restore_worker; import subprocess; "
+               "[subprocess.run([tool, '--version'], check=True) for tool in ('age', 'pg_dump', 'pg_restore')]"),
     "http-router": (".", "services/release-router/Dockerfile", "", ""),
 }
 

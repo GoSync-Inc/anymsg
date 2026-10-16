@@ -24,10 +24,17 @@ MODULE_REPORTS = {
     "calendar": ("calendar.xml", "python", "services/calendar"),
     "calls": ("calls.xml", "python", "services/calls"),
     "calls_frontend": ("calls-frontend.xml", "node", "services/calls/frontend"),
+    "backup_restore": ("backup-restore.xml", "python", ""),
 }
 MAX_BYTES = 20 * 1024 * 1024
 # Tiden branch names: lowercase letters, digits, slashes, underscores and hyphens.
 TIDEN_BRANCH_NAME = re.compile(r"[a-z0-9]+(?:[/_-][a-z0-9]+)*")
+_UUID = r"[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}"
+# The intent loop puts exactly this line, naming the session's Tiden branch, in the pull request description.
+TIDEN_INTENT_LINE = re.compile(
+    rf"^[ \t]*Tiden intent branch:[ \t]*\[(intent/[a-z0-9]+(?:[/_-][a-z0-9]+)*)\]"
+    rf"\(https://app\.tiden\.ai/({_UUID})/products/({_UUID})/branches/({_UUID})\)", re.MULTILINE)
+MAX_INTENT_LINKS = 5
 
 
 def source_path(value: str, root: Path) -> str:
@@ -153,12 +160,44 @@ def route_branch(manifest: dict, mapping: dict) -> tuple[str, bool]:
         return git_branch, True
 
 
+def pull_request_body(event_path: str | None) -> str:
+    """The pull request description from the GitHub event file, or empty outside a pull request."""
+    try:
+        event = json.loads(Path(event_path).read_text()) if event_path else {}
+    except (OSError, ValueError):
+        return ""
+    body = (event.get("pull_request") or {}).get("body") if isinstance(event, dict) else None
+    return body if isinstance(body, str) else ""
+
+
+def intent_links(text: str) -> list[dict]:
+    """`Tiden intent branch:` lines of a pull request description, as names and IDs only."""
+    links = []
+    for name, workspace, product, branch in TIDEN_INTENT_LINE.findall(text or ""):
+        link = {"name": name, "workspace": workspace, "product": product, "branch": branch}
+        if link not in links:
+            links.append(link)
+    return links[:MAX_INTENT_LINKS]
+
+
+def linked_intent_branch(links: list, branches: list, product: str, workspace: str) -> str | None:
+    """The one open intent branch of this product that the pull request links to, if unambiguous.
+
+    The link text must name the same branch its ID resolves to.
+    """
+    wanted = {(link.get("branch"), link.get("name")) for link in links
+              if link.get("product") == product and link.get("workspace") == workspace}
+    names = {b["name"] for b in branches if (b.get("id"), b.get("name")) in wanted and b.get("status") == "open"
+             and isinstance(b.get("name"), str) and b["name"].startswith("intent/")}
+    return names.pop() if len(names) == 1 else None
+
+
 def routed_target(name: object, git_branch: str) -> bool:
     return isinstance(name, str) and (name == git_branch or name.startswith("intent/"))
 
 
-def publish(directory: Path, manifest: dict, branch: str, product: str, cli: str = "tiden",
-            routed: bool = False) -> dict:
+def publish(directory: Path, manifest: dict, branch: str | None, product: str, cli: str = "tiden",
+            routed: bool = False, workspace: str = "") -> dict:
     if manifest.get("schema") != 1 or not re.fullmatch(r"[a-f0-9]{40}", manifest.get("sha", "")):
         raise ValueError("invalid evidence manifest")
 
@@ -176,6 +215,16 @@ def publish(directory: Path, manifest: dict, branch: str, product: str, cli: str
         return value
 
     branches = call(["branch", "list"], "branches")["branches"]
+    source = "routed" if routed else "explicit"
+    if routed and manifest.get("pr_tiden_links"):
+        # An explicit target already won in route_branch; otherwise prefer the linked intent branch.
+        linked = linked_intent_branch(manifest["pr_tiden_links"], branches, product, workspace)
+        if linked:
+            branch, routed, source = linked, False, "pull-request-link"
+    if branch is None:
+        raise ValueError("No Tiden branch mapping, no usable pull request intent link, and the Git branch "
+                         "is not a valid Tiden branch name; register this Git branch before publishing evidence")
+    (directory / "tiden-route.json").write_text(json.dumps({"branch": branch, "source": source}))
     expected = next((b["id"] for b in branches if b["name"] == branch), None)
     if not expected and routed:
         # Tiden skips live-doc sync for a branch name it does not know, so create it first.
@@ -249,13 +298,21 @@ def main() -> int:
     args = parser.parse_args()
     directory = args.directory.resolve()
     if args.command == "prepare":
-        result = prepare(args.source_root.resolve(), directory,
-                         json.loads((directory / "metadata.json").read_text()))
+        metadata = json.loads((directory / "metadata.json").read_text())
+        metadata["pr_tiden_links"] = intent_links(pull_request_body(os.environ.get("GITHUB_EVENT_PATH")))
+        result = prepare(args.source_root.resolve(), directory, metadata)
         print(json.dumps({"test_counts": result["test_counts"], "check_counts": result["check_counts"]}))
         return 0
     manifest = json.loads((directory / "manifest.json").read_text())
-    branch, routed = route_branch(manifest, json.loads(os.environ.get("TIDEN_BRANCH_MAP") or "{}"))
-    result = publish(directory, manifest, branch, os.environ["TIDEN_PRODUCT_ID"], routed=routed)
+    mapping = json.loads(os.environ.get("TIDEN_BRANCH_MAP") or "{}")  # a malformed map fails loudly
+    try:
+        branch, routed = route_branch(manifest, mapping)
+    except ValueError:
+        if not manifest.get("pr_tiden_links"):
+            raise
+        branch, routed = None, True  # publish() may still resolve the pull request's intent link
+    result = publish(directory, manifest, branch, os.environ["TIDEN_PRODUCT_ID"], routed=routed,
+                     workspace=os.environ.get("TIDEN_WORKSPACE_ID", ""))
     print(json.dumps({k: result[k] for k in ("seqNum", "status", "branchName", "branchId", "buildSha", "stats", "liveDocStatus")}))
     return 0 if result["status"] == "passed" else 1
 
