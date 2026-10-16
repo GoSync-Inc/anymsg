@@ -26,13 +26,14 @@ cannot infer. Do not copy or fork the vendor skill bodies into another workflow.
 | `generate-tests` | Reconcile genuinely missing test cases. For this existing product, review the import plan and identity/link preservation before any authoritative ingest. |
 | `triage-issues` | Investigate reported runtime errors and prove a scoped repair; issue closure is separate from deployment acceptance. |
 
-Inspect the actual local scope with `tiden skill list --agent codex --local`.
-Install missing vendor skills with `tiden skill install --agent codex --local`;
-use `--agent claude-code` for that agent. Do not overwrite customized skills or
-change global hook trust, credentials, sandbox permissions or other projects as
-part of routine setup. `tiden doctor` can report global-scope warnings even when
-local skills and the current session's network access work. Check each warning's
-actual scope instead of rerunning setup blindly.
+Inspect both scopes with `tiden skill list --agent codex --global` and `--local`.
+A new worktree has no local copy, so install missing vendor skills with
+`tiden skill install --agent codex --global`; use `--agent claude-code` for that
+agent. Do not overwrite customized skills or change global hook trust,
+credentials, sandbox permissions or other projects as part of routine setup.
+`tiden doctor` can report global-scope warnings even when local skills and the
+current session's network access work. Check each warning's actual scope instead
+of rerunning setup blindly.
 
 The local coding-agent intent loop uses the current agent and the Tiden CLI.
 Tiden's hosted Agents page is a separate automation surface; configuring it or

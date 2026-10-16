@@ -8,7 +8,7 @@
 | icalendar | 7.3.0 | BSD-2-Clause |
 | python-dateutil | 2.9.0.post0 | Apache-2.0 / BSD dual license |
 | defusedxml | 0.7.1 | PSFL |
-| cryptography | 48.0.1 | Apache-2.0 OR BSD-3-Clause |
+| cryptography | 50.0.2 | Apache-2.0 OR BSD-3-Clause |
 | psycopg / psycopg-binary | 3.3.6 | LGPL-3.0-only |
 | psycopg-pool | 3.3.3 | LGPL-3.0-only |
 | mcp | 1.30.0 | MIT |

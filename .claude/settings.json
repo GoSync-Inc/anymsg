@@ -1,0 +1,31 @@
+{
+  "permissions": {
+    "deny": [
+      "Read(./.local/**)",
+      "Read(**/.local/**)",
+      "Read(~/.local/share/deedkit/**)",
+      "Read(./private/**)",
+      "Read(./deploy/private/**)",
+      "Read(**/outputs/**)",
+      "Read(**/*.session)",
+      "Read(**/*.session-journal)",
+      "Read(**/auth.sqlite*)",
+      "Read(**/.wwebjs_auth/**)",
+      "Read(**/*.credentials.json)",
+      "Read(**/*.permit.json)",
+      "Read(**/*.dsn)",
+      "Read(**/*.token)",
+      "Read(**/*.key)",
+      "Read(**/*.agekey)",
+      "Read(**/*.pem)",
+      "Read(**/*.dump)",
+      "Read(**/.env)",
+      "Bash(docker system prune*)",
+      "Bash(docker volume prune*)",
+      "Bash(docker volume rm*)",
+      "mcp__claude_ai_Deedkit__*",
+      "mcp__claude_ai_Gmail__*"
+    ]
+  },
+  "$schema": "https://json.schemastore.org/claude-code-settings.json"
+}

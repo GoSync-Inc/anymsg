@@ -15,11 +15,13 @@
 
    ```sh
    tiden --version
+   tiden skill list --agent claude-code --global
    tiden skill list --agent claude-code --local
    ```
 
-   Если навыков нет, установи их через `tiden skill install --agent claude-code
-   --local`, предварительно проверив текущий `--help`. Прочитай соответствующий
+   Новый worktree не содержит локальной копии навыков. Если их нет ни глобально,
+   ни локально, установи их через `tiden skill install --agent claude-code
+   --global`, предварительно проверив текущий `--help`. Прочитай соответствующий
    `SKILL.md`. Не копируй навыки вручную и не меняй глобальные hooks, доверие,
    credentials или настройки других проектов.
 4. Выполни `product-context`: отдельный вопрос на каждую независимую часть задачи.

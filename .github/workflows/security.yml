@@ -1,0 +1,129 @@
+name: Security report
+# Report-only: every step continues on error, so findings never block merges.
+# Tools are pinned to exact releases and verified by SHA-256 before use.
+on:
+  pull_request:
+  push:
+    branches: [main]
+permissions:
+  contents: read
+concurrency:
+  group: security-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: true
+jobs:
+  report:
+    name: Security report (non-blocking)
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6.1.0
+        continue-on-error: true
+        with:
+          persist-credentials: false
+          fetch-depth: 0
+      - name: Install pinned scanners
+        id: install
+        continue-on-error: true
+        run: |
+          set -euo pipefail
+          bin="$RUNNER_TEMP/security-bin"
+          mkdir -p "$bin"
+          fetch() {
+            curl --fail --silent --show-error --location --retry 3 -o "$3" "$1"
+            echo "$2  $3" | sha256sum --check --strict
+          }
+          fetch https://github.com/zizmorcore/zizmor/releases/download/v1.30.1/zizmor-x86_64-unknown-linux-gnu.tar.gz \
+            e65324f4430c2717591937edcec90ccbefaf14c174f8ec9415e03ca875b46e1a "$RUNNER_TEMP/zizmor.tar.gz"
+          tar -xzf "$RUNNER_TEMP/zizmor.tar.gz" -C "$bin" zizmor
+          fetch https://github.com/rhysd/actionlint/releases/download/v1.7.12/actionlint_1.7.12_linux_amd64.tar.gz \
+            8aca8db96f1b94770f1b0d72b6dddcb1ebb8123cb3712530b08cc387b349a3d8 "$RUNNER_TEMP/actionlint.tar.gz"
+          tar -xzf "$RUNNER_TEMP/actionlint.tar.gz" -C "$bin" actionlint
+          fetch https://github.com/hadolint/hadolint/releases/download/v2.15.1/hadolint-linux-x86_64 \
+            c7187db94eeeeca956519a6af171adc31453941a1e777961f6e680f697c8c507 "$bin/hadolint"
+          fetch https://github.com/gitleaks/gitleaks/releases/download/v8.30.1/gitleaks_8.30.1_linux_x64.tar.gz \
+            551f6fc83ea457d62a0d98237cbad105af8d557003051f41f3e7ca7b3f2470eb "$RUNNER_TEMP/gitleaks.tar.gz"
+          tar -xzf "$RUNNER_TEMP/gitleaks.tar.gz" -C "$bin" gitleaks
+          fetch https://github.com/google/osv-scanner/releases/download/v2.6.0/osv-scanner_linux_amd64 \
+            ca69b3d3cd08f889a49dc0a383122f71cc528b83803671df5fd874d97485b108 "$bin/osv-scanner"
+          chmod 0755 "$bin"/*
+          echo "$bin" >> "$GITHUB_PATH"
+      - name: zizmor (workflow security)
+        id: zizmor
+        continue-on-error: true
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: zizmor --format github .
+      - name: actionlint (workflow syntax)
+        id: actionlint
+        continue-on-error: true
+        run: actionlint
+      - name: hadolint (each Dockerfile)
+        id: hadolint
+        continue-on-error: true
+        run: |
+          status=0
+          while IFS= read -r file; do
+            if [ -L "$file" ]; then continue; fi
+            echo "::group::$file"
+            hadolint --no-color "$file" || status=1
+            echo "::endgroup::"
+          done < <(git ls-files -- '*Dockerfile')
+          exit "$status"
+      - name: gitleaks (history, redacted)
+        id: gitleaks
+        continue-on-error: true
+        run: gitleaks git --redact --no-banner --verbose .
+      - name: osv-scanner (lockfiles)
+        id: osv
+        continue-on-error: true
+        run: |
+          osv-scanner scan source --recursive \
+            --lockfile requirements.txt:services/messaging/requirements.lock \
+            --lockfile requirements.txt:services/messaging/requirements-enrichment.lock \
+            --lockfile requirements.txt:services/messaging/requirements-telemetry.lock \
+            --lockfile requirements.txt:services/messaging/requirements-test.lock \
+            .
+      - uses: actions/setup-go@924ae3a1cded613372ab5595356fb5720e22ba16 # v6.5.0
+        continue-on-error: true
+        with:
+          go-version: '1.26.9'
+          cache: false
+      - name: govulncheck (native WhatsApp adapter)
+        id: govulncheck
+        continue-on-error: true
+        working-directory: whatsapp/whatsmeow
+        run: go run golang.org/x/vuln/cmd/govulncheck@v1.8.0 ./...
+      - uses: astral-sh/setup-uv@37802adc94f370d6bfd71619e3f0bf239e1f3b78 # v7.6.0
+        continue-on-error: true
+        with: {version: '0.9.26', enable-cache: false}
+      - name: ruff check (pinned in tools/dev)
+        id: ruff
+        continue-on-error: true
+        run: |
+          uv sync --project tools/dev --locked
+          uv run --project tools/dev --locked ruff check --statistics .
+      - name: Summarize report-only outcomes
+        if: ${{ always() }}
+        continue-on-error: true
+        env:
+          OUTCOMES: >-
+            install=${{ steps.install.outcome }}
+            zizmor=${{ steps.zizmor.outcome }}
+            actionlint=${{ steps.actionlint.outcome }}
+            hadolint=${{ steps.hadolint.outcome }}
+            gitleaks=${{ steps.gitleaks.outcome }}
+            osv-scanner=${{ steps.osv.outcome }}
+            govulncheck=${{ steps.govulncheck.outcome }}
+            ruff=${{ steps.ruff.outcome }}
+        run: |
+          {
+            echo '### Security report (report-only)'
+            echo
+            echo '| Tool | Outcome |'
+            echo '| --- | --- |'
+            for pair in $OUTCOMES; do
+              echo "| ${pair%%=*} | ${pair#*=} |"
+            done
+            echo
+            echo "A failure outcome means findings or a tool error; see the step log. Nothing here blocks merging."
+          } >> "$GITHUB_STEP_SUMMARY"

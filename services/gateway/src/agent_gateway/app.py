@@ -14,11 +14,13 @@ from mcp.server.transport_security import TransportSecuritySettings
 from mcp.types import CallToolResult, ListToolsResult, TextContent, Tool
 from starlette.requests import Request
 from starlette.responses import JSONResponse
+from platform_contracts.release import ReleaseRuntime
 
 from .catalog import CATALOG, public
 from .dispatch import Dispatch
 from .http_clients import Clients
 from .policy import Denied, Policy
+from .release import messaging_dial_url
 
 current_key = ContextVar("deedkit_key", default="")
 HEADERS = {"Cache-Control": "no-store", "Referrer-Policy": "no-referrer", "X-Content-Type-Options": "nosniff"}
@@ -71,8 +73,23 @@ def create_app(policy_path, public_url, *, transports=None):
         raise ValueError("invalid_public_origin")
     public_url = public_url.rstrip("/")
     public_origin = origin.scheme + "://" + origin.netloc
-    clients = Clients(deployment, transports)
+    async def release_ready():
+        if policy.load()["deployment"] != deployment:
+            return False
+        async with asyncio.timeout(2):
+            for module, path in (("messaging", "/healthz"), ("calendar", "/health")):
+                if module in deployment["modules"]:
+                    response = await clients.metadata[module].get(path)
+                    if (response.status_code != 200 or not isinstance(response.json(), dict)
+                            or response.json().get("status") != ("alive" if module == "messaging" else "ok")):
+                        return False
+        return True
+    release = ReleaseRuntime.from_env(release_ready, file_paths=("/v1/files/",))
+    clients = Clients(deployment, transports, messaging_url=messaging_dial_url(release, deployment))
     tickets = Tickets(policy, clients, public_url)
+    if release:
+        tickets.release_id = release.generation
+        release.pending_tickets = tickets.pending
     dispatch = Dispatch(policy, clients, tickets)
     logging.getLogger("httpx").setLevel(logging.WARNING)
     logging.getLogger("httpcore").setLevel(logging.WARNING)
@@ -139,6 +156,7 @@ def create_app(policy_path, public_url, *, transports=None):
         tickets,
         dispatch,
     )
+    app.state.release = release
 
     @app.get("/healthz")
     async def health():
@@ -264,4 +282,5 @@ def create_app(policy_path, public_url, *, transports=None):
                     scope, receive, protected_send
                 )
 
-    return Boundary()
+    boundary = Boundary()
+    return release.wrap(boundary) if release else boundary

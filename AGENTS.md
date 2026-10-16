@@ -6,7 +6,7 @@ Do not activate provider sessions, send messages or run tests on production data
 Keep secrets, sessions, originals, dumps and private reports out of Git and packages.
 Preserve existing SQL migration checksums and provider IDs. Test wheels outside the
 checkout and inspect wheel/sdist/npm contents before publication. Stop owned test
-processes after use; do not stop shared services. Superflow is not automatic.
+processes after use; do not stop shared services.
 
 Maintain requirements, planned work, priorities and delivery status in the existing
 DeedKit Tiden product. Read docs/operations/tiden-product-workflow.md and use the
