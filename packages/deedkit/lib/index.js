@@ -108,7 +108,7 @@ function gatewayError(tool, status, body, headers) {
 
 // Releasing a body is best effort: a failing cancel must not replace the classified error.
 async function discard(response) {
-  try { await discard(response); } catch {}
+  try { await response.body?.cancel(); } catch {}
 }
 
 async function boundedJson(response, maximum) {
