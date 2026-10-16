@@ -161,6 +161,12 @@ receipt does not establish this gate. The deployment tool does not verify these
 live backup conditions; preparation and successful source CI are not migration
 approval.
 
+For R2 delivery, the opt-in [independent receiver verifier](../../BACKUP_R2.md#automated-independent-restore-on-the-receiver)
+can establish this restore evidence on the receiver using a root-only recovery
+key and isolated helper/PostgreSQL containers. It requires its own reviewed
+enrollment and actual successful restore; an enabled timer, upload receipt or
+synthetic CI run does not establish the live backup gate.
+
 ## Apply and verify
 
 ```sh

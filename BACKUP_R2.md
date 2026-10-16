@@ -3,12 +3,15 @@
 This receiver sends the existing age-encrypted `stream_v2` transport to a
 dedicated Cloudflare R2 Standard bucket. The source keeps its upload-only SSH
 key; it receives no R2 credential or read/list/delete interface. R2 credentials
-stay on the separate receiver. The age recovery key stays on the independent
-restore machine and is never copied to either server.
+stay on the separate receiver. An optional root-only verifier on that receiver
+holds the age recovery key and performs independent restores and verified-point
+rotation. Normal scheduled operation requires no Mac or other operator computer.
+The producer never receives that recovery key.
 
 The [filesystem receiver](BACKUP_STREAMING.md) remains available. Installing the
-module does not change an SSH forced command, switch a producer, schedule
-backups, perform independent restores or authorize production changes. Follow
+module does not change an SSH forced command, switch a producer, enable a timer
+or authorize production changes. Enable the server verifier explicitly after its
+synthetic and operational enrollment checks below. Follow
 [verified promotion](docs/operations/production.md) for an exact current main SHA
 with successful required CI. Never install feature-branch source, a copied source
 patch or an ad hoc application image overlay on a host.
@@ -84,11 +87,13 @@ installation. The SDK is optional and is not added to ordinary application
 dependencies or images. Importing the application does not resolve AWS
 credentials or connect to R2.
 
-The receiver has no need for a messaging DSN, provider session, original file
-tree, Docker socket or age private key. A host Python installation and the
-receiver's explicit SDK dependencies suffice; do not activate the application or
-collectors to install it. Inspect wheel/sdist contents and test the installed
-wheel outside the checkout before host enrollment.
+The upload receive process has no need for a messaging DSN, provider session,
+original file tree, Docker socket or age private key. A host Python installation
+and the receiver's explicit SDK dependencies suffice for delivery. The separate
+root verifier below uses Docker and a root-only recovery key; the restricted
+upload process cannot access them. Do not activate the application or collectors
+to install either tool. Inspect wheel/sdist contents and test the installed wheel
+outside the checkout before host enrollment.
 
 Copy [the generic configuration](deploy/backup-r2.example.json) to a private
 operator path and replace every deployment-specific value. The endpoint must be
@@ -190,7 +195,9 @@ Atomic conditional publication is an R2 API contract;
 negative reads do not establish that an earlier unknown write cannot still
 finish. [Cloudflare S3 compatibility](https://developers.cloudflare.com/r2/api/s3/api/).
 
-Download by logical ID into a **new** private output file:
+For a manual drill or one-time offline bootstrap, download by logical ID into a
+**new** private output file. Scheduled server verification uses the direct
+streaming path below instead of a complete ciphertext spool:
 
 ```sh
 /opt/deedkit-backup-r2/venv/bin/python -m messaging_service.backup_r2_receiver \
@@ -199,11 +206,12 @@ Download by logical ID into a **new** private output file:
 ```
 
 Download verifies the entire ciphertext's size and SHA256 before atomic output
-publication. If performed on the receiver, securely transfer that ciphertext to
-the isolated restore machine and verify the complete hash there again. The
-decryption key stays on that machine. Alternatively use separately authorized
-private operator download configuration there. Never give the producer download
-authority or assume that HEAD/ETag or upload success proves recoverability.
+publication. For an offline drill, securely transfer that ciphertext to the
+isolated restore machine and verify the complete hash there again, or use
+separately authorized private operator download configuration there. This manual
+path remains available for recovery; it is not a daily dependency of the server
+verifier. Never give the producer download authority or assume that HEAD/ETag or
+upload success proves recoverability.
 
 Follow the [backup restore drill](BACKUP.md#restore-drill) with an explicitly
 sufficient decryption bound, matching PostgreSQL tools/runtime and enough private
@@ -215,6 +223,138 @@ timezone-aware verification time in the private proof described in
 [the independent proof contract](BACKUP_STREAMING.md#retention). All seven checks
 must reflect the actual independent restore. An upload receipt, successful unit
 test or browser subscription checkout is not this proof.
+
+## Automated independent restore on the receiver
+
+`messaging_service.backup_r2_verifier` is an opt-in root coordinator on the
+independent receiver. It uses the root operator R2 configuration and a recovery
+key stored there as a root-owned, single-link regular `0600` file outside the
+upload subtree. Keep its private configuration, working directory, proofs,
+status and protected marker under trusted root-owned ancestry. The producer
+retains only its existing forced-command upload key. A backup upload cannot
+select the verifier's command, recovery key, helper image or proof path.
+
+This deliberately changes the earlier manual/offline-key operation: the receiver
+can now decrypt backups without an operator computer. Compromising root on that
+receiver can expose the recovery key and backup plaintext, and root already
+holds its bucket credentials. The restricted upload account receives none of
+this authority. Keep an independent offline recovery-key copy for loss of the
+receiver; the daily job does not depend on that copy or a Mac being online.
+
+Copy [the verifier configuration](deploy/backup-r2-verifier.example.json) to a
+private root-owned `0600` file. Its `receiver_config_file` references the root
+operator config, not the upload user's config. `directory` is separate from
+upload state and root proof/control paths are separate from the helper's writable
+payload. `identity_file` points to the root-only age key. `helper_image` must be
+an immutable image ID built from reviewed exact current main with successful CI;
+`helper_revision` is that exact source revision. `postgres_image` is the official
+PostgreSQL 18 digest pinned by the reviewed messaging Dockerfile. Replace the
+example helper ID/revision; the placeholders are not runnable images. Build and
+inspect these candidates before installing or enabling the service.
+
+Run one coordinator invocation using the private config:
+
+```sh
+/opt/deedkit-backup-r2/venv/bin/python -m messaging_service.backup_r2_verifier \
+  --config /etc/deedkit-backup-r2/verifier.json
+```
+
+The coordinator skips an already protected current ID. With no new committed
+candidate it is idle; exactly one unprotected committed candidate may be
+selected. Orphan objects, multipart uploads, unresolved attempts or ambiguous
+candidates block new work. It streams the full cloud GET directly into an
+isolated `backup_restore_worker` helper and hashes/counts the exact consumed
+ciphertext, without staging a complete encrypted file on receiver disk.
+
+The helper receives the recovery key read-only and plaintext workspace access,
+with no R2 credentials, producer DSN, delivery key, shared application volumes or
+Docker socket. PostgreSQL and helper containers use an exact owned internal
+network with no egress and no published host ports. Their images and resource
+limits are explicit: the helper has 512 MiB and PostgreSQL 1 GiB, with one restore
+job. These container bounds still require host headroom; this is not application
+startup or permission to disturb existing services on a 4 GiB receiver.
+
+Successful verification requires authenticated age EOF and exact full cloud
+ciphertext size/SHA256, bundle/manifest integrity, actual PostgreSQL restore,
+table inventory and hashes, original file hashes, cold recovery objects and
+quarantine. Database verification precedes quarantine changes. Record the actual
+restored schema without running application initialization or migrations. Only
+after all seven proof checks are true may the coordinator call initial `protect`
+or exact-marker `rotate`. It never substitutes upload/HEAD success for restore.
+
+Plaintext originals, dump and restored database still need disk space. When work
+and Docker share a filesystem, preflight reserves the selected ciphertext's
+wire size plus PostgreSQL headroom and the free-space reserve. With a candidate
+up to the example's 40 GiB bound, 8 GiB headroom and 2 GiB reserve, plan for up to
+**50 GiB free**. Separate filesystems must each pass their respective work or
+database requirement with reserve. These are planning bounds, not a filesystem
+quota or a guarantee about future database growth.
+Measure available disk and RAM alongside the host's other projects. On a small
+receiver, leave memory for the host and existing applications; do not increase
+helper/PostgreSQL limits or delete shared data to make admission pass.
+
+The coordinator keeps root-owned `active.json`, `status.json`, `last-success.json`
+and proof evidence outside the helper's writable payload. A failed download,
+decryption, restore, quarantine, promotion or cleanup remains a failed job.
+Verification failure never authorizes discarding the previous point. If a
+failure follows marker promotion, the newly verified point may already be
+protected; inspect the durable phase before retrying. Preserve candidate, receipt,
+proof, prior marker digest and journal for retry. After interruption, reconcile
+the owned attempt before another candidate. Stop/remove only the exact labelled
+helper, PostgreSQL container, network and volumes created by that attempt;
+never prune shared Docker objects or another project's data. Private plaintext
+and restore credentials must not remain in logs, Git or packaged artifacts.
+
+## Scheduling and enrollment
+
+The generic [oneshot service](deploy/deedkit-backup-r2-verifier.service) and
+[timer](deploy/deedkit-backup-r2-verifier.timer) run the receiver coordinator as
+root. They do not schedule source captures or deploy services. Install them only
+after adapting paths and reviewing configuration and image provenance. The
+timer waits 15 minutes after an invocation ends, plus its configured random delay
+and timer accuracy, so a delayed daily upload or transient verification failure
+can be picked up without an operator Mac.
+Systemd does not start a second copy of the same oneshot service while it runs;
+the coordinator's durable state/locking remains necessary for manual invocations
+and crash recovery. The 21900-second service start limit gives the configured
+21600-second job deadline a cleanup margin. Match these values if changing the
+deadline; do not shorten the service timeout below the actual restore budget.
+See the [systemd timer contract](https://github.com/systemd/systemd/blob/main/man/systemd.timer.xml)
+for monotonic timing and active-unit behavior.
+
+Before enabling the timer, run a server-native synthetic drill with a dedicated
+synthetic prefix/config, real age encryption, the pinned helper/PostgreSQL images
+and no real accounts or production data. Verify all seven checks, protect/rotate,
+repeat invocation, failure status/retry and exact owned cleanup. Inspect network
+isolation, mounts, memory/disk peaks and private file ownership. This drill proves
+the synthetic server path; an actual compatible snapshot and its independent
+restore remain separate enrollment/release evidence.
+
+For an initial capacity-constrained migration, an operator computer may perform
+the **one-time** restore of the selected cloud bootstrap point. Verify the full
+R2 ciphertext and independent restore proof before cloud protection; only then
+remove exact obsolete local archives under a separate reviewed operation. This
+frees local capacity for future server restores. Preserve the old protected copy
+until cloud acceptance, and preserve its marker/proof/journal. Normal subsequent
+captures, server verification and rotation do not require that computer. An old
+bootstrap point does not satisfy the fresh pre-migration snapshot gate.
+
+After synthetic acceptance and actual enrollment, install the reviewed examples
+under `/etc/systemd/system/`, then explicitly enable the timer:
+
+```sh
+systemctl daemon-reload
+systemctl enable --now deedkit-backup-r2-verifier.timer
+systemctl list-timers deedkit-backup-r2-verifier.timer
+systemctl status deedkit-backup-r2-verifier.service
+```
+
+Inspect private coordinator status and the actual protected point after the
+first scheduled run. Enabling a timer or seeing an active unit is not evidence
+of a completed restore. Source snapshot freshness, delivery and verifier failure
+status need operational monitoring; these unit examples do not send alerts or
+establish a live RPO/RTO. Disable only this timer if enrollment fails; retain its
+private evidence and reconcile its exact owned resources.
 
 ## First protected point and one-point rotation
 
@@ -264,9 +404,9 @@ or automatic deletion to hide the failure.
 
 Do not schedule `--prune --max-copies 1` on the old receiver or apply age/count
 pruning to cloud objects. Disable the old scheduled count/daily/weekly prune
-before enrollment of this policy. No unattended independent restore scheduler
-is supplied by this receiver: automation must actually establish the same proof
-before promotion and report failures. Upload completion alone never rotates.
+before enrollment of this policy. The upload receiver itself does not schedule
+restores. The separately enabled root verifier and timer above establish the
+independent proof before promotion; upload completion alone never rotates.
 
 ## Unknown outcomes and migration from local archives
 
