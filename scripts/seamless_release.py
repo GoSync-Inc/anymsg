@@ -363,7 +363,7 @@ def isolate(settings, documents, images, release, generation, sha):
         directory = Path(release) / role
         directory.mkdir(mode=0o700)
         if os.geteuid() == 0:
-            directory.chown(10001, 10001)
+            os.chown(directory, 10001, 10001)
         private['controls'][role] = str(directory / 'control.sock')
         unit.setdefault('volumes', []).append({'type': 'bind', 'source': str(directory), 'target': '/run/deedkit/release'})
         environment = unit.get('environment') or {}
