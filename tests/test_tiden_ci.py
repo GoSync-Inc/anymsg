@@ -663,7 +663,12 @@ def pull_request_checkout(tmp_path, change, merge=True):
     (lambda root, git: (root / "services/gateway/src/app.py").write_text("changed\n"), True),
     (lambda root, git: git("mv", "services/gateway/src/app.py", "docs/app.py"), True),
     (lambda root, git: git("rm", "-q", "LICENSE"), True),
-], ids=["readme", "docs", "deploy", "service-source", "renamed-out-of-a-service", "deleted-license"])
+    # Git quotes these names in its default output; the decision must still see them.
+    (lambda root, git: (root / "services/gateway/src/модуль.py").write_text("new\n"), True),
+    (lambda root, git: (root / 'services/gateway/src/with"quote.py').write_text("new\n"), True),
+    (lambda root, git: (root / "docs/заметки.md").write_text("new\n"), False),
+], ids=["readme", "docs", "deploy", "service-source", "renamed-out-of-a-service", "deleted-license",
+        "non-ascii-service-source", "quoted-service-source", "non-ascii-docs"])
 def test_pull_request_builds_images_only_when_an_image_input_changes(tmp_path, change, build):
     checkout, head = pull_request_checkout(tmp_path, change)
     outputs, summary = image_decision(checkout, tmp_path, "pull_request", head)
@@ -705,6 +710,7 @@ def test_image_build_job_is_gated_only_by_the_change_decision():
     # A skipped build leaves the called workflow green; a failed decision or build turns it red,
     # and the CI gate requires `images` to succeed. Main push runs keep `images / build (<target>)`.
     assert build["needs"] == "changes" and build["if"] == "${{ needs.changes.outputs.build == 'true' }}"
+    assert "name" not in build  # production.py finds `images / build (backup)` by the job key
     assert build["strategy"]["matrix"]["target"] == [
         "runtime", "indexer", "enricher-local", "whatsapp-native", "gateway", "calendar", "calls", "backup"]
     assert build["steps"][-1]["run"] == 'python3 scripts/production.py check-image --target "$TARGET"'
@@ -714,9 +720,9 @@ def dockerfile_sources(dockerfile, stage):
     """Paths a target stage copies from its build context, following FROM and COPY --from stages."""
     import re
     stages, current = {}, None
-    for line in dockerfile.read_text().splitlines():
+    for line in re.sub(r"\\\n", " ", dockerfile.read_text()).splitlines():
         line = line.strip()
-        if match := re.match(r"FROM\s+(\S+)(?:\s+AS\s+(\S+))?$", line, re.I):
+        if match := re.match(r"FROM\s+(?:--\S+\s+)*(\S+)(?:\s+AS\s+(\S+))?$", line, re.I):
             current = match.group(2) or f"#{len(stages)}"
             stages[current] = {"parents": {match.group(1)}, "sources": []}
         elif current and (match := re.match(r"(?:COPY|ADD)\s+(.+)$", line, re.I)):
@@ -737,7 +743,7 @@ def dockerfile_sources(dockerfile, stage):
     return sources
 
 
-def test_image_inputs_cover_every_source_the_image_targets_build_from():
+def test_image_inputs_cover_every_source_the_image_targets_build_from(tmp_path):
     import importlib.util
     root, jobs, _, inputs = image_workflow()
     spec = importlib.util.spec_from_file_location("production_builds", root / "scripts/production.py")
@@ -758,3 +764,7 @@ def test_image_inputs_cover_every_source_the_image_targets_build_from():
     # The parser follows only the stages a target needs: the test stage's deploy/ is not an input.
     assert "deploy" in dockerfile_sources(root / "services/messaging/Dockerfile", "test")
     assert not covered("deploy/compose.yaml") and not covered("docs/README.md")
+    # Continued COPY lines and FROM options are parsed too, so a later Dockerfile edit cannot hide a source.
+    (tmp_path / "Dockerfile").write_text("FROM --platform=linux/amd64 base AS build\nCOPY a \\\n    b ./\n"
+                                         "FROM build AS final\nCOPY --from=build /out /out\n")
+    assert dockerfile_sources(tmp_path / "Dockerfile", "final") == ["a", "b"]
