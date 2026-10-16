@@ -9,8 +9,10 @@ Sending is implemented in the source with explicit account opt-in and per-key
 permissions; see [SENDING.md](SENDING.md).
 
 1. Run CI with synthetic PostgreSQL, Python and Node tests. Build the wheel,
-   sdist and npm tarball. Inspect their inventories; install them outside the
-   checkout and verify CLI/help/imports and immutable SQL/Node assets.
+   sdist and both npm tarballs (`anymsg` and `deedkit`) with `python scripts/build.py`,
+   then run `uv run python scripts/check_release.py <version>`. Inspect their
+   inventories; install them outside the checkout and verify CLI/help/imports
+   and immutable SQL/Node assets.
 2. Review staged paths and diff, plus private-data scans. Commit and tag the
    reviewed source. Keep deployment upgrades separate from registry releases.
 3. Configure PyPI Trusted Publishing, then dispatch `publish-pypi.yml` on the tag.
@@ -25,6 +27,42 @@ permissions; see [SENDING.md](SENDING.md).
    an already published version cannot be overwritten.
 6. Verify the public registry versions and hashes, then link them from the
    GitHub prerelease. Never report publishing success based only on a build.
+
+## deedkit npm first publication
+
+`deedkit` (`packages/deedkit`) is the gateway client and CLI; `anymsg` keeps its
+name for compatibility. Both carry the messaging release version. CI does not
+build or publish `deedkit` yet, so its first version is published by hand by the
+owner, from the tagged source, after the tag's required CI is green:
+
+1. From a clean checkout of tag `v<version>`, run `python scripts/build.py` and
+   `uv run python scripts/check_release.py <version>`. List the tarball with
+   `tar tzf dist/deedkit-<version>.tgz`: only `package.json`, `README.md`,
+   `LICENSE`, `THIRD_PARTY_NOTICES.md`, `lib/` and `bin/`.
+2. In an empty directory outside the checkout, run
+   `npm install --ignore-scripts <checkout>/dist/deedkit-<version>.tgz`, then
+   `./node_modules/.bin/deedkit --version` and `./node_modules/.bin/deedkit tools`.
+3. `npm view deedkit` must still answer `E404` (the name is free). If it exists,
+   stop: someone else owns it.
+4. Sign in with `npm login` as the owning npm account, which has two-factor
+   authentication, and run `npm publish <checkout>/dist/deedkit-<version>.tgz
+   --access public`, completing the 2FA prompt in the terminal. Publish the
+   inspected tarball, not the source directory. Do not create an automation
+   token and do not paste one-time codes into an issue or chat. A manual
+   publication carries no provenance attestation.
+5. Check `npm view deedkit@<version> version dist.shasum dist.integrity`
+   against `shasum dist/deedkit-<version>.tgz` and the integrity printed by
+   `npm pack`, then record the receipt with the GitHub prerelease.
+6. In the package's npm settings, set publishing access to require 2FA and
+   disallow tokens. Configure its Trusted Publisher (GitHub Actions,
+   `GoSync-Inc`/`deedkit`, workflow `publish-npm.yml`, environment `npm`) only
+   when that workflow can publish `deedkit`: a new publisher must publish within
+   two days or its configuration expires. Today `publish-npm.yml` publishes the
+   `npm-dist` artifact, which `checks.yml` fills only with `anymsg`. The pending
+   follow-up packs `deedkit` and runs its tests in `checks.yml`, and makes
+   `publish-npm.yml` publish each tarball by its exact name; a `dist/*.tgz` glob
+   that matches two tarballs must not reach `npm publish`. Until then, later
+   `deedkit` versions are published by hand the same way.
 
 ## PyPI first publication without a stored token
 
