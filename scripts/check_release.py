@@ -44,24 +44,25 @@ with tarfile.open(sdist) as t:
     safe(t.getnames())
     for required in ('Dockerfile','media_benchmark.py','LICENSE','SETUP.md','licenses/age-LICENSE'):
         assert f'anymsg-{version}/{required}' in t.getnames(), required
-def npm_inventory(path, name, required):
+def npm_inventory(path, name, files):
+    # Exactly the reviewed files, each byte-identical to the source, including
+    # package.json: an added member or install script fails the check.
     with tarfile.open(path) as t:
         names = t.getnames()
         safe(names)
+        assert sorted(names) == sorted(f'package/{member}' for member in files), names
+        for member in files:
+            assert t.getmember(f'package/{member}').isfile(), member
+            assert t.extractfile(f'package/{member}').read() == (root/'packages'/name/member).read_bytes(), member
         manifest = json.load(t.extractfile('package/package.json'))
         assert manifest['name'] == name and manifest['version'] == version, path.name
-        for member in names:
-            assert member in {'package/package.json','package/README.md','package/LICENSE','package/THIRD_PARTY_NOTICES.md'} or member.startswith(('package/lib/','package/bin/')),member
-        for member in required:
-            source = root/'packages'/name/member
-            assert t.extractfile(f'package/{member}').read() == source.read_bytes(), member
 
 with tarfile.open(root/'dist'/f'anymsg-{version}.tgz') as t:
     safe(t.getnames())
     assert json.load(t.extractfile('package/package.json'))['version'] == version
     for member in t.getnames():
         assert member in {'package/package.json','package/README.md','package/LICENSE','package/THIRD_PARTY_NOTICES.md'} or member.startswith(('package/lib/','package/bin/')),member
-deedkit_files = ('lib/index.js','lib/index.d.ts','lib/tools.json','bin/deedkit.js','README.md','LICENSE','THIRD_PARTY_NOTICES.md')
+deedkit_files = ('package.json','README.md','LICENSE','THIRD_PARTY_NOTICES.md','lib/index.js','lib/index.d.ts','lib/tools.json','bin/deedkit.js')
 built = root/'dist'/f'deedkit-{version}.tgz'
 if built.is_file():
     npm_inventory(built, 'deedkit', deedkit_files)

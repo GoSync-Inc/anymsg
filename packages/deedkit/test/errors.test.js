@@ -94,3 +94,32 @@ test('non-code error strings and identifiers are redacted', async () => {
     return true;
   });
 });
+
+test('a coded 5xx is unknown for a mutation unless the gateway answered before dispatch', async () => {
+  await assert.rejects(replying({error: 'gateway_timeout', retryable: true}, 504).call('messages_send_message', {}),
+    error => error.code === 'gateway_timeout' && error.outcome === 'unknown' && error.retryable === false);
+  await assert.rejects(replying({error: 'gateway_timeout', retryable: true}, 504).call('messages_search', {}),
+    {code: 'gateway_timeout', outcome: 'rejected', retryable: true});
+  for (const code of ['backend_busy', 'backend_configuration_requires_restart', 'backend_capability_contract_unavailable',
+    'policy_unavailable'])
+    await assert.rejects(replying({error: code}, 503).call('calendar_apply', {}), {code, outcome: 'rejected'});
+  await assert.rejects(replying({error: 'backend_unavailable', phase: 'operation'}, 503).call('calendar_apply', {}),
+    {code: 'backend_unavailable', outcome: 'unknown'});
+});
+
+test('a release switch answer is retryable after its Retry-After', async () => {
+  const client = new DeedKitClient({...options, fetch: async () => new Response('{"error":"release_unavailable"}',
+    {status: 503, headers: {'content-type': 'application/json', 'retry-after': '1'}})});
+  await assert.rejects(client.call('messages_send_message', {}), error => error.code === 'release_unavailable' &&
+    error.outcome === 'rejected' && error.retryable === true && error.retryAfterSeconds === 1);
+});
+
+test('a failing body cancel never replaces the classified error', async () => {
+  for (const [status, headers] of [[302, {location: 'https://elsewhere.example'}],
+    [200, {'content-type': 'text/html'}], [200, {'content-type': 'application/json', 'content-length': '999999999'}]]) {
+    const body = new ReadableStream({pull() {}, cancel() { throw new Error('synthetic cancel failure'); }});
+    const client = new DeedKitClient({...options, fetch: async () => new Response(body, {status, headers})});
+    await assert.rejects(client.call('messages_send_message', {}), error => error instanceof DeedKitError &&
+      error.outcome === 'unknown' && !error.message.includes('synthetic cancel'));
+  }
+});

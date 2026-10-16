@@ -41,16 +41,24 @@ diagnostics: `retryable`, `retryAfterSeconds`, `nextAction`, `requestId`,
 `gatewayRequestId`, `operationSent`, `phase`, `reason`, `backendError` and
 `backendStatus`. Free text from the gateway or a backend is never copied into
 the error. Client failures use `transport_error`, `request_aborted`,
-`redirect_refused`, `invalid_response` or `response_too_large`.
+`redirect_refused`, `invalid_response`, `response_too_large` or `http_error`
+(an error body without a usable code). Downloads add `invalid_download_url`,
+`attachment_not_downloadable` (no original is available yet; `reason` carries
+the attachment status), `output_unavailable` and `download_integrity_error`.
 
 `outcome` is `rejected` or `unknown`. It is `unknown` for the gateway's
 `mutation_outcome_unknown`, and for any tool that can change state when the
 client got no definitive gateway answer after sending it: a timeout, a broken
-connection, a redirect or an unreadable response. An unknown outcome is never
-`retryable`. The action may already have happened, so do not repeat it and do
-not create a replacement request ID. Check its status with the original request
-ID (for example `messages_get_send_status`, `messages_get_messenger_operation`,
-`calls_get_call_status`) or ask the owner. See SENDING.md in the repository.
+connection, a redirect, an unreadable response, or a 5xx other than the
+gateway's answers given before dispatch (`backend_busy`, `release_unavailable`,
+`backend_configuration_requires_restart`, `backend_capability_contract_unavailable`,
+`policy_unavailable`, or `backend_unavailable` with `operation_sent: false`).
+An unknown outcome is never `retryable`. The action may already have happened:
+do not repeat it automatically and never create a replacement request ID. Look
+it up in history (for example `messages_get_updates`,
+`messages_list_messenger_operations` or `calls_list_calls`) or ask the owner.
+For a send, SENDING.md allows one recovery: the same `request_id` with the exact
+same payload, which the server deduplicates.
 
 ## Download an original file
 
@@ -60,7 +68,8 @@ await deedkit.downloadAttachment({ attachment_id: id }, './invoice.pdf');
 await deedkit.downloadFile(grant, './invoice.pdf');
 ```
 
-The grant's `download_url` must be a `/v1/files/<ticket>` URL of the configured
+The grant's `download_url` must be a `/v1/files/<ticket>` URL (or, during a
+release switch, `/_releases/<generation>/v1/files/<ticket>`) of the configured
 gateway; any other URL is refused before a request. The ticket is the temporary
 credential, so the gateway key is not sent with it. The client creates a new
 file with mode 600 (never overwriting), checks the byte count and SHA-256 from

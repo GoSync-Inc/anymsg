@@ -1,7 +1,8 @@
 import {test} from 'node:test';
 import assert from 'node:assert/strict';
 import {createHash} from 'node:crypto';
-import {existsSync, mkdtempSync, readFileSync, rmSync, statSync, writeFileSync} from 'node:fs';
+import {existsSync, mkdtempSync, readFileSync, renameSync, rmSync, statSync, writeFileSync} from 'node:fs';
+import {open} from 'node:fs/promises';
 import {tmpdir} from 'node:os';
 import {join} from 'node:path';
 import {DeedKitClient} from '../lib/index.js';
@@ -99,5 +100,56 @@ test('integrity failures and gateway errors leave no partial file', async () => 
       await assert.rejects(client.downloadFile(grant(), output), {code});
       assert.ok(!existsSync(output), code);
     }
+  } finally { rmSync(dir, {recursive: true, force: true}); }
+});
+
+test('short writes are completed and a stalled write leaves no file', async () => {
+  const dir = directory();
+  const probe = await open(join(dir, 'probe'), 'w');
+  const prototype = Object.getPrototypeOf(probe);
+  await probe.close();
+  const original = prototype.write;
+  try {
+    // At most 5 bytes per call, as a nearly full disk may do.
+    prototype.write = function(buffer, offset, length) { return original.call(this, buffer, offset, Math.min(length, 5)); };
+    const client = new DeedKitClient({baseUrl: 'https://gateway.example/deedkit', token, fetch: async () => fileResponse()});
+    const output = join(dir, 'short.bin');
+    await client.downloadFile(grant(), output);
+    assert.deepEqual(readFileSync(output), bytes);
+    prototype.write = async function() { return {bytesWritten: 0}; };
+    const stalled = join(dir, 'stalled.bin');
+    await assert.rejects(client.downloadFile(grant(), stalled), {code: 'output_unavailable'});
+    assert.ok(!existsSync(stalled));
+  } finally { prototype.write = original; rmSync(dir, {recursive: true, force: true}); }
+});
+
+test('cleanup never removes a file that replaced the output path', async () => {
+  const dir = directory();
+  try {
+    const output = join(dir, 'file.bin');
+    const fetch = async () => new Response(new ReadableStream({pull(controller) {
+      renameSync(output, join(dir, 'moved.bin'));
+      writeFileSync(output, 'someone else');
+      controller.error(new Error('cut'));
+    }}), {status: 200});
+    const client = new DeedKitClient({baseUrl: 'https://gateway.example/deedkit', token, fetch});
+    await assert.rejects(client.downloadFile(grant(), output), {code: 'transport_error'});
+    assert.equal(readFileSync(output, 'utf8'), 'someone else');
+  } finally { rmSync(dir, {recursive: true, force: true}); }
+});
+
+test('an attachment without an available original is not a usage error', async () => {
+  const dir = directory();
+  try {
+    let calls = 0;
+    const client = new DeedKitClient({baseUrl: 'https://gateway.example/deedkit', token, fetch: async () => {
+      calls++;
+      return Response.json({attachment_id: 'fixture', status: 'pending'});
+    }});
+    const output = join(dir, 'x');
+    await assert.rejects(client.downloadAttachment({attachment_id: 'fixture'}, output),
+      {code: 'attachment_not_downloadable', reason: 'pending', outcome: 'rejected'});
+    assert.equal(calls, 1);
+    assert.ok(!existsSync(output));
   } finally { rmSync(dir, {recursive: true, force: true}); }
 });

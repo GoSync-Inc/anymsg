@@ -61,7 +61,8 @@ owner, from the tagged source, after the tag's required CI is green:
    `npm-dist` artifact, which `checks.yml` fills only with `anymsg`. The pending
    follow-up packs `deedkit` and runs its tests in `checks.yml`, and makes
    `publish-npm.yml` publish each tarball by its exact name; a `dist/*.tgz` glob
-   that matches two tarballs must not reach `npm publish`. Until then, later
+   that matches two tarballs must not reach `npm publish`, so the publish change
+   lands no later than `checks.yml` starts packing `deedkit`. Until then, later
    `deedkit` versions are published by hand the same way.
 
 ## PyPI first publication without a stored token

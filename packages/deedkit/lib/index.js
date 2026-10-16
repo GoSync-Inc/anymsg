@@ -1,6 +1,6 @@
 import {createHash} from 'node:crypto';
 import {constants, readFileSync} from 'node:fs';
-import {open, unlink} from 'node:fs/promises';
+import {lstat, open, unlink} from 'node:fs/promises';
 
 // The reviewed gateway catalog (services/gateway/src/agent_gateway/catalog.json)
 // plus platform_capabilities. A drift test keeps this list equal to the catalog.
@@ -17,6 +17,11 @@ const CODE = /^[a-z][a-z0-9_]{0,63}$/;
 const REQUEST_ID = /^(?:[0-9a-f]{32}|[0-9a-f]{8}(?:-[0-9a-f]{4}){3}-[0-9a-f]{12})$/i;
 export const UNKNOWN_OUTCOME = 'mutation_outcome_unknown';
 const DO_NOT_RETRY = 'verify_outcome_do_not_retry';
+// Gateway answers given before a call reaches its backend (dispatch.py, http_clients.py,
+// the release switch in platform_contracts/release.py). Any other 5xx for a
+// state-changing tool may follow a forwarded request.
+const NOT_DISPATCHED = new Set(['backend_configuration_requires_restart', 'backend_busy',
+  'backend_capability_contract_unavailable', 'policy_unavailable', 'release_unavailable']);
 
 export class DeedKitError extends Error {
   constructor(code, {status = 0, tool = null, outcome = 'rejected', retryable = false, requestId = null,
@@ -79,31 +84,41 @@ function code(value) { return typeof value === 'string' && CODE.test(value) ? va
 
 // Keep only bounded machine fields from a gateway error body. Free text (hints,
 // backend bodies, message content) never reaches the error object or its log line.
-function gatewayError(tool, status, body) {
+function gatewayError(tool, status, body, headers) {
   const known = code(body.error);
+  const undispatched = NOT_DISPATCHED.has(known) || known === 'backend_unavailable' && body.operation_sent === false;
   const unknown = known === UNKNOWN_OUTCOME || body.outcome === 'unknown' || body.unknown_outcome === true ||
-    (READ_ONLY.get(tool) === false && status >= 500 && !known);
+    (READ_ONLY.get(tool) === false && status >= 500 && !undispatched);
   const integer = (value, maximum) => Number.isSafeInteger(value) && value >= 0 && value <= maximum ? value : null;
   const requestId = typeof body.request_id === 'string' && REQUEST_ID.test(body.request_id) ? body.request_id : null;
   const gatewayRequestId = typeof body.gateway_request_id === 'string' && /^[0-9a-f]{32}$/.test(body.gateway_request_id)
     ? body.gateway_request_id : null;
+  // A release switch answers 503 with only Retry-After; nothing was dispatched.
+  const switching = known === 'release_unavailable';
+  const header = headers?.get('retry-after');
+  const retryAfter = typeof body.retry_after_seconds === 'number' ? body.retry_after_seconds
+    : switching && /^\d{1,4}$/.test(header ?? '') ? Number(header) : null;
   return new DeedKitError(known ?? 'http_error', {status, tool, outcome: unknown ? 'unknown' : 'rejected',
-    retryable: body.retryable === true, requestId, gatewayRequestId, nextAction: code(body.next_action),
-    retryAfterSeconds: typeof body.retry_after_seconds === 'number' && Number.isFinite(body.retry_after_seconds) &&
-      body.retry_after_seconds >= 0 && body.retry_after_seconds <= 3600 ? body.retry_after_seconds : null,
+    retryable: body.retryable === true || switching, requestId, gatewayRequestId, nextAction: code(body.next_action),
+    retryAfterSeconds: Number.isFinite(retryAfter) && retryAfter >= 0 && retryAfter <= 3600 ? retryAfter : null,
     operationSent: typeof body.operation_sent === 'boolean' ? body.operation_sent : null,
     phase: code(body.phase), reason: code(body.reason), backendError: code(body.backend_error),
     backendStatus: integer(body.backend_status, 599)});
 }
 
+// Releasing a body is best effort: a failing cancel must not replace the classified error.
+async function discard(response) {
+  try { await discard(response); } catch {}
+}
+
 async function boundedJson(response, maximum) {
   const length = response.headers.get('content-length');
   if (length && /^\d+$/.test(length) && Number(length) > maximum) {
-    await response.body?.cancel();
+    await discard(response);
     throw new DeedKitError('response_too_large', {status: response.status});
   }
   if (!response.headers.get('content-type')?.toLowerCase().includes('application/json')) {
-    await response.body?.cancel();
+    await discard(response);
     throw new DeedKitError('invalid_response', {status: response.status});
   }
   const reader = response.body?.getReader();
@@ -116,7 +131,7 @@ async function boundedJson(response, maximum) {
       if (done) break;
       total += value.byteLength;
       if (total > maximum) {
-        await reader.cancel();
+        await reader.cancel().catch(() => {});
         throw new DeedKitError('response_too_large', {status: response.status});
       }
       chunks.push(value);
@@ -192,7 +207,7 @@ export class DeedKitClient {
         throw undecided(new DeedKitError(activeSignal.aborted ? 'request_aborted' : 'transport_error', {tool}));
       }
       if (response.status >= 300 && response.status < 400) {
-        await response.body?.cancel();
+        await discard(response);
         throw undecided(new DeedKitError('redirect_refused', {status: response.status, tool}));
       }
       let value;
@@ -200,7 +215,7 @@ export class DeedKitClient {
         throw undecided(error instanceof DeedKitError ? new DeedKitError(error.code, {status: response.status, tool})
           : new DeedKitError(activeSignal.aborted ? 'request_aborted' : 'transport_error', {status: response.status, tool}));
       }
-      if (!response.ok) throw gatewayError(tool, response.status, value);
+      if (!response.ok) throw gatewayError(tool, response.status, value, response.headers);
       return value;
     } finally { clearTimeout(timer); }
   }
@@ -239,18 +254,18 @@ export class DeedKitClient {
       } catch { throw new DeedKitError(activeSignal.aborted ? 'request_aborted' : 'transport_error'); }
       if (response.status !== 200) {
         if (response.status >= 300 && response.status < 400) {
-          await response.body?.cancel();
+          await discard(response);
           throw new DeedKitError('redirect_refused', {status: response.status});
         }
         let value;
         try { value = await boundedJson(response, 65536); } catch {
           throw new DeedKitError('http_error', {status: response.status});
         }
-        throw gatewayError(null, response.status, value);
+        throw gatewayError(null, response.status, value, response.headers);
       }
       const length = response.headers.get('content-length');
       if (length !== null && length !== String(grant.bytes)) {
-        await response.body?.cancel();
+        await discard(response);
         throw new DeedKitError('download_integrity_error', {status: response.status});
       }
       const digest = createHash('sha256');
@@ -261,7 +276,12 @@ export class DeedKitClient {
           total += chunk.byteLength;
           if (total > grant.bytes) throw new DeedKitError('download_integrity_error', {status: 200});
           digest.update(chunk);
-          await handle.write(chunk);
+          // A write may be short; never count bytes that did not reach the file.
+          for (let offset = 0; offset < chunk.byteLength;) {
+            const {bytesWritten} = await handle.write(chunk, offset, chunk.byteLength - offset);
+            if (bytesWritten < 1) throw new DeedKitError('output_unavailable');
+            offset += bytesWritten;
+          }
         }
       } catch (error) {
         if (error instanceof DeedKitError) throw error;
@@ -270,17 +290,28 @@ export class DeedKitClient {
       if (total !== grant.bytes || digest.digest('hex') !== grant.sha256)
         throw new DeedKitError('download_integrity_error', {status: 200});
       await handle.sync();
+      if ((await handle.stat()).size !== grant.bytes) throw new DeedKitError('output_unavailable');
       complete = true;
       return {path: output, bytes: total, sha256: grant.sha256};
     } finally {
       clearTimeout(timer);
+      const created = complete ? null : await handle.stat().catch(() => null);
       await handle.close().catch(() => {});
-      // Never leave a partial or unverified file behind under the requested name.
-      if (!complete) await unlink(output).catch(() => {});
+      // Never leave a partial or unverified file behind under the requested name, and
+      // remove only the file this call created: the path must still name it.
+      if (created) {
+        const current = await lstat(output).catch(() => null);
+        if (current?.isFile() && current.dev === created.dev && current.ino === created.ino)
+          await unlink(output).catch(() => {});
+      }
     }
   }
   async downloadAttachment(args, output, options = {}) {
     const grant = await this.call('messages_get_attachment', args, options);
+    // A pending or missing original is a normal answer without a ticket, not bad input.
+    if (typeof grant.download_url !== 'string')
+      throw new DeedKitError('attachment_not_downloadable', {status: 200, tool: 'messages_get_attachment',
+        reason: code(grant.status)});
     return {...await this.downloadFile(grant, output, options), filename: typeof grant.filename === 'string'
       ? grant.filename : null};
   }

@@ -120,7 +120,12 @@ test('the token must be a private regular file and is never echoed', async () =>
     symlinkSync(tokenFile, link);
     const linked = await run(['messages_search', '--url', 'https://gateway.example', '--token-file', link]);
     assert.equal(linked.code, 2);
-    for (const result of [open, linked]) assert.ok(!(result.stdout + result.stderr).includes(key));
+    const large = join(dir, 'large.key');
+    writeFileSync(large, key + ' '.repeat(4097 - key.length), {mode: 0o600});
+    const oversized = await run(['messages_search', '--url', 'https://gateway.example', '--token-file', large]);
+    assert.equal(oversized.code, 2);
+    assert.match(JSON.parse(oversized.stderr).detail, /4096 bytes/);
+    for (const result of [open, linked, oversized]) assert.ok(!(result.stdout + result.stderr).includes(key));
   } finally { rmSync(dir, {recursive: true, force: true}); }
 });
 

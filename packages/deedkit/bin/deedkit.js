@@ -10,8 +10,8 @@ const USAGE = 'DeedKit gateway client (an existing DeedKit gateway is required)\
   'DEEDKIT_URL and DEEDKIT_TOKEN_FILE may replace --url and --token-file.\n' +
   'Exit codes: 0 success, 1 rejected, 2 usage error, 3 outcome unknown (do not retry).\n' +
   'Tools: ' + tools.join(', ');
-const UNKNOWN_NOTICE = 'Outcome unknown: the action may already have happened. Do not retry it or create a ' +
-  'replacement request ID; check its status with the original request ID first.';
+const UNKNOWN_NOTICE = 'Outcome unknown: the action may already have happened. Do not retry it and never create ' +
+  'a replacement request ID; look it up in history or ask the owner first.';
 
 class Usage extends Error {}
 
