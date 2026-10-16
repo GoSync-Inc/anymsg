@@ -146,7 +146,14 @@ jobs:
           ANYMSG_TEST_POSTGRES_CONTAINER: ${{ job.services.postgres.id }}
           ANYMSG_TEST_WHEEL: ${{ github.workspace }}/dist/anymsg-${{ steps.build.outputs.version }}-py3-none-any.whl
           ANYMSG_TEST_SDIST: ${{ github.workspace }}/dist/anymsg-${{ steps.build.outputs.version }}.tar.gz
+          DEEDKIT_TEST_PYTHON_IMAGE: docker.io/library/python@sha256:a1165e272e578941b84abc79e4ab38a0305cd12803a5c4247979ac7655f4d641
         run: |
+          docker build --file services/release-router/Dockerfile --tag deedkit-release-router:ci \
+            --build-arg "VERSION_REF=$(git rev-parse HEAD)" \
+            --label "org.opencontainers.image.revision=$(git rev-parse HEAD)" \
+            --label org.opencontainers.image.source=https://github.com/GoSync-Inc/deedkit .
+          export DEEDKIT_TEST_ROUTER_IMAGE="$(docker image inspect --format '{{.Id}}' deedkit-release-router:ci)"
+          docker pull "$DEEDKIT_TEST_PYTHON_IMAGE"
           python - <<'PY'
           import os
           from pathlib import Path

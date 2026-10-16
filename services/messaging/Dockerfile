@@ -32,6 +32,7 @@ RUN groupadd -g 10001 probe && useradd -u 10001 -g probe -M probe \
 USER probe
 
 FROM python-dependencies AS runtime
+COPY packages/platform-contracts/src/platform_contracts ./platform_contracts
 COPY services/messaging/messaging_service ./messaging_service
 # Existing Telegram owner extension uses the collector's session and governor.
 COPY services/calls/telegram_broker.py services/calls/telegram_session_owner.py ./
@@ -48,6 +49,7 @@ CMD ["python", "-m", "messaging_service.file_index"]
 
 FROM indexer AS test
 USER root
+COPY packages/platform-contracts/src/platform_contracts ./platform_contracts
 # Contract tests inspect the same public deployment and workflow templates
 # distributed in the source checkout. No private files or Docker socket.
 COPY services/messaging/Dockerfile ./services/messaging/Dockerfile

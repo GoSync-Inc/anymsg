@@ -170,6 +170,11 @@ wheels = [
 ]
 
 [[package]]
+name = "deedkit-platform-contracts"
+version = "0.1.0"
+source = { editable = "packages/platform-contracts" }
+
+[[package]]
 name = "deedkit-workspace"
 version = "0.1.0"
 source = { virtual = "." }
@@ -179,6 +184,7 @@ dependencies = [
 
 [package.dev-dependencies]
 dev = [
+    { name = "deedkit-platform-contracts" },
     { name = "pytest" },
     { name = "pyyaml" },
     { name = "tiden-telemetry" },
@@ -189,6 +195,7 @@ requires-dist = [{ name = "anymsg", editable = "services/messaging" }]
 
 [package.metadata.requires-dev]
 dev = [
+    { name = "deedkit-platform-contracts", editable = "packages/platform-contracts" },
     { name = "pytest", specifier = "==9.1.1" },
     { name = "pyyaml", specifier = "==6.0.3" },
     { name = "tiden-telemetry", specifier = "==0.1.0" },

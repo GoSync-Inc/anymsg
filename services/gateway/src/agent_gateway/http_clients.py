@@ -6,6 +6,7 @@ from contextlib import asynccontextmanager
 import hashlib
 import json
 import time
+from urllib.parse import urlsplit
 
 import httpx
 
@@ -63,8 +64,9 @@ class UploadRate:
 
 
 class Clients:
-    def __init__(self, deployment, transports=None):
+    def __init__(self, deployment, transports=None, *, messaging_url=None):
         self.deployment, self.transports = deployment, transports or {}
+        self.messaging_url = messaging_url
         self.metadata, self.bulk, self.budgets, self.bulk_budgets = {}, {}, {}, {}
         self.uploads, self.upload_budgets = {}, {}
         self.waits, self.wait_budgets = {}, {}
@@ -75,6 +77,11 @@ class Clients:
         try:
             for module in self.deployment["modules"]:
                 target = self.deployment["backends"][module]
+                if module == "messaging" and self.messaging_url:
+                    # Dial only the paired HTTP generation. Keep the source
+                    # policy snapshot intact for dispatch and ticket guards.
+                    target = {**target, "url": self.messaging_url,
+                              "host_header": target.get("host_header") or urlsplit(target["url"]).netloc}
                 pools = [(self.metadata, 8), (self.bulk, 2)]
                 if module == "messaging":
                     pools.extend([(self.uploads, 2), (self.waits, 2)])

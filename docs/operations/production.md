@@ -1,5 +1,11 @@
 # Verified production promotion
 
+For ready-before-route gateway and messaging HTTP promotion, use the opt-in
+[seamless HTTP release protocol](seamless-release.md). It preserves the existing
+main/CI gate and keeps provider/session owners outside overlap. The `apply`
+sequence described below still performs an explicit stop/start of selected
+services; it is not a seamless HTTP promotion.
+
 Production changes follow PR → required CI → merge into `main` → CI on the
 actual main SHA → prepare → explicit apply. Use `scripts/production.py` for
 promotion. Direct source copies, ad hoc image overrides and `compose up --build`
@@ -59,6 +65,17 @@ containers and reconcile missing shell variables or settings drift. Container
 labels list Compose paths but do not capture shell environment overrides. The
 prepared snapshot preserves the resolved files; an explicit candidate review
 must confirm that they are the intended production settings.
+
+For public ingress, a running proxy and its Compose labels do not prove that a
+working deployment manifest or restart path still exists. Before changing its
+routing, retain a reviewed reproducible manifest pinned to its immutable image,
+with the existing certificate/state volumes and networks declared external under
+their exact names, the same listeners/configuration mounts, and persistent
+restart/startup settings. Resolve and compare it with the inspected live
+container, and validate the proxy configuration without recreating or reloading
+the serving listener. Missing source files or disabled restart persistence remain
+live enrollment blockers; source CI cannot establish these host conditions.
+See the [first HTTP enrollment procedure](seamless-release.md#internal-router-and-first-enrollment).
 
 Host-mounted code and import-path overrides are refused, including legacy
 Telegram bridge files mounted outside the image. Move such extensions into the
@@ -131,7 +148,18 @@ continuing to reference the previous image.
 Before applying, follow [backup/migration and rollback](platform-cutover.md).
 This tool does not run migrations, prove data compatibility, authorize external
 actions, or perform provider readback. A schema change needs the module's explicit
-migration procedure and compatible backup first. Preparation is not that approval.
+migration procedure and a fresh compatible backup first. Confirm that the pinned
+backup/restore runtimes support both the current database schema and the planned
+target. Resolve delivery failures, including receiver quota/capacity failures,
+before taking the pre-migration snapshot; use a reviewed retention/storage change
+that preserves the protected restore anchor. Confirm durable receiver delivery,
+retain the snapshot ID/time/schema, image revision, ciphertext size/hash and
+receipt privately, and verify an isolated quarantine restore using the module's
+[backup procedure](../../BACKUP.md). Calculate freshness from the snapshot time,
+not from a later delivery retry. A failed delivery, local-only snapshot or stale
+receipt does not establish this gate. The deployment tool does not verify these
+live backup conditions; preparation and successful source CI are not migration
+approval.
 
 ## Apply and verify
 

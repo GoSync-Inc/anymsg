@@ -325,6 +325,17 @@ class Boundary:
 
 def create_app(store: Store, allowed_hosts: list[str]):
     redact_library_logs()
+    # The source/wheel remains independent of platform packages. Docker copies
+    # the stdlib lifecycle contract only for explicitly enabled release mode.
+    import os
+    release = None
+    if any(name in os.environ for name in (
+            'DEEDKIT_RELEASE_ID', 'DEEDKIT_RELEASE_SHA', 'DEEDKIT_RELEASE_SOCKET')):
+        from platform_contracts.release import ReleaseRuntime
+        from .release import readiness
+        async def ready():
+            return await run_in_threadpool(readiness, store)
+        release = ReleaseRuntime.from_env(ready, file_paths=('/v1/download/',))
     mcp=MCPServer('AnyMsg',version=__version__,instructions=
         'Read capabilities for account scope, source coverage and synthetic-data status. '
         'Message tools default to conversation view: preserve returned order, use display_text and kind, '
@@ -984,7 +995,9 @@ def create_app(store: Store, allowed_hosts: list[str]):
     async def lifespan(application):
         async def sweep_uploads():
             while True:
-                try:await run_in_threadpool(store.cleanup_file_uploads)
+                try:
+                    if release is None or release.phase == 'active':
+                        await run_in_threadpool(store.cleanup_file_uploads)
                 except Exception:log.error('upload_cleanup_unavailable')
                 await asyncio.sleep(60)
         async with sdk_lifespan(application) as state:
@@ -995,4 +1008,6 @@ def create_app(store: Store, allowed_hosts: list[str]):
                     task.cancel()
                     with suppress(asyncio.CancelledError):await task
     app.router.lifespan_context=lifespan
-    return Boundary(app,store,allowed_hosts,models)
+    boundary = Boundary(app,store,allowed_hosts,models)
+    boundary.release = release
+    return release.wrap(boundary) if release else boundary
