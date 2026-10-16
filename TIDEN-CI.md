@@ -56,6 +56,16 @@ CI runs on `push` only for `main`. A feature branch is verified by its pull
 request run, so a push does not repeat CI or publish a second copy of the
 evidence to a same-named Tiden branch.
 
+Each `main` push run has its own concurrency group, so neither a later merge
+nor a manual dispatch cancels it: every merged SHA keeps a complete CI result
+for promotion and for Tiden. Concurrent push runs can therefore publish to
+Tiden `main` out of SHA order; match evidence by its recorded SHA. A newer pull
+request run still cancels the older run of the same pull request, and a newer
+dispatch the older one of the same ref. A pull request run builds the container
+image targets only when its merge commit changes an image input listed in
+`.github/workflows/images.yml`; otherwise the build is skipped and `CI gate`
+stays green. Push, merge queue and dispatch runs always build them.
+
 A merge queue run (`merge_group`, Git branch `gh-readonly-queue/...`) verifies
 the temporary group commit with the same required checks, `CI gate` and
 `checks / verify`, but publishes nothing to Tiden and creates no Tiden branch.
