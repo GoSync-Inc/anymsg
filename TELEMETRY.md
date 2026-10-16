@@ -6,8 +6,8 @@ test coverage or prove that a feature works. Error tracking is off by default.
 DeedKit is the platform name. A messaging event's release is `deedkit@<sha>`,
 where `<sha>` is the full 40-character lowercase source commit in
 `DEEDKIT_SOURCE_SHA`. Set it only to the commit the running code was built from.
-Without a valid value, for example in a package installation or a local checkout,
-the release keeps the historical `anymsg@` plus `messaging_service.__version__`;
+Without a valid value, for example in a package installation, a local checkout or
+an image built without `DEEDKIT_SOURCE_SHA`, the release keeps the historical `anymsg@` plus `messaging_service.__version__`;
 that version is shared by several commits and does not identify a deployment. An
 invalid value is never sent. Historical `anymsg@` releases and their issue links
 are preserved, not relabelled. An event alone only names its release: the Tiden
@@ -40,7 +40,7 @@ The payload contains the release, environment, fixed component/error code,
 allowlisted exception type and public Python filenames/line numbers. Filenames are
 relative to the repository root (`services/messaging/messaging_service/<file>.py`),
 like Tiden component paths. Events sent before this used `messaging_service/<file>.py`;
-a recurring error therefore appears once as a new issue under the new paths.
+a recurring error may therefore appear once as a new issue under the new paths.
 It excludes exception text, cause chains, locals, source lines, absolute paths,
 HTTP bodies/headers/URLs, account/chat/person identifiers, search terms, messages,
 files and model inputs/outputs. SDK request/user/breadcrumb extras are discarded.
