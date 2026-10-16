@@ -238,9 +238,9 @@ def test_file_index_revision_digest_delete_and_inactive_invalidate_immediately(s
     drain(worker)
     with s.pool.connection() as c:
         c.execute("UPDATE messages SET revision=revision+1 WHERE id='demo-tg-1'")
-    assert ids(search(s, b, 'oldconfidential')) == []
+    assert ids(search(s, b, 'oldconfidential')) == ['file-stale']
     result = text(s, b, 'file-stale')
-    assert result['status'] == 'queued' and result['text'] == '' and result['revision'] == 2
+    assert result['status'] == 'ready' and result['text'] == 'oldconfidential' and result['revision'] == 2
     drain(worker)
     _, new_digest = original(s.files, b'newconfidential')
     with s.pool.connection() as c:
@@ -334,8 +334,10 @@ def test_file_index_separate_roles_trigger_enqueue_and_worker_grants(seeded):
         assert text(s, b, 'file-roles')['text'] == 'role-separated text'
         with restricted(collector) as c:
             c.execute("UPDATE messages SET revision=revision+1 WHERE id='demo-tg-1'")
-        assert text(s, b, 'file-roles')['status'] == 'queued'
-        assert worker.run_once()['status'] == 'ready'
+        retained = text(s, b, 'file-roles')
+        assert retained['status'] == 'ready' and retained['revision'] == 2
+        assert retained['text'] == 'role-separated text'
+        assert worker.run_once()['status'] == 'idle'
         with restricted(collector) as c:
             c.execute("UPDATE attachments SET active=false WHERE id='file-roles'")
         with pytest.raises(APIError, match='not_found'):

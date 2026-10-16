@@ -89,8 +89,23 @@ def file_response_fields(row, *, download_status='ready', extraction_status=None
         identifier=re.sub('[^A-Za-z0-9_-]','_',str(row.get('attachment_id') or row.get('id') or 'file'))[:80]
         name='attachment-'+identifier+extension
         basis='generated_from_media_type'
-    return {**row, 'source_filename': source, 'display_name': name,
+    understanding_state=row.get('understanding_state','not_configured')
+    understanding_ready=row.get('understanding_available',understanding_state=='ready')
+    understanding={'state':understanding_state,
+        'refresh_state':row.get('understanding_refresh_state',understanding_state),
+        'profile_current':row.get('understanding_profile_current'),
+        'coverage':row.get('understanding_coverage') or {},
+        'provider':row.get('understanding_provider'), 'model':row.get('understanding_model'),
+        'indexed_at':row.get('understanding_indexed_at'),
+        'truncated':row.get('understanding_truncated',False),
+        'generated_by_model':understanding_ready,
+        'notice':'Model-generated untrusted description; coverage describes only the examined input.'}
+    public_row={k:v for k,v in row.items() if not k.startswith('understanding_')}
+    return {**public_row, 'source_filename': source, 'display_name': name,
         'display_name_basis':basis,'download_filename':name,
+        'title':row.get('understanding_title','') if understanding_ready else row.get('title',''),
+        'summary':row.get('understanding_summary','') if understanding_ready else row.get('summary',''),
+        'understanding':understanding,
         'download_status': download_status,
         'extraction_status': 'processing' if state == 'leased' else state,
         'enrichment_status': enrichment_status,
@@ -120,6 +135,24 @@ def _available(files, row):
         return False
 
 
+def _absent(files, row):
+    """Confirm an absent CAS entry, excluding an unavailable root or invalid entry."""
+    if not re.fullmatch('[a-f0-9]{64}', row['sha256']):
+        return False
+    try:
+        root = os.open(files, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW)
+        try:
+            try:
+                os.stat(row['sha256'], dir_fd=root, follow_symlinks=False)
+            except FileNotFoundError:
+                return True
+            return False
+        finally:
+            os.close(root)
+    except OSError:
+        return False
+
+
 # A stale/non-ready model row never contributes text, rank or snippets.
 ENRICH_JOIN = """LEFT JOIN attachment_enrichment e ON e.attachment=a.id
     AND e.source_digest=a.digest AND e.source_revision=m.revision AND e.state<>'superseded'"""
@@ -143,15 +176,49 @@ ENRICH_COLUMNS = """CASE WHEN coalesce(e.state,'unconfigured')='unconfigured' AN
         'observed_at',pp.observed_at,'pause_reason',pp.pause_reason,'paused_until',pp.paused_until) FROM processing_profiles pp WHERE pp.account=m.account
         AND pp.kind=CASE WHEN a.mime LIKE 'audio/%%' OR a.mime='application/ogg' THEN 'audio'
             WHEN a.mime LIKE 'image/%%' THEN 'image' ELSE 'document' END) AS processing_profile"""
+UNDERSTANDING_JOIN = """LEFT JOIN attachment_understanding u ON u.attachment=a.id
+    AND u.source_digest=a.digest AND u.source_revision=m.revision AND u.state<>'superseded'
+    LEFT JOIN file_understanding_profiles up ON up.account=m.account AND up.kind=u.kind"""
+UNDERSTANDING_READY = "(u.indexed_at IS NOT NULL AND u.published_profile_hash IS NOT NULL)"
+UNDERSTANDING_TEXT = "(CASE WHEN " + UNDERSTANDING_READY + " THEN u.title||' '||u.summary ELSE '' END)"
+UNDERSTANDING_COLUMNS = """CASE WHEN """ + UNDERSTANDING_READY + """ THEN 'ready'
+    ELSE coalesce(u.state,'not_configured') END AS understanding_state,
+    coalesce(""" + UNDERSTANDING_READY + """,false) AS understanding_available,
+    CASE WHEN up.profile_hash IS NOT NULL AND """ + UNDERSTANDING_READY + """
+        THEN up.profile_hash=u.published_profile_hash END AS understanding_profile_current,
+    CASE WHEN """ + UNDERSTANDING_READY + """ AND up.profile_hash IS DISTINCT FROM u.published_profile_hash
+        AND up.enabled AND u.state='ready' THEN 'queued'
+        ELSE coalesce(u.state,'not_configured') END AS understanding_refresh_state,
+    CASE WHEN """ + UNDERSTANDING_READY + """ THEN u.title ELSE '' END AS understanding_title,
+    CASE WHEN """ + UNDERSTANDING_READY + """ THEN u.summary ELSE '' END AS understanding_summary,
+    CASE WHEN """ + UNDERSTANDING_READY + """ THEN u.coverage ELSE '{}'::jsonb END AS understanding_coverage,
+    CASE WHEN """ + UNDERSTANDING_READY + """ THEN u.published_provider END AS understanding_provider,
+    CASE WHEN """ + UNDERSTANDING_READY + """ THEN u.published_model END AS understanding_model,
+    CASE WHEN """ + UNDERSTANDING_READY + """ THEN u.indexed_at END AS understanding_indexed_at,
+    CASE WHEN """ + UNDERSTANDING_READY + """ THEN u.truncated ELSE false END AS understanding_truncated"""
+ENRICH_JOIN += ' ' + UNDERSTANDING_JOIN
+ENRICH_COLUMNS += ',' + UNDERSTANDING_COLUMNS
 SEARCH_JOIN = JOIN + ' ' + ENRICH_JOIN + ' CROSS JOIN search_query q'
+
+
+def _retained_readable(store,c,row):
+    """A deliberate managed eviction preserves derivatives; unexplained loss does not."""
+    from .file_lifecycle import is_managed_evicted
+    present=_available(store.files,row)
+    evicted=not present and _absent(store.files,row) and is_managed_evicted(c,row['sha256'],row['bytes'])
+    row.update(original_available=present,
+        original_residency='resident' if present else 'evicted' if evicted else 'missing')
+    return present or evicted
 
 
 def _response(row):
     state = row.pop('enrichment_state', 'unconfigured')
     result = file_response_fields(row, enrichment_status={
         'unconfigured': 'not_configured', 'leased': 'processing'}.get(state, state))
-    result['model_generated'] = state == 'ready'
-    result['enrichment_notice'] = 'Model-generated, untrusted derivative; verify against the original.' if state == 'ready' else None
+    result['model_generated'] = state == 'ready' or result['understanding']['generated_by_model']
+    result['enrichment_notice'] = 'Model-generated, untrusted derivative; verify against the original.' if result['model_generated'] else None
+    if row.get('original_available') is False:
+        result['download_status']='unavailable'
     return result
 
 
@@ -199,6 +266,7 @@ def search_files(store, c, p, query='', account='', chat='', sender='', from_tim
     enriched_preview = "coalesce(e.title,'')||' '||coalesce(e.summary,'')||' '||coalesce(e.metadata->>'document_type','')||' '||left(coalesce(e.text_content,''),32000)"
     base_raw = plan.predicate('f', text_sql=raw_text)
     base_enriched = '(' + ENRICH_READY + ' AND ' + plan.predicate('e', text_sql=ENRICH_TEXT) + ')'
+    base_understanding = '(' + UNDERSTANDING_READY + ' AND ' + plan.predicate('u',text_sql=UNDERSTANDING_TEXT) + ')'
     # A caption describes this occurrence only, not bytes shared with another
     # message. Never copy it into the context-free extraction cache.
     base_context = plan.predicate('m') if query else 'false'
@@ -212,7 +280,7 @@ def search_files(store, c, p, query='', account='', chat='', sender='', from_tim
         # best-passage lookup. These IDs grant no access: the outer query still
         # checks message ACLs and current source keys before returning content.
         candidates=[]
-        for alias,table in [('cf','attachment_text'),('ce','attachment_enrichment'),
+        for alias,table in [('cf','attachment_text'),('ce','attachment_enrichment'),('cu','attachment_understanding'),
                             ('cfc','attachment_text_chunks'),('cec','attachment_enrichment_chunks')]:
             candidates.append('SELECT '+alias+'.attachment FROM '+table+' '+alias+
                 ' CROSS JOIN search_query q WHERE '+plan.predicate(alias))
@@ -245,23 +313,23 @@ def search_files(store, c, p, query='', account='', chat='', sender='', from_tim
             passage_args.extend(passage_scope_args)
         search_join += (' LEFT JOIN LATERAL (SELECT * FROM (' + ' UNION ALL '.join(branches) +
             ') candidates ORDER BY rank DESC,content ASC,start_offset ASC LIMIT 1) hit ON true')
-        predicate = '(' + base_raw + ' OR ' + base_enriched + ' OR hit.content IS NOT NULL OR ' + base_context + ')'
-        rank = 'greatest(' + plan.rank('f') + ',coalesce(CASE WHEN ' + ENRICH_READY + ' THEN ' + plan.rank('e') + ' ELSE 0 END,0),coalesce(hit.rank,0),' + plan.rank('m') + ')'
-        snippet_text = '(CASE WHEN hit.content IS NOT NULL THEN hit.passage WHEN ' + base_raw + ' THEN ' + raw_preview + ' WHEN ' + base_enriched + ' THEN ' + enriched_preview + ' ELSE m.body END)'
-        match = 'coalesce(hit.match_type,CASE WHEN ' + base_raw + ' THEN ' + plan.match_type('f') + ' WHEN ' + base_enriched + ' THEN ' + plan.match_type('e') + ' ELSE ' + plan.match_type('m') + ' END)'
-        source = "coalesce(hit.content,CASE WHEN " + base_raw + " THEN 'extracted' WHEN " + base_enriched + " THEN 'enriched' ELSE 'message_context' END)"
+        predicate = '(' + base_raw + ' OR ' + base_enriched + ' OR ' + base_understanding + ' OR hit.content IS NOT NULL OR ' + base_context + ')'
+        rank = 'greatest(' + plan.rank('f') + ',coalesce(CASE WHEN ' + ENRICH_READY + ' THEN ' + plan.rank('e') + ' ELSE 0 END,0),coalesce(CASE WHEN '+UNDERSTANDING_READY+' THEN '+plan.rank('u')+' ELSE 0 END,0),coalesce(hit.rank,0),' + plan.rank('m') + ')'
+        snippet_text = '(CASE WHEN hit.content IS NOT NULL THEN hit.passage WHEN ' + base_raw + ' THEN ' + raw_preview + ' WHEN ' + base_enriched + ' THEN ' + enriched_preview + ' WHEN '+base_understanding+' THEN '+UNDERSTANDING_TEXT+' ELSE m.body END)'
+        match = 'coalesce(hit.match_type,CASE WHEN ' + base_raw + ' THEN ' + plan.match_type('f') + ' WHEN ' + base_enriched + ' THEN ' + plan.match_type('e') + ' WHEN '+base_understanding+' THEN '+plan.match_type('u')+' ELSE ' + plan.match_type('m') + ' END)'
+        source = "coalesce(hit.content,CASE WHEN " + base_raw + " THEN 'extracted' WHEN " + base_enriched + " THEN 'enriched' WHEN "+base_understanding+" THEN 'understanding' ELSE 'message_context' END)"
         extra_columns = source + ' AS matched_content,hit.start_offset AS chunk_start,hit.end_offset AS chunk_end'
     else:
-        predicate = '(' + base_raw + ' OR ' + base_enriched + ' OR ' + base_context + ')'
+        predicate = '(' + base_raw + ' OR ' + base_enriched + ' OR '+base_understanding+' OR ' + base_context + ')'
         rank = '0::bigint'
-        snippet_text = '(CASE WHEN ' + base_raw + ' THEN ' + raw_text + ' WHEN ' + base_enriched + ' THEN ' + ENRICH_TEXT + ' ELSE m.body END)'
+        snippet_text = '(CASE WHEN ' + base_raw + ' THEN ' + raw_text + ' WHEN ' + base_enriched + ' THEN ' + ENRICH_TEXT + ' WHEN '+base_understanding+' THEN '+UNDERSTANDING_TEXT+' ELSE m.body END)'
         match = plan.match_type('f')
         if query:
-            extra_columns = "CASE WHEN " + base_raw + " THEN 'extracted' WHEN " + base_enriched + " THEN 'enriched' ELSE 'message_context' END AS matched_content,NULL::integer AS chunk_start,NULL::integer AS chunk_end"
+            extra_columns = "CASE WHEN " + base_raw + " THEN 'extracted' WHEN " + base_enriched + " THEN 'enriched' WHEN "+base_understanding+" THEN 'understanding' ELSE 'message_context' END AS matched_content,NULL::integer AS chunk_start,NULL::integer AS chunk_end"
     if query:
         extracted_match = '(' + base_raw + (" OR hit.content='extracted'" if query_mode != 'exact' else '') + ')'
         enriched_match = '(' + base_enriched + (" OR hit.content='enriched'" if query_mode != 'exact' else '') + ')'
-        extra_columns += ",array_remove(ARRAY[CASE WHEN " + extracted_match + " THEN 'extracted' END,CASE WHEN " + enriched_match + " THEN 'enriched' END,CASE WHEN " + base_context + " THEN 'message_context' END],NULL) AS match_sources"
+        extra_columns += ",array_remove(ARRAY[CASE WHEN " + extracted_match + " THEN 'extracted' END,CASE WHEN " + enriched_match + " THEN 'enriched' END,CASE WHEN "+base_understanding+" THEN 'understanding' END,CASE WHEN " + base_context + " THEN 'message_context' END],NULL) AS match_sources"
         extra_columns += ',CASE WHEN ' + base_context + " THEN jsonb_build_object('message_id',m.id,'revision',m.revision,'field','body') END AS message_context"
     if query:
         clauses.append(predicate)
@@ -305,7 +373,7 @@ def search_files(store, c, p, query='', account='', chat='', sender='', from_tim
         ' AS match_type,left(' + plan.snippet(snippet_text) + ',800) AS excerpt,' + extra_columns + ' ' + search_join +
         ' WHERE ' + ' AND '.join(clauses) + ' ORDER BY ' + ordering + ' LIMIT %s',
         [*plan.params, *candidate_args, *passage_args, *args, limit + 1]).fetchall()
-    items = [_response(r) for r in rows[:limit] if _available(store.files, r)]
+    items = [_response(r) for r in rows[:limit] if _retained_readable(store,c,r)]
     targets(p, [r['attachment_id'] for r in items])
     cursor = None
     if len(rows) > limit:
@@ -342,7 +410,7 @@ def get_file_text(store, c, p, attachment_id, offset=0, limit=4000, *, content='
         [offset + 1, limit, attachment_id, *args]).fetchone()
     if not row:
         raise APIError('not_found', 404)
-    if not _available(store.files, row):
+    if not _retained_readable(store,c,row):
         raise APIError('attachment_unavailable', 409)
     targets(p, [row['attachment_id']])
     row['offset'] = offset
@@ -393,7 +461,7 @@ def get_file_segments(store, c, p, attachment_id, offset=0, limit=100):
         [offset, limit, attachment_id, *args]).fetchone()
     if not row:
         raise APIError('not_found', 404)
-    if not _available(store.files, row):
+    if not _retained_readable(store,c,row):
         raise APIError('attachment_unavailable', 409)
     segments = []
     chars = 0
@@ -448,7 +516,7 @@ def get_file_occurrences(store, c, p, attachment_id, after='', limit=20):
                        [attachment_id, *args]).fetchone()
     if not anchor:
         raise APIError('not_found', 404)
-    if not _available(store.files, anchor):
+    if not _retained_readable(store,c,anchor):
         raise APIError('attachment_unavailable', 409)
     clauses, params = [CURRENT, scope, 'a.digest=%s'], [*args, anchor['sha256']]
     if after:
@@ -459,7 +527,7 @@ def get_file_occurrences(store, c, p, attachment_id, after='', limit=20):
         clauses.append('(m.sent_at,m.id,a.id)>(%s,%s,%s)'); params.extend([cursor['sent_at'], cursor['message_id'], cursor['id']])
     rows = c.execute('SELECT ' + COLUMNS + ',' + ENRICH_COLUMNS + ' ' + JOIN + ' ' + ENRICH_JOIN +
         ' WHERE ' + ' AND '.join(clauses) + ' ORDER BY m.sent_at,m.id,a.id LIMIT %s', [*params, limit+1]).fetchall()
-    items = [_response(row) for row in rows[:limit] if _available(store.files, row)]
+    items = [_response(row) for row in rows[:limit] if _retained_readable(store,c,row)]
     targets(p, [attachment_id, *[row['attachment_id'] for row in items]])
     return serial({'items': items, 'next_cursor': rows[limit-1]['attachment_id'] if len(rows)>limit else None,
         'occurrence_scope': 'current_authorized_messages_only', **store.dataset(c, p)})
@@ -493,14 +561,19 @@ class FileIndexer:
             options='-c statement_timeout=5000 -c timezone=UTC')
 
     def _expire_leases(self):
+        # Cancelled revision leases retain their attempt count in queued state.
+        # Apply this worker's configured ceiling to those and expired leases.
         # Finish all failure publication before the independent queue claim.
         # Otherwise a held feed_counter could be followed by another account
         # or candidate-row lock held by ingestion waiting on that same counter.
         with self.connection() as c:
+            from .file_lifecycle import lifecycle_lock
+            lifecycle_lock(c)
             c.execute('SELECT pg_advisory_xact_lock(74509139)')
             expired = c.execute('''SELECT f.attachment,m.account FROM attachment_text f
                 JOIN attachments a ON a.id=f.attachment JOIN messages m ON m.id=a.message
-                WHERE f.state='leased' AND f.lease_until<clock_timestamp() AND f.attempts>=%s
+                WHERE f.attempts>=%s AND
+                (f.state='queued' OR (f.state='leased' AND f.lease_until<clock_timestamp()))
                 ORDER BY m.account,f.attachment LIMIT 64''', (self.max_attempts,)).fetchall()
             for account in sorted({item['account'] for item in expired}):
                 c.execute('SELECT pg_advisory_xact_lock(hashtextextended(%s,0))',
@@ -509,8 +582,8 @@ class FileIndexer:
                 failed = c.execute('''UPDATE attachment_text f SET state='failed',error_code='retry_exhausted',
                     lease_token=NULL,lease_until=NULL,updated_at=clock_timestamp()
                     FROM attachments a,messages m WHERE f.attachment=%s AND a.id=f.attachment
-                    AND m.id=a.message AND f.state='leased' AND f.lease_until<clock_timestamp()
-                    AND f.attempts>=%s RETURNING f.*,m.account''',
+                    AND m.id=a.message AND f.attempts>=%s
+                    AND (f.state='queued' OR (f.state='leased' AND f.lease_until<clock_timestamp())) RETURNING f.*,m.account''',
                     (item['attachment'], self.max_attempts)).fetchone()
                 if failed:
                     processing_events.publish(c, failed, stage='text', state='failed',
@@ -522,6 +595,8 @@ class FileIndexer:
     def claim(self):
         self._expire_leases()
         with resource_admission.transaction(self.connection()) as (c,resources):
+            from .file_lifecycle import lifecycle_lock
+            lifecycle_lock(c)
             c.execute('SELECT pg_advisory_xact_lock(74509139)')
             rows = c.execute('''SELECT f.*,a.message,m.account FROM attachment_text f
                 JOIN attachments a ON a.id=f.attachment JOIN messages m ON m.id=a.message
@@ -564,6 +639,8 @@ class FileIndexer:
                 or (result.error_code is not None and not re.fullmatch('[a-z_]{1,64}', result.error_code))):
             result = Extraction('failed', error_code='invalid_extraction_result')
         with self.connection() as c:
+            from .file_lifecycle import lifecycle_lock
+            lifecycle_lock(c)
             # Publishing up to 1M characters rebuilds bounded passage vectors.
             # Give only this background write transaction a larger budget;
             # API reads and queue polling retain their five-second timeout.

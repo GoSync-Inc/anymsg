@@ -152,6 +152,8 @@ class EnrichmentWorker:
         # Account/row locks must all precede the publication counter. End this
         # bounded transaction before a claim examines any other account's rows.
         with self.connection() as c:
+            from .file_lifecycle import lifecycle_lock
+            lifecycle_lock(c)
             c.execute('SELECT pg_advisory_xact_lock(74509139)')
             expired=c.execute('''SELECT e.attachment,m.account FROM attachment_enrichment e
                 JOIN attachments a ON a.id=e.attachment JOIN messages m ON m.id=a.message
@@ -178,6 +180,8 @@ class EnrichmentWorker:
     def claim(self):
         self._expire_leases()
         with resource_admission.transaction(self.connection()) as (c,resources):
+            from .file_lifecycle import lifecycle_lock
+            lifecycle_lock(c)
             # Serialize claims/budget only, never inference. Failed attempts count.
             c.execute('SELECT pg_advisory_xact_lock(74509139)')
             c.execute("""INSERT INTO enrichment_budget(day,attempts) VALUES(current_date,0)
@@ -211,7 +215,7 @@ class EnrichmentWorker:
                     AND m.account=ANY(%s) AND '''+condition+''' AND e.next_due<=clock_timestamp()
                     AND ((e.state IN ('unconfigured','queued','failed') AND (e.attempts<3 OR e.profile_hash IS DISTINCT FROM %s))
                         OR (e.state='leased' AND e.lease_until<clock_timestamp() AND e.attempts<3)
-                        OR (e.state IN ('ready','unsupported') AND e.profile_hash IS DISTINCT FROM %s))
+                        OR (e.state='unsupported' AND e.profile_hash IS DISTINCT FROM %s))
                     ORDER BY fresh DESC,last_started_at,m.sent_at DESC,a.id LIMIT 1 FOR UPDATE OF e SKIP LOCKED''',
                     (kind,ph,eligible,ph,ph)).fetchone()
                 if row:candidates.append((row,kind,profile,ph))
@@ -258,6 +262,8 @@ class EnrichmentWorker:
             clean['metadata']['source_truncated']=bool(row.get('source_truncated'))
         else:clean={'title':'','summary':'','text':'','metadata':{},'truncated':False}
         with self.connection() as c:
+            from .file_lifecycle import lifecycle_lock
+            lifecycle_lock(c)
             # Derived passage vectors for a near-limit transcript need a bounded
             # write budget independent of the gateway's short read timeout.
             c.execute('SET LOCAL statement_timeout=30000')

@@ -203,7 +203,10 @@ def test_renewal_and_reaper_cannot_split_capacity_ownership(archive,monkeypatch)
         def execute(self,query,*args):
             if self.role=='renew' and query.startswith('UPDATE media_reservations'):
                 renewing.set();assert continue_renewal.wait(5)
-            if self.role=='claim' and 'pg_advisory_xact_lock' in query:
+            # The earlier lifecycle lock is independent of the capacity lock
+            # whose renewal/reaper exclusion this test observes.
+            if (self.role=='claim' and 'pg_advisory_xact_lock' in query
+                    and 'media-storage-admission' in query):
                 claiming.set();result=self.c.execute(query,*args);claim_acquired_lock.set();return result
             return self.c.execute(query,*args)
     class WrappedPool:

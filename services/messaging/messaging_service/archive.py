@@ -1,6 +1,8 @@
 """Durable ingestion and worker leases. Used only by operator/collector DB roles."""
 from datetime import datetime
 import hashlib
+import os
+import stat
 import re
 import secrets
 
@@ -77,6 +79,8 @@ class Archive:
         e=validate(raw); captured=e; receipt=hashlib.sha256(canonical(e)).hexdigest()
         aid=e['account']; cid=stable_id('chat',aid,e['chat']); mid=stable_id('msg',aid,e['chat'],e['provider_id'])
         with self.store.pool.connection() as c:
+            from .file_lifecycle import lifecycle_lock
+            lifecycle_lock(c)
             # One bounded transaction per account; no provider/network/file work while holding it.
             c.execute('SELECT pg_advisory_xact_lock(hashtextextended(%s,0))',('archive:'+aid,))
             self.fence(c,aid,lease)
@@ -252,6 +256,8 @@ class Archive:
             raise ValueError('invalid_live_media_policy')
         live_max=live_writer.max_bytes if live_writer is not None else None
         with self.store.pool.connection() as c:
+            from .file_lifecycle import lifecycle_lock
+            lifecycle_lock(c)
             StorageAdmission.lock_and_reap(c)
             if collector_lease is not None:
                 if account is None: raise ValueError('collector_account_required')
@@ -344,17 +350,44 @@ class Archive:
             return row['snapshot']
 
     def finish_media(self,job,blob,writer,*,collector_lease=None):
-        writer.verify(blob)  # Before DB ready; hashes immutable bytes, never a remote URL.
+        # Keep the verified inode identity across the serving/lifecycle lock.
+        # A different occurrence of the same CAS object may be evicted while
+        # this newly downloaded occurrence has no registered digest yet.
+        try:
+            before_identity=os.stat(writer.root/blob.digest,follow_symlinks=False)
+        except OSError as error:raise RuntimeError('blob_corrupt') from error
+        verified_path=writer.verify(blob)  # Hash before holding the shared lock.
+        identity=lambda info:(info.st_dev,info.st_ino,info.st_size,info.st_mtime_ns,info.st_ctime_ns)
+        try:
+            verified_identity=os.stat(verified_path,follow_symlinks=False)
+            if identity(before_identity)!=identity(verified_identity):raise RuntimeError('blob_corrupt')
+            if not stat.S_ISREG(verified_identity.st_mode) or verified_identity.st_size!=blob.bytes:
+                raise RuntimeError('blob_corrupt')
+        except OSError as error:raise RuntimeError('blob_corrupt') from error
         with self.store.pool.connection() as c:
+            from .file_lifecycle import lifecycle_lock,register_resident_original
+            lifecycle_lock(c)
+            try:current_identity=os.stat(self.store.files/blob.digest,follow_symlinks=False)
+            except OSError as error:raise RuntimeError('blob_corrupt') from error
+            if identity(current_identity)!=identity(verified_identity) or not stat.S_ISREG(current_identity.st_mode):
+                raise RuntimeError('blob_corrupt')
             # Same account lock as message edits: no stale file publication after edit/delete.
             c.execute('SELECT pg_advisory_xact_lock(hashtextextended(%s,0))',('archive:'+job['account'],))
             self.fence(c,job['account'],collector_lease)
             current=self.job_fence(c,job); d=current['descriptor']
             if d['bytes'] is not None and blob.bytes!=d['bytes']: raise ValueError('media_size_mismatch')
-            c.execute('''INSERT INTO attachments(id,message,digest,filename,mime,bytes,active)
-                VALUES(%s,%s,%s,%s,%s,%s,true) ON CONFLICT(id) DO UPDATE SET
-                digest=excluded.digest,bytes=excluded.bytes,active=true''',
-                (job['id'],job['message'],blob.digest,d['filename'],d['mime'],blob.bytes))
+            retained=c.execute('SELECT digest,bytes,active FROM attachments WHERE id=%s FOR UPDATE',(job['id'],)).fetchone()
+            if retained and (retained['digest']!=blob.digest or retained['bytes']!=blob.bytes):
+                raise ValueError('media_identity_mismatch')
+            if not retained:
+                c.execute('''INSERT INTO attachments(id,message,digest,filename,mime,bytes,active)
+                    VALUES(%s,%s,%s,%s,%s,%s,true)''',
+                    (job['id'],job['message'],blob.digest,d['filename'],d['mime'],blob.bytes))
+            elif not retained['active']:
+                c.execute('UPDATE attachments SET active=true WHERE id=%s',(job['id'],))
+            # Rehydration changes residency only; no no-op attachment UPDATE
+            # may invalidate the retained text, ASR or description triggers.
+            register_resident_original(c,blob.digest,blob.bytes)
             c.execute("UPDATE media_jobs SET state='ready',error_code=NULL,lease_until=NULL WHERE id=%s",(job['id'],))
             source=c.execute('''SELECT m.revision,r.snapshot->>'origin' AS origin FROM messages m
                 JOIN message_revisions r ON r.message=m.id AND r.revision=m.revision WHERE m.id=%s''',

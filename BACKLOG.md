@@ -23,7 +23,7 @@ open implementation branches below; their presence is not a merged-code claim.
 | Historical ID | Tiden specification(s) | Topic |
 | --- | --- | --- |
 | DK-02 | 222 | Operational restore, originals integrity and receiver capacity |
-| DK-03 | 223 | Archive cold originals before eviction and verify rehydration |
+| DK-03 | 223 | Retain file evidence and expire eligible originals after 30 idle days |
 | DK-04 | 224 | Execute durable fair history waves with restart recovery |
 | DK-05 | 225 | Recover historical exhausted media jobs within bounded retry policy |
 | DK-06 | 226 | Classify and audit contradictory source observations |

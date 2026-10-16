@@ -13,6 +13,7 @@ import shutil
 import stat
 import subprocess
 import tempfile
+import uuid
 
 from psycopg import sql
 
@@ -48,6 +49,8 @@ V29_TABLES={'file_uploads':'id'}
 V32_TABLES={'subscription_consumption':'subscription','subscription_receipts':'receipt_hash',
     'subscription_receivers':'id','subscription_delivery':'subscription','subscription_outbox':'id',
     'agent_feedback':'id'}
+V33_TABLES={'attachment_residency':'digest','attachment_eviction_journal':'id','attachment_backup_fences':'id'}
+V34_TABLES={'attachment_understanding':'attachment','file_understanding_profiles':'account,kind'}
 V26_TABLES={'subscriptions':'id','subscription_sources':'subscription,account,chat',
             'subscription_matches':'subscription,event'}
 V17_TABLES={'message_conflicts':'receipt_digest'}
@@ -57,7 +60,7 @@ V15_TABLES={'message_metadata':'message','attachment_enrichment':'attachment','e
 def database_manifest(c):
     tables={}
     version=int(c.execute("SELECT value FROM probe_metadata WHERE name='schema_version'").fetchone()['value'])
-    if version not in range(2,33): raise ValueError('unsupported_backup_schema')
+    if version not in range(2,35): raise ValueError('unsupported_backup_schema')
     for name,order in {**TABLES,**(V3_TABLES if version>=3 else {}),**(V4_TABLES if version>=4 else {}),
                        **(V5_TABLES if version>=5 else {}),**(V6_TABLES if version>=6 else {}),
                        **(V8_TABLES if version>=8 else {}),**(V9_TABLES if version>=9 else {}),
@@ -66,7 +69,8 @@ def database_manifest(c):
                        **(V21_TABLES if version>=21 else {}),**(V22_TABLES if version>=22 else {}),
                        **(V23_TABLES if version>=23 else {}),**(V25_TABLES if version>=25 else {}),
                        **(V26_TABLES if version>=26 else {}),**(V27_TABLES if version>=27 else {}),
-                       **(V29_TABLES if version>=29 else {}),**(V32_TABLES if version>=32 else {})}.items():
+                       **(V29_TABLES if version>=29 else {}),**(V32_TABLES if version>=32 else {}),
+                       **(V33_TABLES if version>=33 else {}),**(V34_TABLES if version>=34 else {})}.items():
         query=sql.SQL('SELECT row_to_json(t) AS record FROM {} t ORDER BY {}').format(
             sql.Identifier(name),sql.SQL(',').join(sql.Identifier(part) for part in order.split(',')))
         sha=hashlib.sha256(); count=0
@@ -78,7 +82,43 @@ def database_manifest(c):
     return tables
 
 
-def create_snapshot(store,destination,dump_command,recovery_config=None,*,captured_callback=None,reference_blobs=False):
+def blob_inventory(c,version):
+    """Only a completed, matching lifecycle journal may omit an original."""
+    if version<33:
+        return c.execute('SELECT DISTINCT digest,bytes FROM attachments ORDER BY digest').fetchall(),[]
+    rows=c.execute('''SELECT DISTINCT a.digest,a.bytes,r.state,r.bytes AS residency_bytes,r.eviction_id,
+        j.state AS eviction_state,j.digest AS eviction_digest,j.bytes AS eviction_bytes
+        FROM attachments a LEFT JOIN attachment_residency r ON r.digest=a.digest
+        LEFT JOIN attachment_eviction_journal j ON j.id=r.eviction_id ORDER BY a.digest,a.bytes''').fetchall()
+    present=[];absent=[];seen=set()
+    for row in rows:
+        digest=row['digest'];size=row['bytes']
+        if digest in seen or (row['residency_bytes'] is not None and row['residency_bytes']!=size):
+            raise RuntimeError('backup_blob_inventory_mismatch')
+        seen.add(digest)
+        if row['state']=='evicting':raise RuntimeError('backup_eviction_in_progress')
+        if row['state']=='evicted':
+            if (row['eviction_id'] is None or row['eviction_state']!='completed' or
+                row['eviction_digest']!=digest or row['eviction_bytes']!=size):
+                raise RuntimeError('backup_absence_unproven')
+            absent.append({'digest':digest,'bytes':size,'eviction_id':str(row['eviction_id'])})
+        else:present.append({'digest':digest,'bytes':size})
+    return present,absent
+
+
+def validate_reference_fence(store,manifest,token):
+    """A reusable capture requires its original, still-active durable fence."""
+    with store.pool.connection() as c:
+        version=int(c.execute("SELECT value FROM probe_metadata WHERE name='schema_version'").fetchone()['value'])
+        if version<33:return
+        if manifest.get('schema_version',0)<33 or manifest.get('backup_fence')!=token:
+            raise ValueError('backup_capture_unfenced')
+        row=c.execute('SELECT ended_at FROM attachment_backup_fences WHERE id=%s',(token,)).fetchone()
+        if row is None or row['ended_at'] is not None:raise ValueError('backup_capture_unfenced')
+
+
+def create_snapshot(store,destination,dump_command,recovery_config=None,*,captured_callback=None,
+                    reference_blobs=False,backup_fence=None):
     """Release cold-state locks after the DB dump; immutable blob copying may continue."""
     from contextlib import nullcontext
     from .recovery_state import recovery_guard
@@ -89,7 +129,17 @@ def create_snapshot(store,destination,dump_command,recovery_config=None,*,captur
     if not dump_command or not all(isinstance(x,str) for x in dump_command): raise ValueError('invalid_dump_command')
     destination.parent.mkdir(parents=True,exist_ok=True)
     temporary=Path(tempfile.mkdtemp(prefix='.backup-',dir=destination.parent))
+    fence=None;fence_committed=False
     try:
+        with store.pool.connection() as c:
+            version=int(c.execute("SELECT value FROM probe_metadata WHERE name='schema_version'").fetchone()['value'])
+            if version>=33:
+                from .file_lifecycle import begin_backup_fence
+                fence=backup_fence or 'backup-'+uuid.uuid4().hex
+                begin_backup_fence(c,fence)
+        fence_committed=fence is not None
+        # The fence transaction commits before exporting the point-in-time DB.
+        # It survives connection loss, process death, and encryption/upload retry.
         recovery=None
         with guard as recovery_sources:
             if recovery_sources is not None:
@@ -105,7 +155,8 @@ def create_snapshot(store,destination,dump_command,recovery_config=None,*,captur
                     verify_account_coverage(c,{s['account'] for s in recovery['sources'] if s['kind']=='session'})
                 tables=database_manifest(c)
                 schema_version=int(c.execute("SELECT value FROM probe_metadata WHERE name='schema_version'").fetchone()['value'])
-                blobs=c.execute('SELECT DISTINCT digest,bytes FROM attachments ORDER BY digest').fetchall()
+                if schema_version>=33 and fence is None:raise RuntimeError('backup_capture_unfenced')
+                blobs,absent=blob_inventory(c,schema_version)
                 with (temporary/'database.dump').open('xb') as output:
                     # Command is configured by the operator, not accepted by MCP/REST. No shell.
                     process=subprocess.run([*dump_command,'--format=custom','--no-owner','--no-acl','--snapshot='+snapshot],
@@ -130,6 +181,8 @@ def create_snapshot(store,destination,dump_command,recovery_config=None,*,captur
             'schema_version':schema_version,'tables':tables,'blobs':blobs,'dump_sha256':dump_sha,
             'includes_provider_sessions':bool(recovery and any(s['kind']=='session' for s in recovery['sources'])),
             'restore_mode':'verify_then_quarantine_collectors_no_sends'}
+        if schema_version>=33:
+            manifest.update(absent_blobs=absent,backup_fence=fence)
         if recovery is not None: manifest['recovery']=recovery
         with (temporary/'manifest.json').open('x') as out:
             out.write(json.dumps(manifest,ensure_ascii=False,indent=2)+'\n'); out.flush(); os.fsync(out.fileno())
@@ -137,12 +190,17 @@ def create_snapshot(store,destination,dump_command,recovery_config=None,*,captur
         return {'status':'snapshot_created','tables':len(tables),'blobs':len(blobs),'blob_bytes':total}
     finally:
         if temporary.exists(): shutil.rmtree(temporary)  # Only this function's temporary directory.
+        if fence_committed and not destination.exists():
+            # A safely abandoned unpublished capture no longer needs originals.
+            # Unknown commit/cleanup outcomes retain the fence and fail closed.
+            from .file_lifecycle import end_backup_fence
+            with store.pool.connection() as c:end_backup_fence(c,fence)
 
 
 def verify_bundle(directory,*,blob_root=None):
     from .recovery_state import read_manifest,verify_recovery
     directory=Path(directory); manifest=read_manifest(directory)
-    if manifest.get('format') not in (1,2) or manifest.get('schema_version') not in range(2,33): raise ValueError('unsupported_backup')
+    if manifest.get('format') not in (1,2) or manifest.get('schema_version') not in range(2,35): raise ValueError('unsupported_backup')
     verify_recovery(directory,manifest)
     if (directory/'database.dump').is_symlink(): raise ValueError('invalid_backup_file')
     fd=os.open(directory/'database.dump',os.O_RDONLY|os.O_NOFOLLOW|os.O_NONBLOCK)
@@ -153,9 +211,29 @@ def verify_bundle(directory,*,blob_root=None):
     if (directory/'files').is_symlink(): raise ValueError('invalid_backup_file')
     writer=BlobWriter(blob_root if blob_root is not None else directory/'files',reserve_bytes=0); seen=set()
     if not isinstance(manifest['blobs'],list) or len(manifest['blobs'])>1000000:raise ValueError('invalid_backup_manifest')
+    absent=manifest.get('absent_blobs',[])
+    if (not isinstance(absent,list) or len(absent)+len(manifest['blobs'])>1000000 or
+        ('absent_blobs' in manifest and manifest['schema_version']<33)):
+        raise ValueError('invalid_backup_manifest')
+    absent_seen=set()
+    for item in absent:
+        if (not isinstance(item,dict) or set(item)!={'digest','bytes','eviction_id'} or
+            type(item['bytes']) is not int or item['bytes']<0 or
+            not isinstance(item['digest'],str) or not re.fullmatch(r'[a-f0-9]{64}',item['digest']) or
+            item['digest'] in absent_seen or not isinstance(item['eviction_id'],str)):
+            raise ValueError('invalid_backup_manifest')
+        try:
+            if str(uuid.UUID(item['eviction_id']))!=item['eviction_id']:raise ValueError('invalid_backup_manifest')
+        except (ValueError,AttributeError):raise ValueError('invalid_backup_manifest') from None
+        absent_seen.add(item['digest'])
+        # A referenced source may rehydrate after the captured DB point in
+        # time. That does not change its captured absence or require inclusion.
+        if blob_root is None and os.path.lexists(writer.root/item['digest']):
+            raise RuntimeError('backup_absence_mismatch')
     for item in manifest['blobs']:
         if (not isinstance(item,dict) or set(item)!={'digest','bytes'} or type(item['bytes']) is not int or item['bytes']<0 or
-            not isinstance(item['digest'],str) or not re.fullmatch(r'[a-f0-9]{64}',item['digest']) or item['digest'] in seen):
+            not isinstance(item['digest'],str) or not re.fullmatch(r'[a-f0-9]{64}',item['digest']) or
+            item['digest'] in seen or item['digest'] in absent_seen):
             raise ValueError('invalid_backup_manifest')
         writer.verify(Blob(item['digest'],item['bytes'])); seen.add(item['digest'])
     # Reference capture is an operator workspace, not a self-contained backup.
@@ -170,10 +248,15 @@ def verify_snapshot(store,directory):
     with store.pool.connection() as c:
         c.execute('SET TRANSACTION ISOLATION LEVEL REPEATABLE READ READ ONLY')
         tables=database_manifest(c)
+        present,absent=blob_inventory(c,manifest['schema_version'])
     if tables!=manifest['tables']: raise RuntimeError('restored_database_mismatch')
+    if present!=manifest['blobs'] or absent!=manifest.get('absent_blobs',[]):
+        raise RuntimeError('restored_blob_inventory_mismatch')
     restored=BlobWriter(store.files,reserve_bytes=0)
     for item in manifest['blobs']:
         restored.verify(Blob(item['digest'],item['bytes']))
+    if any(os.path.lexists(store.files/item['digest']) for item in absent):
+        raise RuntimeError('restored_blob_inventory_mismatch')
     return {'status':'verified','tables':len(tables),'blobs':len(manifest['blobs'])}
 
 
@@ -184,6 +267,13 @@ def quarantine_restore(store):
         if not database.endswith('_restore_test'): raise ValueError('not_restore_database')
         c.execute('UPDATE account_policies SET enabled=false')
         version=int(c.execute("SELECT value FROM probe_metadata WHERE name='schema_version'").fetchone()['value'])
+        if version>=33:
+            # Verification precedes quarantine: the captured fence rows must
+            # first match the dump exactly. They protect the source capture,
+            # not this isolated, disabled restore's future operator work.
+            from .file_lifecycle import lifecycle_lock
+            lifecycle_lock(c)
+            c.execute('UPDATE attachment_backup_fences SET ended_at=coalesce(ended_at,clock_timestamp())')
         if version>=22:
             c.execute('UPDATE account_policies SET send_enabled=false')
             c.execute("""UPDATE outgoing_messages SET status=CASE WHEN status='queued' THEN 'cancelled' ELSE 'unknown' END,

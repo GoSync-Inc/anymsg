@@ -12,10 +12,11 @@ from pathlib import Path
 import tempfile
 import stat
 import time
+import re
 
 from psycopg.conninfo import conninfo_to_dict
 
-from .backup import create_snapshot,verify_bundle
+from .backup import create_snapshot,verify_bundle,validate_reference_fence
 from .backup_crypto import encrypt_snapshot,encrypt_snapshot_stream,snapshot_stream_bound
 from .spool import fsync_dir
 from .store import Store
@@ -53,7 +54,53 @@ def dump_credentials(dsn,directory):
     return ['pg_dump','--dbname='+make_conninfo(**public)],password_file
 
 
+def release_delivered_fence(store,work,backup_id):
+    """Only the host's matched, durable receiver receipt ends capture ownership."""
+    from .backup_receiver import BACKUP_ID
+    if not isinstance(backup_id,str) or not BACKUP_ID.fullmatch(backup_id):raise ValueError('invalid_backup_id')
+    work=Path(work)
+    receipt=private_json(work/'delivery.json')
+    streaming=(work/'stream.json').exists()
+    metadata=private_json(work/('stream.json' if streaming else 'result.json'))
+    if (metadata.get('id')!=backup_id or metadata.get('backup_fence')!=backup_id or
+        receipt.get('id')!=backup_id or receipt.get('status')!='stored' or
+        type(receipt.get('bytes')) is not int or receipt['bytes']<1 or
+        not isinstance(receipt.get('sha256'),str) or not re.fullmatch('[a-f0-9]{64}',receipt['sha256'])):
+        raise ValueError('invalid_backup_receipt')
+    if streaming:
+        if (receipt.get('v')!=2 or metadata.get('v')!=2 or
+            receipt.get('snapshot_sha256')!=metadata.get('snapshot_sha256') or
+            not isinstance(metadata.get('snapshot_sha256'),str) or
+            not re.fullmatch('[a-f0-9]{64}',metadata['snapshot_sha256']) or
+            type(metadata.get('max_bytes')) is not int or receipt['bytes']>metadata['max_bytes']):
+            raise ValueError('invalid_backup_receipt')
+        if not (work/'result.json').exists():
+            if receipt.get('duplicate') is not True:raise ValueError('invalid_backup_receipt')
+        else:
+            result=private_json(work/'result.json')
+            if (result.get('id')!=backup_id or result.get('status')!='encrypted' or
+                result.get('snapshot_sha256')!=metadata['snapshot_sha256'] or
+                any(receipt.get(k)!=result.get(k) for k in ('v','bytes','sha256'))):
+                raise ValueError('invalid_backup_receipt')
+    elif (metadata.get('v')!=1 or metadata.get('status')!='encrypted' or
+          any(receipt.get(k)!=metadata.get(k) for k in ('v','bytes','sha256'))):
+        raise ValueError('invalid_backup_receipt')
+    from .file_lifecycle import end_backup_fence
+    with store.pool.connection() as c:end_backup_fence(c,backup_id)
+    result={'id':backup_id,'backup_fence':backup_id,'status':'fence_released'}
+    write_json(work/'fence-released.json',result)
+    return result
+
+
 def run(config):
+    if config.get('action')=='release_fence':
+        if set(config)!={'action','id','dsn_file','work_directory'}:raise ValueError('invalid_backup_worker_config')
+        work=Path(config['work_directory'])
+        if work.is_symlink() or not work.is_dir() or work.stat().st_mode&0o077:
+            raise ValueError('private_work_directory_required')
+        store=Store(Path(config['dsn_file']).read_text().strip(),work,'http://backup.invalid')
+        try:return release_delivered_fence(store,work,config['id'])
+        finally:store.close()
     required={'id','dsn_file','files_directory','recovery_config_file','recipient_file','work_directory'}
     if set(config)-{'mode'}!=required or config.get('mode','staged_v1') not in ('staged_v1','stream_v2'):
         raise ValueError('invalid_backup_worker_config')
@@ -68,6 +115,8 @@ def run(config):
         streaming=config.get('mode')=='stream_v2'
         captured=lambda:write_json(work/'captured.json',{'id':config['id'],'status':'capture_complete'})
         if streaming and (work/'snapshot').exists():
+            from .recovery_state import read_manifest
+            validate_reference_fence(store,read_manifest(work/'snapshot'),config['id'])
             manifest=verify_bundle(work/'snapshot',blob_root=store.files)
             snapshot={'status':'snapshot_created','tables':len(manifest['tables']),'blobs':len(manifest['blobs']),
                       'blob_bytes':sum(row['bytes'] for row in manifest['blobs'])}
@@ -78,17 +127,20 @@ def run(config):
                 previous=os.environ.get('PGPASSFILE');os.environ['PGPASSFILE']=str(password_file)
                 try:
                     snapshot=create_snapshot(store,work/'snapshot',command,recovery,captured_callback=captured,
-                                             reference_blobs=streaming)
+                                             reference_blobs=streaming,backup_fence=config['id'])
                 finally:
                     if previous is None:os.environ.pop('PGPASSFILE',None)
                     else:os.environ['PGPASSFILE']=previous
+        from .recovery_state import read_manifest
+        manifest=read_manifest(work/'snapshot')
+        fence={'backup_fence':manifest['backup_fence']} if manifest.get('backup_fence') is not None else {}
         if streaming:
             with (work/'snapshot/manifest.json').open('rb') as f:
                 snapshot_sha=hashlib.file_digest(f,'sha256').hexdigest()
             fifo=work/'ciphertext.fifo';os.mkfifo(fifo,0o600)
             metadata={'v':2,'id':config['id'],'snapshot_sha256':snapshot_sha,
                       'max_bytes':snapshot_stream_bound(work/'snapshot',store.files),
-                      'captured_at':json.loads((work/'snapshot/manifest.json').read_text())['captured_at']}
+                      'captured_at':manifest['captured_at'],**fence}
             write_json(work/'stream.json',metadata)
             # Host owns SSH and receives admission before starting the encoder.
             # A lost final receipt can short-circuit encryption on a retry.
@@ -102,7 +154,7 @@ def run(config):
                                                   blob_root=store.files,expected_manifest_sha256=snapshot_sha)
             result={'v':2,'id':config['id'],'status':'encrypted',**encrypted,'snapshot':snapshot,
                     'snapshot_sha256':snapshot_sha,'created_at':datetime.now(timezone.utc).isoformat(),
-                    'captured_at':metadata['captured_at']}
+                    'captured_at':metadata['captured_at'],**fence}
             write_json(work/'result.json',result)
             return result
         output=work/'bundle.tar.age'
@@ -111,7 +163,7 @@ def run(config):
         with output.open('rb') as f:digest=hashlib.file_digest(f,'sha256').hexdigest()
         result={'v':1,'id':config['id'],'status':'encrypted','bytes':output.stat().st_size,'sha256':digest,
                 'snapshot':snapshot,'created_at':datetime.now(timezone.utc).isoformat(),
-                'captured_at':json.loads((work/'snapshot/manifest.json').read_text())['captured_at']}
+                'captured_at':manifest['captured_at'],**fence}
         write_json(work/'result.json',result)
         print(json.dumps({'status':'encrypted','id':config['id'],'bytes':result['bytes']}),flush=True)
         return result

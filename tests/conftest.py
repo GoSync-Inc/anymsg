@@ -33,6 +33,7 @@ def database(tmp_path_factory):
 @pytest.fixture()
 def seeded(database):
     with database.pool.connection() as c:
+        c.execute('TRUNCATE attachment_backup_fences,attachment_residency,attachment_eviction_journal CASCADE')
         c.execute('TRUNCATE accounts,principals,feed_counter,audit_log CASCADE')
         c.execute('INSERT INTO feed_counter(id) VALUES(1)')
     database.seed()
