@@ -335,6 +335,10 @@ def isolate(settings, documents, images, release, generation, sha):
             if not actual:
                 raise Refused('all existing Docker networks need resolved external names')
             result['networks'][selection['project'] + '-' + key] = {'external': True, 'name': actual}
+            # Keep the parser's empty default so the isolated snapshot remains
+            # idempotent across Compose versions without copying managed IPAM.
+            if source.get('ipam') == {}:
+                result['networks'][selection['project'] + '-' + key]['ipam'] = {}
         if settings['http_release']['router']['network'] not in {value['name'] for key, value in result['networks'].items() if key in unit['networks']}:
             raise Refused('both candidates must already share the dedicated router network')
         for mount in unit.get('volumes', []):
