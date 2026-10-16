@@ -75,11 +75,11 @@ at least important (`AGENTS.md`). Prefer splitting it.
   lane, together with `deploy/main-protection.json`. Update this section when it
   lands.
 - Until then a pull request must be up to date with `main` to merge. Update a
-  branch right before merging, to resolve a real conflict or when a review asks
-  for it, never only to catch up. With the queue, each pull request is tested
-  against the latest `main` plus the pull requests ahead of it, and a branch is
-  updated only for a conflict or a review. After merging `main` into a branch,
-  close the intent session on its own commit range
+  branch only when that blocks its merge, to resolve a real conflict or when a
+  review asks for it, never just to stay current. With the queue, each pull
+  request is tested against the latest `main` plus the pull requests ahead of it,
+  and a branch is updated only for a conflict or a review. After merging `main`
+  into a branch, close the intent session on its own commit range
   ([Claude Code guide](claude-code-tiden.md)).
 - Merge method: **squash**. One story becomes one commit on `main`.
 - Who merges follows the review level in `AGENTS.md`; a worker also waits for the
