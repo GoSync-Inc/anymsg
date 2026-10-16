@@ -246,6 +246,8 @@ def test_postgres_readiness_waits_for_final_tcp_listener_not_temporary_init_serv
 def test_docker_failed_helper_reads_bounded_safe_failure_fact(tmp_path,monkeypatch):
     v=module();engine=v.Docker()
     monkeypatch.setattr(engine,'setup',lambda *args:None)
+    monkeypatch.setattr(engine,'inspect_owned',lambda *args:{})
+    monkeypatch.setattr(v,'validate_helper_layout',lambda *args:None)
     class Process:
         stdin=io.BytesIO()
         def wait(self,timeout):return 1
@@ -271,3 +273,66 @@ def test_pending_retry_cannot_change_protected_marker_path(operator):
     engine.failure=None
     with pytest.raises(ValueError,match='verifier_control_changed_during_retry'):v.run(config,client=cloud,engine=engine)
     assert len(engine.runs)==1
+
+
+def test_helper_explicit_tmpfs_overrides_inherited_pg_image_volume(tmp_path,monkeypatch):
+    v=module();engine=v.Docker();calls=[]
+    monkeypatch.setattr(engine,'command',lambda *args:calls.append(args) or b'')
+    engine.setup({'postgres_image':v.POSTGRES_IMAGE,'helper_image':'sha256:'+'a'*64,'identity_file':'/private/key'},'a'*32,tmp_path,tmp_path)
+    helper=next(call for call in calls if 'messaging_service.backup_restore_worker' in call)
+    tmpfs=[helper[i+1] for i,value in enumerate(helper[:-1]) if value=='--tmpfs']
+    assert '/var/lib/postgresql:ro,noexec,nosuid,nodev,size=1m,mode=0700' in tmpfs
+
+
+def test_unexpected_image_volume_is_rejected_before_any_resource_creation(monkeypatch):
+    v=module();engine=v.Docker();image='sha256:'+'a'*64;revision='b'*40
+    helper={'Id':image,'Config':{'Labels':{'org.opencontainers.image.revision':revision,
+             'org.opencontainers.image.source':'https://github.com/GoSync-Inc/deedkit'},'Volumes':{'/var/lib/postgresql':{},'/unexpected':{}}}}
+    monkeypatch.setattr(engine,'inspect_image',lambda value:helper if value==image else {'RepoDigests':['postgres@'+v.POSTGRES_IMAGE.split('@')[1]]})
+    monkeypatch.setattr(engine,'command',lambda *args:b'/var/lib/docker\n')
+    with pytest.raises(ValueError,match='unexpected_restore_image_volume'):
+        engine.preflight({'helper_image':image,'helper_revision':revision,'postgres_image':v.POSTGRES_IMAGE})
+
+
+def test_exact_owned_container_cleanup_removes_anonymous_not_named_volumes(monkeypatch):
+    v=module();engine=v.Docker();calls=[]
+    monkeypatch.setattr(engine,'command',lambda *args:calls.append(args) or b'')
+    engine.remove('helper','owned-helper')
+    engine.remove('volume','owned-pg-data')
+    assert ('container','rm','--volumes','owned-helper') in calls
+    assert calls[-1]==('volume','rm','owned-pg-data')
+
+
+def test_runtime_helper_layout_rejects_anonymous_volume_before_input(tmp_path):
+    v=module();run='a'*32
+    config={'identity_file':'/root/private-identity'}
+    with pytest.raises(ValueError,match='unexpected_restore_helper_layout'):
+        v.validate_helper_layout(config,run,tmp_path,tmp_path,{'Mounts':[{'Type':'volume','Destination':'/var/lib/postgresql','Name':'untracked-anonymous'}]})
+
+
+def helper_layout(v,config,run,payload,secret_dir):
+    return {'Mounts':[{'Type':'bind','Source':str(payload),'Destination':'/work','RW':True},
+                     {'Type':'bind','Source':config['identity_file'],'Destination':'/run/restore/identity','RW':False},
+                     {'Type':'bind','Source':str(secret_dir/'worker.json'),'Destination':'/run/restore/config.json','RW':False}],
+            'HostConfig':{'Tmpfs':dict(v.HELPER_TMPFS),'ReadonlyRootfs':True,'PortBindings':{},
+                          'Privileged':False,'NetworkMode':v.names(run)['network']}}
+
+
+def test_runtime_helper_layout_accepts_only_explicit_binds_and_bounded_tmpfs(tmp_path):
+    v=module();run='a'*32;config={'identity_file':'/root/key'}
+    v.validate_helper_layout(config,run,tmp_path,tmp_path,helper_layout(v,config,run,tmp_path,tmp_path))
+
+
+@pytest.mark.parametrize('attack',['unknown_mount','writable_key','wrong_source','rw_root','external_network','host_ports','unbounded_tmpfs'])
+def test_runtime_layout_changes_block_helper_before_ciphertext_input(tmp_path,attack):
+    v=module();run='a'*32;config={'identity_file':'/root/key'}
+    value=helper_layout(v,config,run,tmp_path,tmp_path)
+    if attack=='unknown_mount':value['Mounts'].append({'Type':'volume','Destination':'/unexpected','Name':'orphan'})
+    elif attack=='writable_key':value['Mounts'][1]['RW']=True
+    elif attack=='wrong_source':value['Mounts'][0]['Source']='/shared-production'
+    elif attack=='rw_root':value['HostConfig']['ReadonlyRootfs']=False
+    elif attack=='external_network':value['HostConfig']['NetworkMode']='bridge'
+    elif attack=='host_ports':value['HostConfig']['PortBindings']={'5432/tcp':[{'HostPort':'5432'}]}
+    elif attack=='unbounded_tmpfs':value['HostConfig']['Tmpfs'][v.PG_DATA_PATH]='rw'
+    with pytest.raises(ValueError,match='unexpected_restore_helper_layout'):
+        v.validate_helper_layout(config,run,tmp_path,tmp_path,value)

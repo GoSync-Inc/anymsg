@@ -80,19 +80,22 @@ def test_real_pg18_age_stream_restore_runs_all_seven_checks_in_isolated_owned_co
     password=secrets.token_hex(32)
     verifier.write_secret(secrets_dir/'postgres.env',('POSTGRES_USER=restore_owner\nPOSTGRES_DB='+verifier.DATABASE+'\nPOSTGRES_PASSWORD='+password+'\n').encode())
     verifier.write_secret(secrets_dir/'worker.json',b'{}\n')
-    subprocess.run(['age-keygen','-o',str(fixture/'identity')],stdin=subprocess.DEVNULL,stdout=subprocess.DEVNULL,stderr=subprocess.DEVNULL,check=True)
-    recipient=subprocess.check_output(['age-keygen','-y',str(fixture/'identity')],stderr=subprocess.DEVNULL).decode().strip()
     try:
+        subprocess.run(['age-keygen','-o',str(fixture/'identity')],stdin=subprocess.DEVNULL,stdout=subprocess.DEVNULL,stderr=subprocess.DEVNULL,check=True)
+        recipient=subprocess.check_output(['age-keygen','-y',str(fixture/'identity')],stderr=subprocess.DEVNULL).decode().strip()
         engine.preflight(config)
         engine.setup(config,source_run,payload,secrets_dir)
         labels=['--label',verifier.LABEL+'='+source_run,'--label',verifier.LABEL+'.owned=1']
         engine.command('container','create','--name',fixture_name,*labels,'--network',verifier.names(source_run)['network'],
                        '--memory=512m','--memory-swap=512m','--cpus=1','--pids-limit=256','--log-driver=none',
+                       '--tmpfs',verifier.PG_DATA_PATH+':'+verifier.HELPER_TMPFS[verifier.PG_DATA_PATH],
                        '--env-file',str(secrets_dir/'postgres.env'),'--env','DEEDKIT_SYNTHETIC_RECIPIENT='+recipient,'--mount','type=bind,src='+str(fixture)+',dst=/fixture',
                        '--entrypoint','python',IMAGE,'-c',FIXTURE_SCRIPT)
         engine.command('container','start','-a',fixture_name)
         result=r2.unique_json(engine.command('container','inspect',fixture_name))[0]
         assert result['State']['ExitCode']==0,'synthetic fixture generation failed'
+        assert not any(m['Type']=='volume' for m in result['Mounts'])
+        assert result['HostConfig']['Tmpfs'][verifier.PG_DATA_PATH]==verifier.HELPER_TMPFS[verifier.PG_DATA_PATH]
         engine.inspect_owned('helper',fixture_name,source_run);engine.remove('helper',fixture_name)
         verifier.cleanup_resources(engine,source_run)
         cipher=fixture/'ciphertext';snapshot=(fixture/'manifest-sha256').read_text()
@@ -116,6 +119,8 @@ def test_real_pg18_age_stream_restore_runs_all_seven_checks_in_isolated_owned_co
         pg=engine.inspect_owned('postgres',verifier.names(restore_run)['postgres'],restore_run)
         assert network['Internal'] is True
         assert not helper['HostConfig']['PortBindings'] and not pg['HostConfig']['PortBindings']
+        assert not any(m['Type']=='volume' for m in helper['Mounts'])
+        assert helper['HostConfig']['Tmpfs']==verifier.HELPER_TMPFS
         mounts={m['Destination'] for m in helper['Mounts']}
         assert mounts=={'/work','/run/restore/identity','/run/restore/config.json'}
         assert helper['HostConfig']['Memory']==512*1024**2 and pg['HostConfig']['Memory']==1024**3
@@ -124,5 +129,31 @@ def test_real_pg18_age_stream_restore_runs_all_seven_checks_in_isolated_owned_co
         if engine.inspect_owned('helper',fixture_name,source_run) is not None:engine.remove('helper',fixture_name)
         verifier.cleanup_resources(engine,source_run);verifier.cleanup_resources(engine,restore_run)
         shutil.rmtree(root)
+    # Every labelled explicit PG volume was removed. Inherited helper/fixture
+    # paths were bounded tmpfs, so no anonymous data volume can outlive them.
     for run in (source_run,restore_run):
         assert all(engine.inspect_owned(kind,name,run) is None for kind,name in verifier.names(run).items())
+
+
+def test_exact_owned_container_cleanup_removes_legacy_anonymous_volume_preserves_named_sentinel():
+    """Actual rm --volumes semantics, including pre-fix interrupted containers."""
+    run=secrets.token_hex(16);engine=verifier.Docker(120)
+    name=verifier.names(run)['helper'];sentinel=verifier.names(run)['volume']+'-sentinel'
+    labels=['--label',verifier.LABEL+'='+run,'--label',verifier.LABEL+'.owned=1']
+    anonymous=None
+    try:
+        engine.command('volume','create',*labels,sentinel)
+        engine.command('container','create','--name',name,*labels,'--network=none',
+                       '--mount','type=volume,src='+sentinel+',dst=/sentinel','--entrypoint','true',verifier.POSTGRES_IMAGE)
+        value=engine.inspect_owned('helper',name,run)
+        mounts=[m for m in value['Mounts'] if m['Type']=='volume' and m['Destination']==verifier.PG_DATA_PATH]
+        assert len(mounts)==1 and mounts[0]['Destination']==verifier.PG_DATA_PATH
+        anonymous=mounts[0]['Name']
+        engine.remove('helper',name)
+        with pytest.raises(RuntimeError,match='restore_docker_failed'):engine.command('volume','inspect',anonymous)
+        assert engine.inspect_owned('volume',sentinel,run) is not None
+    finally:
+        if engine.inspect_owned('helper',name,run) is not None:engine.remove('helper',name)
+        if engine.inspect_owned('volume',sentinel,run) is not None:engine.remove('volume',sentinel)
+        if anonymous and engine.command('volume','ls','--filter','name=^'+anonymous+'$','--format','{{.Name}}').strip():
+            engine.command('volume','rm',anonymous)

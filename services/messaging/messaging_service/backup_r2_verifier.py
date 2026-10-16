@@ -28,6 +28,9 @@ GIB = 1024**3
 POSTGRES_IMAGE = 'postgres:18-bookworm@sha256:afc7e2d441324c0388fa80c3d24f733b4194a4eb7f47dd8ee2b08eb1a24a647c'
 LABEL = 'org.deedkit.backup-verifier'
 DATABASE = 'deedkit_verify_restore_test'
+PG_DATA_PATH = '/var/lib/postgresql'
+HELPER_TMPFS = {'/tmp':'rw,noexec,nosuid,size=64m',
+                PG_DATA_PATH:'ro,noexec,nosuid,nodev,size=1m,mode=0700'}
 
 
 def now():return datetime.now(timezone.utc).isoformat()
@@ -119,6 +122,31 @@ def names(run):
     return {'helper':base+'-helper','postgres':base+'-postgres','volume':base+'-data','network':base+'-net'}
 
 
+def validate_image_volumes(image):
+    # The backup target inherits this one PG18 VOLUME. Override it explicitly;
+    # unknown declarations must never silently allocate writable host storage.
+    volumes=image.get('Config',{}).get('Volumes')
+    if volumes is None:volumes={}
+    if (not isinstance(volumes,dict) or set(volumes)-{PG_DATA_PATH} or
+            any(value!={} for value in volumes.values())):
+        raise ValueError('unexpected_restore_image_volume')
+
+
+def validate_helper_layout(config,run,payload,secret_dir,container):
+    expected={'/work':(str(payload),True),'/run/restore/identity':(config['identity_file'],False),
+              '/run/restore/config.json':(str(secret_dir/'worker.json'),False)}
+    if not isinstance(container,dict):raise ValueError('unexpected_restore_helper_layout')
+    mounts=container.get('Mounts');host=container.get('HostConfig',{})
+    if (not isinstance(mounts,list) or len(mounts)!=len(expected) or
+            {item.get('Destination') for item in mounts}!=set(expected) or
+            any(item.get('Type')!='bind' or
+                (item.get('Source'),item.get('RW'))!=expected[item['Destination']] for item in mounts) or
+            host.get('Tmpfs')!=HELPER_TMPFS or host.get('ReadonlyRootfs') is not True or
+            host.get('PortBindings') or host.get('Privileged') is True or
+            host.get('NetworkMode')!=names(run)['network']):
+        raise ValueError('unexpected_restore_helper_layout')
+
+
 class Docker:
     """Small, argument-only Docker adapter. It never prints secret diagnostics."""
     def __init__(self,timeout=21600):
@@ -147,10 +175,12 @@ class Docker:
         if (helper.get('Id')!=config['helper_image'] or labels.get('org.opencontainers.image.revision')!=config['helper_revision'] or
                 labels.get('org.opencontainers.image.source')!='https://github.com/GoSync-Inc/deedkit'):
             raise ValueError('unreviewed_restore_image')
+        validate_image_volumes(helper)
         pg=self.inspect_image(config['postgres_image'])
         expected_digest=config['postgres_image'].split('@',1)[1]
         if not any(item in {'postgres@'+expected_digest,'docker.io/library/postgres@'+expected_digest} for item in pg.get('RepoDigests',[])):
             raise ValueError('unreviewed_postgres_image')
+        validate_image_volumes(pg)
         root=self.command('info','--format','{{.DockerRootDir}}').decode().strip()
         if not Path(root).is_absolute():raise ValueError('invalid_docker_data_root')
         return root
@@ -170,7 +200,7 @@ class Docker:
     def remove(self,kind,name):
         category='container' if kind in ('helper','postgres') else kind
         if category=='container':self.command('container','stop','--time=10',name)
-        self.command(category,'rm',name)
+        self.command(category,'rm',*(['--volumes'] if category=='container' else []),name)
     def setup(self,config,run,payload,secret_dir):
         resource=names(run);labels=['--label',LABEL+'='+run,'--label',LABEL+'.owned=1']
         # Persisted names+ownership precede every create. A dropped response can
@@ -192,7 +222,8 @@ class Docker:
             except RuntimeError:time.sleep(1)
         if not ready:raise RuntimeError('restore_postgres_unavailable')
         self.command('container','create','--name',resource['helper'],*common,'--memory=512m','--memory-swap=512m',
-                     '--read-only','--cap-drop=ALL','--security-opt=no-new-privileges','--tmpfs','/tmp:rw,noexec,nosuid,size=64m',
+                     '--read-only','--cap-drop=ALL','--security-opt=no-new-privileges','--tmpfs','/tmp:'+HELPER_TMPFS['/tmp'],
+                     '--tmpfs',PG_DATA_PATH+':'+HELPER_TMPFS[PG_DATA_PATH],
                      '--mount','type=bind,src='+str(payload)+',dst=/work',
                      '--mount','type=bind,src='+config['identity_file']+',dst=/run/restore/identity,readonly',
                      '--mount','type=bind,src='+str(secret_dir/'worker.json')+',dst=/run/restore/config.json,readonly',
@@ -200,6 +231,10 @@ class Docker:
                      '--config','/run/restore/config.json')
     def restore(self,config,receiver,client,receipt,run,payload,secret_dir):
         self.setup(config,run,payload,secret_dir)
+        helper=self.inspect_owned('helper',names(run)['helper'],run)
+        validate_helper_layout(config,run,payload,secret_dir,helper)
+        if self.inspect_owned('network',names(run)['network'],run) is None:
+            raise ValueError('unexpected_restore_helper_layout')
         process=subprocess.Popen(['docker','container','start','-ai',names(run)['helper']],stdin=subprocess.PIPE,
                                  stdout=subprocess.DEVNULL,stderr=subprocess.DEVNULL)
         try:
@@ -421,7 +456,7 @@ def failure_code(error):
           'unreviewed_restore_image','unreviewed_postgres_image','unowned_restore_resource','invalid_helper_result',
           'uploader_lock_initialization_required','uncommitted_cloud_object','receiver_quota','protected_backup_missing',
           'invalid_verifier_journal','private_root_file_required','restore_docker_failed','restore_postgres_unavailable',
-          'isolated_restore_failed','stored_backup_corrupt'}
+          'isolated_restore_failed','stored_backup_corrupt','unexpected_restore_image_volume','unexpected_restore_helper_layout'}
     return str(error) if str(error) in safe else 'independent_restore_failed'
 
 
