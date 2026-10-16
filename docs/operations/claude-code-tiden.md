@@ -22,8 +22,9 @@ workspace `1dc18e09-4a09-4d74-8300-cd4302622357` and product
 ## Session sequence
 
 1. Answer the per-prompt start directive yourself: continue a listed candidate,
-   start a new intent, look up, or skip. Documentation, process and read-only work
-   use skip.
+   start a new intent, look up, or skip. Agent rules, process documents, wording
+   and read-only work use skip; a change of meaning in a product contract document
+   runs the full loop (`AGENTS.md`).
 2. Before `tiden intent start`, run `product-context` for each independent part and
    read the code its results point to. Promises are frozen at start and cannot be
    edited; a promise written before reading the code may later need a waiver.
@@ -50,8 +51,9 @@ workspace `1dc18e09-4a09-4d74-8300-cd4302622357` and product
    with `tiden branch link-proposals list --name <intent-branch>`, not `test links`.
    The close gate reads the latest run in the product, so close right after your
    own run when other pull requests are publishing evidence.
-9. Merge the pull request and then its Tiden branch yourself only under the merge
-   delegation rule in `AGENTS.md`; otherwise hand the decision to the owner.
+9. The review level, its reviews and who merges follow the review levels in
+   `AGENTS.md`. Merge the pull request and then its Tiden branch yourself only when
+   they allow it; otherwise hand the decision to the owner.
 
 ## Where work goes
 

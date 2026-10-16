@@ -32,21 +32,62 @@ rename, move or re-parametrize existing tests (path and name are Tiden IDs)
 or the seven `anymsg-ci::*` checks. For product changes run the intent loop:
 `tiden intent start "<objective>" --promise ...` before editing, then push,
 open the PR with the printed Tiden branch link in its body, run
-`tiden intent link-pr <url>` and `tiden intent close` before asking for review.
-Use `tiden intent skip` for questions and read-only work, and `--format json` when
-parsing CLI output. Without a local CLI, run `scripts/tiden_agent_setup.sh` when
-`TIDEN_API_TOKEN` is set; otherwise say in the PR that its specs were not updated.
+`tiden intent link-pr <url>`, and close the session in the order under Review
+levels. Use `tiden intent skip` for questions, read-only work and the non-product
+changes listed under Review levels, and `--format json` when parsing CLI output.
+Without a local CLI, run `scripts/tiden_agent_setup.sh` when `TIDEN_API_TOKEN` is
+set; otherwise say in the PR that its specs were not updated.
 
-Merge delegation: an agent may merge a pull request and its Tiden branch without
-asking the owner when every condition holds. All required checks and branch
-protection pass without bypass. Two independent reviews from different model
-families approved it with no open findings: OpenAI Astra through Codex
-(`codex exec review --base main -m gpt-6-astra`) and Claude Fable. The intent
-session closed with PASS, or the change is a recorded skip. The Tiden merge preview
-contains only this change's specs, tests and links, with no conflicts or blocking
-sessions. Escalate instead of merging anything that applies or changes a production
-service, starts a live provider action, adds a schema migration, changes required
-checks, branch protection, secrets or access rights, accepts risk or waives a
-promise by owner decision, weakens or removes an existing contract, spec or test,
-has disagreeing reviewers or unclear product direction, or cannot be undone by a
-follow-up pull request.
+Review levels: the level follows risk, not diff size. The agent that starts the
+work sets it from the Tiden working contract's signals: priority of the affected
+specs, the number of specs and components in the impact radius, and the number of
+lanes (file areas that concurrent PRs must not share). It writes
+`Review level: <level> — <reason>` in the PR description; a reviewer may only
+raise it. In doubt, or when a change fits several levels, take the higher one.
+A High or Critical spec, several components or lanes, security, access, data, CI or
+releases make it at least important; so does a mixed PR with several kinds of
+change, and higher when its hard or risky part needs it. Agent rules and
+instructions (`AGENTS.md`, `CLAUDE.md`, `.claude/`, process documents) are never
+micro, even for one line.
+
+| Level | Covers | Review | Merge |
+| --- | --- | --- | --- |
+| Micro | Typos and wording in documentation without a change of meaning; code comments | None | Agent, after green CI |
+| Normal | A small fix or feature in one lane with a test on a Medium or Low spec; a patch dependency update; a new test or changed assertions for such a spec; a change of meaning in a contract document | One, from the other model family: Astra for code Claude wrote, Fable for code Codex wrote | Agent |
+| Important | A new capability; several lanes or components; High or Critical specs and their tests; security and access; CI and releases; the data model; major and security dependency updates; mixed PRs | Astra and Fable | Agent |
+| Owner | Every escalation condition below; deleting or moving backlog cards; changes to these review levels or merge authority | Astra and Fable | Owner |
+
+The Tiden loop follows the kind of change. Use `tiden intent skip` when observable
+product behavior does not change: agent rules, process documents, wording. Run the
+full intent loop for every pull request that changes code beyond comments,
+including that code's documentation, and when a product contract document
+(SENDING.md, ACCESS.md, SEARCH.md and the like) changes meaning, because its spec
+changes with it. Backlog and specs are reviewed too: a new proposal branch or spec
+edit needs Fable (testable acceptance criteria, no duplicates, right component,
+priority and dependencies); a bulk backlog import or restructuring needs Astra and
+Fable; deleting or moving cards is the owner's.
+
+Order: code and local tests; push and open the PR, which starts CI; reviews in
+parallel with CI, once on the ready PR; fixes, rechecked by the same reviewer on
+the fix diff only; settle, `tiden intent progress`, `tiden intent close`; merge.
+Reviewers get the intent goal and promises (the task goal for a skip), the current
+text of the affected Tiden specs with acceptance criteria, the diff and the PR
+description. They have no Tiden access, so specs go to them as a file. Fable
+checks conformance to specs and promises, scenarios and data integrity; Astra
+checks correctness, security and edge cases. Run Astra as
+`codex exec -m gpt-6-astra "<task with the spec file and commit range>"`, because
+`review --base` does not accept its own task. Run Fable as a Claude subagent with
+model `fable`.
+
+An agent merges a pull request and its Tiden branch itself only at a level that
+allows it and when every condition holds. All required checks and branch
+protection pass without bypass. Every review the level requires approved with no
+open findings. The intent session closed with PASS, or the change is a recorded
+skip. The Tiden merge preview contains only this change's specs, tests and links,
+with no conflicts or blocking sessions. Whatever the level, escalate to the owner
+instead of merging anything that applies or changes a production service, starts
+a live provider action, adds a schema migration, changes required checks, branch
+protection, secrets or access rights, accepts risk or waives a promise by owner
+decision, weakens or removes an existing contract, spec or test, has disagreeing
+reviewers or unclear product direction, or cannot be undone by a follow-up pull
+request.
