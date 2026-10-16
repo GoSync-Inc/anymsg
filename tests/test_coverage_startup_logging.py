@@ -82,7 +82,7 @@ def test_telemetry_startup_diagnostics_are_redacted_before_sdk_construction(tmp_
         sys.modules['tiden_telemetry'] = SimpleNamespace(Client=Client)
         os.environ['ANYMSG_TIDEN_ENABLED'] = '1'
         os.environ['ANYMSG_TIDEN_DSN_FILE'] = {str(dsn)!r}
-        os.environ['ANYMSG_TIDEN_ENVIRONMENT'] = 'synthetic'
+        os.environ['ANYMSG_TIDEN_ENVIRONMENT'] = 'local-synthetic'
         try:
             assert telemetry.configure('gateway') is True
             assert_safe_records(2)

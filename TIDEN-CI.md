@@ -153,10 +153,13 @@ gate's production-issue signal is not a replacement for release-scope triage.
 Missing release evidence is unknown. Report the native verdict separately from
 the project's readiness decision. See the workflow's readiness section.
 
-Messaging telemetry currently emits `anymsg@0.9.19` from its package version.
-DeedKit is the platform name; this string does not identify an exact deployed
-commit. Preserve historical release/test identities and require an explicit
-SHA/environment/build association before claiming a release is verified.
+Messaging telemetry names its release `deedkit@<sha>` from the exact source
+commit in `DEEDKIT_SOURCE_SHA`, and falls back to `anymsg@<package version>`
+(0.9.19 at this revision) when the runtime has no valid commit. The fallback does
+not identify an exact deployed commit. Runtime events use only the `production`
+and `local-synthetic` environments (TELEMETRY.md). Preserve historical release/test
+identities and require an explicit SHA/environment/build association before
+claiming a release is verified.
 
 Review spec and test-link changes in the matching Tiden branch before merging
 them to main. A Git merge does not by itself merge the spec branch. After both

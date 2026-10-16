@@ -568,9 +568,9 @@ for(const missing of [null,'PID namespaces','Network namespaces','Seccomp-BPF sa
 def test_telemetry_safe_frames_and_delivery_failures_do_not_escape(monkeypatch):
     from messaging_service import telemetry
     event = telemetry.safe_event(RuntimeError('synthetic-private'), 'gateway', 'request_failed')
-    event.update(event_id='a' * 32, timestamp=1, environment='synthetic')
+    event.update(event_id='a' * 32, timestamp=1, environment='local-synthetic')
     event['exception']['values'][0]['stacktrace']['frames'] = [
-        {'filename': 'messaging_service/app.py', 'lineno': n + 1, 'locals': {'secret': 'private'}}
+        {'filename': 'services/messaging/messaging_service/app.py', 'lineno': n + 1, 'locals': {'secret': 'private'}}
         for n in range(30)]
     safe = telemetry.before_send(event)
     frames = safe['exception']['values'][0]['stacktrace']['frames']
@@ -581,7 +581,7 @@ def test_telemetry_safe_frames_and_delivery_failures_do_not_escape(monkeypatch):
         def capture_event(self, event):
             attempted.set()
             raise RuntimeError('synthetic-private-transport')
-    worker = telemetry.Reporter(Client(), 'gateway', 'synthetic')
+    worker = telemetry.Reporter(Client(), 'gateway', 'local-synthetic')
     try:
         assert worker.capture(RuntimeError('private'), 'request_failed')
         assert attempted.wait(1)
@@ -619,12 +619,12 @@ def test_enabled_telemetry_retains_hooks_and_safe_sdk_configuration(monkeypatch,
     dsn.write_text('https://synthetic-key@ingest.example.test/synthetic-project')
     monkeypatch.setenv('ANYMSG_TIDEN_ENABLED', '1')
     monkeypatch.setenv('ANYMSG_TIDEN_DSN_FILE', str(dsn))
-    monkeypatch.setenv('ANYMSG_TIDEN_ENVIRONMENT', 'synthetic')
+    monkeypatch.setenv('ANYMSG_TIDEN_ENVIRONMENT', 'local-synthetic')
     assert telemetry.configure('gateway')
     sdk = calls[0]
     assert sdk[2] == {'send_default_pii': False, 'before_send': telemetry.before_send,
         'http_timeout': 1.0, 'install_excepthook': False}
-    assert calls[1] == ('reporter', 'gateway', 'synthetic')
+    assert calls[1] == ('reporter', 'gateway', 'local-synthetic')
     sys.excepthook(RuntimeError, RuntimeError('private'), None)
     threading.excepthook(SimpleNamespace(exc_value=ValueError('private')))
     assert ('capture', 'RuntimeError', 'uncaught_exception') in calls
