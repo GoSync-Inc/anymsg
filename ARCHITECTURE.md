@@ -29,18 +29,21 @@ principal sources.
 | AnyMsg AI Enrichment | `enrichment.py`, `enrichment_providers.py`, `codex_enrichment.py`, `file_understanding.py`, `resource_admission.py`, enrichment SQL role | Budgets, isolated processing, profile validation, result fences, independent file descriptions and untrusted model output |
 | AnyMsg Subscriptions & Events | `subscriptions.py`, `subscription_worker.py`, `subscription_consumption.py`, `processing_events.py`, `event_delivery.py`, `delivery_worker.py`, subscription and delivery SQL roles | Key ownership, committed frontier, lifecycle/version checks, fair matching, atomic checkpointing, receipt-bound ACK, signed hints that never ACK and artifact references |
 | AnyMsg Backup & Recovery | `backup.py`, crypto, runner, worker, receiver, R2 receiver/verifier, restore worker and recovery modules | Consistent table/blob manifests, encrypted transfer, restore equality, quarantine and retention anchors |
-| AnyMsg Deployment & Verification | SQL migrations, `schema.sql`, `__init__.py` version, `release.py`, `telemetry.py`, `Dockerfile`, Compose overlays, `services/release-router/`, `.github/`, `scripts/` | Schema checksums, least privilege, images/packages, release routing, synthetic network drills and authentic CI evidence |
-| AnyMsg Python Client & Operator CLI | `services/messaging/anymsg/`, `messaging_service/__main__.py`, `client_check.py`, `media_benchmark.py`, packaged assets | Safe HTTP client, token-file CLI, source assets and explicit owner administration |
+| AnyMsg Deployment & Verification | SQL migrations, `schema.sql`, `__init__.py` version, `release.py`, `telemetry.py`, root `Dockerfile`, Compose overlays, `services/release-router/`, `.github/`, `scripts/` | Schema checksums, least privilege, images/packages, release routing, synthetic network drills and authentic CI evidence |
+| AnyMsg Python Client & Operator CLI | `services/messaging/anymsg/`, `__main__.py` operator entry point, root `client_check.py` and `media_benchmark.py`, packaged assets | Safe HTTP client, token-file CLI, source assets and explicit owner administration |
 | AnyMsg JavaScript Client | `packages/npm/` | Dependency-free HTTP client, local argument validation, TypeScript declarations and token-file CLI |
 | Platform Gateway | `services/gateway/` | Selected module tools, exact action ceilings, per-principal backend credentials, bounded original downloads and preserved domain receipts, without provider sessions |
 | Family Calendar | `services/calendar/` | Google and CalDAV accounts, explicit roles and grants, plan/apply receipts, encrypted provider credentials and a singleton synchronization worker |
 | Voice Calls | `services/calls/` | Principal-owned briefs and call tasks, durable follow-ups and owner decisions, scoped messaging context, Pipecat runtime and signed provider media boundaries |
 | Platform Integration & Operations | `tests/platform/`, `docs/quality/`, Tiden snapshot and preservation scripts | Migration compatibility, specification/test identity preservation and cross-module verification |
 
-Unless otherwise specified, Python module names in the table are under
-`services/messaging/messaging_service/`. `store.py` supplies shared transaction/authorization and
+Bare file names in the table are under `services/messaging/messaging_service/`;
+paths with a directory are relative to the repository root, and root files are
+marked as such. `store.py` supplies shared transaction/authorization and
 dispatch infrastructure; components may intentionally overlap there. The
 operator entry point and schema migrations likewise cross domain boundaries.
+The Tiden snapshot and preservation scripts belong to both Deployment &
+Verification (through `scripts/`) and Platform Integration & Operations.
 Do not interpret a change in a shared file as coverage of every affected domain.
 
 ## Data flow and process boundaries
@@ -87,14 +90,18 @@ Examples of boundaries that must stay explicit:
   and document source spans. There is no query argument to `get_file_segments`.
 - `history-plan` previews a recent-first plan. Durable multi-wave execution is
   planned; a successful preview does not prove provider history was downloaded.
-- Subscriptions are durable and passive. Host wake-up/push delivery and event ACK
-  are planned; a new MCP result alone cannot activate an idle agent.
+- Subscriptions are durable. Passive event reads never ACK; explicit
+  receipt-bound ACK and operator-registered signed hints are implemented. A
+  delivered hint is neither an ACK nor a verified host turn. Host wake-up
+  remains planned; a hint or a new MCP result alone cannot activate an idle agent.
 - Owner-read observations, recipient delivery/read receipts and a credential's
   local reply dismissal are different evidence. Passive reads do not send a
   provider read receipt.
 - Original deduplication and context-bound derivative reuse are implemented.
-  Cold-original eviction/rehydration and independent AI artifact reuse remain
-  planned. An unavailable original is not a download guarantee.
+  Opt-in managed eviction of processed, unpinned originals and best-effort
+  recovery through the collector are implemented. A cold archive before
+  eviction with verified rehydration, and independent AI artifact reuse,
+  remain planned. An unavailable original is not a download guarantee.
 - Container defaults describe the deployment template. Synthetic tests do not
   prove current provider completeness, transcription quality, server capacity
   or health of an off-site backup receiver.
