@@ -3,9 +3,15 @@
 # DeedKit: Claude Code notes
 
 AGENTS.md (imported above) is the contributor contract; this file adds verified
-project facts. This is the existing AnyMsg repo: `anymsg` / `messaging_service`
-package, import, database and API names stay compatible. Every service keeps its
-own lockfile, environment, process and state. Path rules live in `.claude/rules/`.
+project facts. Follow [the Claude Code Tiden guide](docs/operations/claude-code-tiden.md)
+and [TIDEN-CI.md](TIDEN-CI.md); do not maintain a separate Claude backlog or fork
+the vendor skills. Path rules live in `.claude/rules/`.
+
+DeedKit is the product name; this is the existing AnyMsg repo. `anymsg`,
+`messaging_service`, `ANYMSG_*`, `ANYM-*` spec references and `anymsg-ci::*` check
+identities keep their compatibility/history meaning, and package, import, database
+and API names stay compatible. A display rename does not authorize changing these
+identities. Every service keeps its own lockfile, environment, process and state.
 
 ## Layout
 - `services/messaging`: AnyMsg server (Python 3.13, PostgreSQL 18, schema 32)
@@ -69,5 +75,7 @@ uv run python scripts/smoke.py --dsn-file <file>      # synthetic MCP/HTTP drill
 - A new whatsmeow source file must be added to `NATIVE_SOURCES` in
   `services/messaging/hatch_build.py` (sdist allowlist).
 - Merged source is not live verification; synthetic CI is not live-session authority.
-- Tiden skills (`product-context`, `start-intent`, `capture-intent`, ...) are local
-  installs, not in git: `tiden skill install --agent claude-code --local`.
+- Tiden skills (`product-context`, `start-intent`, `capture-intent`, ...) come from
+  the tiden CLI and are not in git. Check `tiden skill list --agent claude-code --global`
+  and `--local`; a new worktree has no local copy, so install missing skills with
+  `tiden skill install --agent claude-code --global`.
