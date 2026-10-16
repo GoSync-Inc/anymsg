@@ -26,6 +26,13 @@ missing descriptions are reported honestly. The original can be requested throug
 the existing bounded provider queue; provider availability is not guaranteed.
 Without this flag, usable complete current processing remains required.
 
+Extraction and original-dependent enrichment pause while a matching managed
+eviction journal is prepared/completed. They preserve processing attempts,
+budgets and existing text until verified re-publication makes the original
+resident again. Unknown missing or corrupt originals keep their normal failure
+diagnostics. Install the updated indexer/enrichment SELECT grants with the release;
+these roles gain no residency or journal mutation permission.
+
 The flag does not shorten the migration's initial access grace period. If the
 owner explicitly chooses immediate expiry of historical originals, adopt their
 historical age as a separate one-time operation during the initial maintenance

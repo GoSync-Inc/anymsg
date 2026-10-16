@@ -15,6 +15,16 @@ from uuid import uuid4
 LOCK_NAME='attachment-residency-v1'
 RETENTION_DAYS=30
 
+# Used only while holding lifecycle_lock, with the current attachment aliased a.
+# A durable managed transition pauses original-dependent work without spending
+# processing retries. Unknown missing/corrupt originals retain normal diagnostics.
+PROCESSABLE_ORIGINAL='''NOT EXISTS(SELECT FROM attachment_residency residency
+    JOIN attachment_eviction_journal eviction ON eviction.id=residency.eviction_id
+        AND eviction.digest=residency.digest AND eviction.bytes=residency.bytes
+    WHERE residency.digest=a.digest AND residency.bytes=a.bytes
+        AND ((residency.state='evicting' AND eviction.state='prepared')
+            OR (residency.state='evicted' AND eviction.state='completed')))'''
+
 
 def lifecycle_lock(c):
     c.execute('SELECT pg_advisory_xact_lock(hashtextextended(%s,0))',(LOCK_NAME,))

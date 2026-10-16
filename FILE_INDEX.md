@@ -154,6 +154,12 @@ unsupported formats and invalid documents terminate explicitly. The operator can
 requeue a terminal job after correcting a parser/storage problem; no remote
 administration tool is exposed.
 
+With schema 33/34, a matching prepared/completed managed eviction pauses an
+original-dependent claim without changing its attempts, text or budget. Verified
+re-publication makes queued processing eligible again. Unexpected missing bytes
+still use the failure/retry path. Install the current indexer role's read-only
+residency/journal grants before starting this worker.
+
 Migration 013 adds language vectors, source-display and extraction metadata,
 processor profile/version, and occurrence indexes without another table. It does
 not re-extract historical ready documents automatically. A raw extraction may be

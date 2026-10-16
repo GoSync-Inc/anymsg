@@ -707,3 +707,94 @@ def test_unprocessed_expiry_keeps_partial_text_and_produces_explicit_backup_abse
     metadata=s.get_attachment(key,fid)
     assert metadata['reason']=='original_evicted' and metadata['next_action']=='request_file_download'
     assert metadata['understanding']['state']!='ready'
+
+
+@pytest.mark.parametrize('stage',['extraction','audio','image','document'])
+def test_unprocessed_expiry_defers_original_processing_without_spending_retries_until_recovery(archive,tmp_path,stage):
+    from messaging_service.blobs import BlobWriter
+    from messaging_service.file_index import FileIndexer
+    from messaging_service.enrichment import EnrichmentWorker
+    from test_enrichment import profile
+    mime={'extraction':'application/pdf','audio':'audio/ogg','image':'image/png','document':'text/plain'}[stage]
+    ar,s,key,_=archive;fid,blob=old_unprocessed(archive,mime=mime);api=lifecycle()
+    with s.pool.connection() as c:
+        c.execute("UPDATE attachment_text SET state='unsupported' WHERE attachment<>%s",(fid,))
+        if stage=='document':
+            c.execute("UPDATE attachment_text SET state='ready',text_content='Retained synthetic document detail' WHERE attachment=%s",(fid,))
+        c.execute('TRUNCATE enrichment_budget')
+        text_before=dict(c.execute('SELECT * FROM attachment_text WHERE attachment=%s',(fid,)).fetchone())
+        enrichment_before=dict(c.execute('SELECT * FROM attachment_enrichment WHERE attachment=%s',(fid,)).fetchone())
+    assert api.LifecycleWorker(s,expire_unprocessed=True).run_once(apply=True)['evicted']==1
+    if stage=='extraction':
+        worker=FileIndexer(s.pool.conninfo,s.files)
+        assert worker.claim() is None
+    else:
+        worker=EnrichmentWorker(s.pool.conninfo,s.files,{'accounts':['archive-test'],
+            'max_jobs_per_day':20,'profiles':{stage:profile(tmp_path,kind=stage)}})
+        assert worker.claim() is None
+    with s.pool.connection() as c:
+        assert dict(c.execute('SELECT * FROM attachment_text WHERE attachment=%s',(fid,)).fetchone())==text_before
+        assert dict(c.execute('SELECT * FROM attachment_enrichment WHERE attachment=%s',(fid,)).fetchone())==enrichment_before
+    assert s.request_file_download(key,fid)['request_status']=='queued'
+    media=ar.claim_media('synthetic-processing-recovery');writer=BlobWriter(s.files,reserve_bytes=0)
+    ar.finish_media(media,writer.write([b'Synthetic retained contract']),writer)
+    claimed=worker.claim()
+    assert claimed is not None
+    if stage=='extraction':
+        from messaging_service.file_extract import Extraction
+        assert claimed['attachment']==fid and claimed['attempts']==1
+        worker.finish(claimed,Extraction('ready','Recovered synthetic full text'))
+    else:
+        row,_=claimed
+        assert row['attachment']==fid and row['attempts']==1
+        worker.finish(row,error='synthetic_fixture_complete')
+
+
+def test_unknown_missing_original_still_consumes_extraction_failure_attempt(archive):
+    from messaging_service.file_index import FileIndexer
+    _,s,_,_=archive;fid,blob=old_unprocessed(archive)
+    with s.pool.connection() as c:c.execute("UPDATE attachment_text SET state='unsupported' WHERE attachment<>%s",(fid,))
+    (s.files/blob.digest).unlink()
+    report=FileIndexer(s.pool.conninfo,s.files).run_once()
+    assert report['claimed'] and report['error_code']=='original_unavailable'
+    with s.pool.connection() as c:
+        assert c.execute('SELECT attempts FROM attachment_text WHERE attachment=%s',(fid,)).fetchone()['attempts']==1
+        assert not lifecycle().is_managed_evicted(c,blob.digest,blob.bytes)
+
+
+@pytest.mark.parametrize('stage',['extraction','audio'])
+def test_restricted_processing_roles_can_defer_managed_absence_but_cannot_change_it(archive,tmp_path,stage):
+    from contextlib import contextmanager
+    from pathlib import Path
+    from uuid import uuid4
+    import psycopg
+    from psycopg import sql
+    from messaging_service.file_index import FileIndexer
+    from messaging_service.enrichment import EnrichmentWorker
+    from test_enrichment import profile
+    _,s,_,_=archive;fid,blob=old_unprocessed(archive,mime='audio/ogg' if stage=='audio' else 'application/pdf')
+    with s.pool.connection() as c:c.execute("UPDATE attachment_text SET state='unsupported' WHERE attachment<>%s",(fid,))
+    assert lifecycle().LifecycleWorker(s,expire_unprocessed=True).run_once(apply=True)['evicted']==1
+    kind='indexer' if stage=='extraction' else 'enricher'
+    template='indexer_role.sql' if stage=='extraction' else 'enrichment_role.sql'
+    role='retention_processing_'+uuid4().hex
+    ddl=(Path('services/messaging/messaging_service')/template).read_text().replace('messaging_'+kind,role)
+    @contextmanager
+    def connection():
+        with s.pool.connection() as c:
+            c.execute(sql.SQL('SET LOCAL ROLE {}').format(sql.Identifier(role)))
+            yield c
+    with s.pool.connection() as c:c.execute(ddl)
+    try:
+        if stage=='extraction':worker=FileIndexer(s.pool.conninfo,s.files)
+        else:worker=EnrichmentWorker(s.pool.conninfo,s.files,{'accounts':['archive-test'],
+            'max_jobs_per_day':20,'profiles':{'audio':profile(tmp_path,kind='audio')}})
+        worker.connection=connection
+        assert worker.claim() is None
+        for statement in ('UPDATE attachment_residency SET pinned=false','DELETE FROM attachment_eviction_journal'):
+            with pytest.raises(psycopg.errors.InsufficientPrivilege):
+                with connection() as c:c.execute(statement)
+    finally:
+        with s.pool.connection() as c:
+            c.execute(sql.SQL('DROP OWNED BY {}').format(sql.Identifier(role)))
+            c.execute(sql.SQL('DROP ROLE {}').format(sql.Identifier(role)))
