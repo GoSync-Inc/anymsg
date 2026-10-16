@@ -42,6 +42,14 @@ workspace `1dc18e09-4a09-4d74-8300-cd4302622357` and product
    `capture-intent` (candidates, settle, waive) and `tiden intent close`. Defer a
    connected item that has no test yet with `--propose-tests`; never accept risk to
    clear an unrelated Backlog card.
+7. After merging `main` into the branch, pass the session's own commit range to
+   `progress`, `candidates` and `close` with `--changes`
+   (`startSha` = merge base with `origin/main`, `endSha` = `HEAD`). Otherwise the
+   merged files, such as `BACKLOG.md`, pull unrelated specs into the close gate.
+8. On a non-`main` branch, `tiden test link-spec` creates a link proposal; check it
+   with `tiden branch link-proposals list --name <intent-branch>`, not `test links`.
+   The close gate reads the latest run in the product, so close right after your
+   own run when other pull requests are publishing evidence.
 
 ## Where work goes
 
