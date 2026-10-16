@@ -26,13 +26,14 @@ cannot infer. Do not copy or fork the vendor skill bodies into another workflow.
 | `generate-tests` | Reconcile genuinely missing test cases. For this existing product, review the import plan and identity/link preservation before any authoritative ingest. |
 | `triage-issues` | Investigate reported runtime errors and prove a scoped repair; issue closure is separate from deployment acceptance. |
 
-Inspect the actual local scope with `tiden skill list --agent codex --local`.
-Install missing vendor skills with `tiden skill install --agent codex --local`;
-use `--agent claude-code` for that agent. Do not overwrite customized skills or
-change global hook trust, credentials, sandbox permissions or other projects as
-part of routine setup. `tiden doctor` can report global-scope warnings even when
-local skills and the current session's network access work. Check each warning's
-actual scope instead of rerunning setup blindly.
+Inspect both scopes with `tiden skill list --agent codex --global` and `--local`.
+A new worktree has no local copy, so install missing vendor skills with
+`tiden skill install --agent codex --global`; use `--agent claude-code` for that
+agent. Do not overwrite customized skills or change global hook trust,
+credentials, sandbox permissions or other projects as part of routine setup.
+`tiden doctor` can report global-scope warnings even when local skills and the
+current session's network access work. Check each warning's actual scope instead
+of rerunning setup blindly.
 
 The local coding-agent intent loop uses the current agent and the Tiden CLI.
 Tiden's hosted Agents page is a separate automation surface; configuring it or
@@ -81,6 +82,70 @@ mass-convert legacy statuses without reviewing both implementation and how the
 server includes that status in traceability/gates.
 
 ## Working loop
+
+### Current truth and future proposals
+
+Put **new future-only** requirements on a separate proposal branch per independently
+deliverable increment. Record priority, dependencies and historical IDs there.
+Keep the proposal open until its behavior and evidence are reviewed. Do not merge
+an entire planning collection into main merely to register its existence: a branch
+merge admits all of its reviewed changes, not one selected task.
+
+Main contains maintained behavior and its known deficiencies. Existing defects,
+unverified operational acceptance and unresolved production incidents remain
+readiness concerns. A mixed item needs an explicit current-defect/operational-risk
+boundary and a separate future-increment boundary before any relocation. A new
+filter, output field or contract change is not automatically a regression.
+
+The initial backlog import already placed future requirements on main. In the
+CLI 0.33.0 and UI inspected on 2026-10-16, no supported main-to-proposal relocation
+preserving the same spec identity/history was found. `spec update --branch` makes
+a copy-on-write proposal; it does not remove the original from main. Creating a
+release does not provide a documented spec-status filter. Until an identity-safe
+relocation is verified, keep those records and report the scope debt explicitly.
+Do not substitute delete/recreate, copied cards, `Done`, fabricated links or risk
+acceptance for a move. A private migration manifest is an audit artifact, not a
+second editable backlog.
+
+### Readiness decision
+
+Record these independently, with timestamp, branch/release ID and exact Git SHA:
+
+1. Native Tiden main/branch gate and its actual reasons. A feature subtree check
+   is only a subtree result; a cached verdict keeps its original computed time.
+2. A captured gate for the candidate release/environment and matching CI evidence.
+   A missing release gate is unknown, not a pass. A package version shared by
+   several commits cannot establish the deployed SHA.
+3. Unresolved production issues and component attribution, plus the named live
+   acceptance requirements. A main `prod_issues: PASS` does not supersede this
+   review: the vendor documents production-issue gating for attributed release
+   scopes. Unattributed errors and absent release snapshots require investigation.
+
+Readiness remains blocked while a relevant current defect, unresolved production
+incident or required acceptance lacks evidence. This is the project's release
+decision; do not present it as a newly computed native Tiden verdict. Classifying
+future proposals alone does not repair runtime incidents or establish readiness.
+
+For issue triage, read `issue fix-context`, every suspect source path and the
+relevant historical revision. `verified` on a suspect spec is not proof that its
+tests cover the incident. Report truncation. Preserve redaction and issue history;
+resolve only after a matching regression is demonstrated and the repair verified.
+Deployment acceptance remains separate, and old `lastSeen` alone proves nothing.
+
+### Names and release identity
+
+DeedKit is the platform; AnyMsg is the compatibility identity of its messaging
+package. Current messaging telemetry constructs `anymsg@` plus
+`messaging_service.__version__` (0.9.19 at the reviewed revision). It is a module
+version, not a platform deployment SHA. The Tiden product's historical `ANYM`
+prefix and existing component/test identities likewise survive the rename.
+
+Keep historical release records and links. A future build-identity change must
+coordinate the runtime release string, CI release record, environment, source SHA
+and build URL. Do not relabel old events or manufacture a production release to
+obtain a gate. Contributor headings and display text can use DeedKit immediately.
+
+### Implementation sequence
 
 1. Read this guide and `TIDEN-CI.md`. Fetch the relevant current Tiden main specs
    and inspect open intent branches/PRs before creating anything. A match in an

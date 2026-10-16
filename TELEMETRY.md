@@ -3,6 +3,14 @@
 CI results and runtime error tracking are independent. Runtime events do not add
 test coverage or prove that a feature works. Error tracking is off by default.
 
+DeedKit is the platform name. Messaging events currently use `anymsg@0.9.19`,
+constructed from the retained `anymsg` package version in
+`messaging_service.__version__`. This is not an exact deployment identifier:
+multiple commits can emit the same version. Preserve historical releases and
+their issue links. Any future release-identity change must coordinate runtime,
+CI, environment, source SHA and build URL. See the
+[Tiden readiness workflow](docs/operations/tiden-product-workflow.md).
+
 Install `anymsg[telemetry]` or build the intended Docker target with
 `--build-arg ANYMSG_INSTALL_TELEMETRY=1`. This uses the official, hash-pinned
 `tiden-telemetry` Python SDK. No browser JavaScript SDK is required for AnyMsg.
