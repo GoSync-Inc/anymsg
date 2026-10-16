@@ -35,6 +35,7 @@ TIDEN_INTENT_LINE = re.compile(
     rf"^[ \t]*Tiden intent branch:[ \t]*\[(intent/[a-z0-9]+(?:[/_-][a-z0-9]+)*)\]"
     rf"\(https://app\.tiden\.ai/({_UUID})/products/({_UUID})/branches/({_UUID})\)", re.MULTILINE)
 MAX_INTENT_LINKS = 5
+MERGE_QUEUE_SKIP = "merge queue run of a temporary group commit"
 
 
 def source_path(value: str, root: Path) -> str:
@@ -192,6 +193,13 @@ def linked_intent_branch(links: list, branches: list, product: str, workspace: s
     return names.pop() if len(names) == 1 else None
 
 
+def merge_queue_run(manifest: dict) -> bool:
+    """A GitHub merge queue run tests a temporary `gh-readonly-queue/` group commit."""
+    git_branch = manifest.get("git_branch")
+    return manifest.get("event") == "merge_group" or (
+        isinstance(git_branch, str) and git_branch.startswith("gh-readonly-queue/"))
+
+
 def routed_target(name: object, git_branch: str) -> bool:
     return isinstance(name, str) and (name == git_branch or name.startswith("intent/"))
 
@@ -215,13 +223,17 @@ def publish(directory: Path, manifest: dict, branch: str | None, product: str, c
         return value
 
     def skip(reason: str, level: str) -> dict:
-        # Without its intent branch a pull request has no Tiden home; main publishes the merged code.
+        # A merge queue group, or a pull request without its intent branch, has no Tiden home;
+        # main publishes the merged code.
         (directory / "tiden-route.json").write_text(json.dumps({"branch": None, "source": "skipped",
                                                                 "reason": reason}))
         print(f"::{level} title=Tiden evidence not published::{reason}; main CI publishes it after merge")
         return {"seqNum": None, "status": "skipped", "branchName": None, "branchId": None,
                 "buildSha": manifest["sha"], "stats": {}, "liveDocStatus": None}
 
+    if merge_queue_run(manifest):
+        # Before any Tiden call and whatever target was chosen: a queue run never publishes.
+        return skip(MERGE_QUEUE_SKIP, "notice")
     pull_request = manifest.get("event") == "pull_request"
     if routed and pull_request and not manifest.get("pr_tiden_links"):
         return skip("pull request description has no Tiden intent branch link", "notice")
@@ -320,15 +332,19 @@ def main() -> int:
         print(json.dumps({"test_counts": result["test_counts"], "check_counts": result["check_counts"]}))
         return 0
     manifest = json.loads((directory / "manifest.json").read_text())
-    mapping = json.loads(os.environ.get("TIDEN_BRANCH_MAP") or "{}")  # a malformed map fails loudly
-    try:
-        branch, routed = route_branch(manifest, mapping)
-    except ValueError:
-        if not manifest.get("pr_tiden_links") and manifest.get("event") != "pull_request":
-            raise
-        branch, routed = None, True  # publish() resolves the pull request's intent link or skips
-    result = publish(directory, manifest, branch, os.environ["TIDEN_PRODUCT_ID"], routed=routed,
-                     workspace=os.environ.get("TIDEN_WORKSPACE_ID", ""))
+    if merge_queue_run(manifest):
+        # publish() skips a queue run before any Tiden call: no credentials, map or route needed.
+        result = publish(directory, manifest, None, "")
+    else:
+        mapping = json.loads(os.environ.get("TIDEN_BRANCH_MAP") or "{}")  # a malformed map fails loudly
+        try:
+            branch, routed = route_branch(manifest, mapping)
+        except ValueError:
+            if not manifest.get("pr_tiden_links") and manifest.get("event") != "pull_request":
+                raise
+            branch, routed = None, True  # publish() resolves the pull request's intent link or skips
+        result = publish(directory, manifest, branch, os.environ["TIDEN_PRODUCT_ID"], routed=routed,
+                         workspace=os.environ.get("TIDEN_WORKSPACE_ID", ""))
     print(json.dumps({k: result[k] for k in ("seqNum", "status", "branchName", "branchId", "buildSha", "stats", "liveDocStatus")}))
     return 0 if result["status"] in {"passed", "skipped"} else 1
 
