@@ -5,6 +5,15 @@ and a complete ciphertext file on the source VM. The default remains
 `staged_v1`; existing format1/format2 encrypted bundles remain restorable.
 This transport change has no MCP endpoint and no messenger authentication.
 
+The opt-in [private R2 destination](BACKUP_R2.md) preserves the same upload-only
+SSH/v2 producer boundary while replacing full receiver-disk staging with bounded
+multipart uploads. Its setup and trusted marker are separate from the filesystem
+receiver described below; installation does not switch an existing destination.
+Its optional root-only server verifier performs quarantined restores and verified
+rotation on the independent receiver without a daily operator-computer dependency.
+Its root coordinator controls the recovery key and gives only the isolated helper
+read-only access; upload stays confined.
+
 ## Capture and delivery
 
 The isolated worker takes the same exported PostgreSQL snapshot and cold

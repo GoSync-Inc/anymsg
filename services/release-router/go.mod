@@ -1,3 +1,3 @@
 module github.com/GoSync-Inc/deedkit/services/release-router
 
-go 1.26.2
+go 1.26.9

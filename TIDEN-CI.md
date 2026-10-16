@@ -21,17 +21,35 @@ In GitHub Actions repository settings, add:
   existing Tiden spec branches, for example `{"codex/example":"intent/example"}`.
   `main` maps to Tiden `main` automatically.
 
-A mapping must name an existing Tiden branch and always wins. A feature branch
-without a mapping is reported under its own Git branch name. Tiden skips
-live-doc sync for a branch name it does not know, so the publisher first creates
-a Tiden branch of that name when none exists. Tiden may instead attribute the run
-to the intent branch whose session (`tiden intent start` on that Git branch)
-recorded it. The publisher reads the result back and accepts only that
-same-named branch or an `intent/` branch, never `main`. Git branch names Tiden
-cannot use (uppercase, dots) still need a mapping. Do not label a feature run as
-`main` just to make the main gate green. Failed evidence association fails the reporting job. Without a token the
-job clearly states that reporting is not configured. No workspace credentials
-belong in Git.
+A mapping must name an existing Tiden branch and always wins. Otherwise a pull
+request run uses the intent branch linked in the pull request description, as the
+intent loop requires:
+
+```text
+Tiden intent branch: [intent/<date>-<slug>](https://app.tiden.ai/<workspace>/products/<product>/branches/<id>)
+```
+
+CI reads only that line, from the pull request event file rather than an
+environment variable, and keeps only the branch name and IDs. The link must be in
+this workspace and product, its text must name the branch its ID resolves to, and
+that `intent/` branch must be open. Exactly one such branch becomes an explicit
+target; any other link is ignored. The event is captured when a run starts and a
+re-run reuses it, so add the line before opening or pushing the pull request.
+Without a usable link, a feature branch without a mapping is reported under its
+own Git branch name. Tiden skips live-doc sync for a branch name it does not know, so the
+publisher first creates a Tiden branch of that name when none exists. Tiden may
+instead attribute the run to the intent branch whose session (`tiden intent
+start` on that Git branch) recorded it. The publisher reads the result back and
+accepts only that same-named branch or an `intent/` branch, never `main`. Git
+branch names Tiden cannot use (uppercase, dots) still need a mapping or a usable
+intent link. The `tiden-route.json` receipt records the chosen branch and why.
+Do not label a feature run as `main` just to make the main gate green. Failed
+evidence association fails the reporting job. Without a token the job clearly
+states that reporting is not configured. No workspace credentials belong in Git.
+
+CI runs on `push` only for `main`. A feature branch is verified by its pull
+request run, so a push does not repeat CI or publish a second copy of the
+evidence to a same-named Tiden branch.
 
 For an explicit baseline rerun, dispatch `CI` on the reporting-code branch with
 `source_ref` set to the exact source revision and `tiden_branch` to the matching
@@ -40,9 +58,9 @@ Normal pull requests record their actual tested merge SHA.
 
 ## Verdicts and coverage
 
-`run create` always receives `--branch` and `--intent-session none`. A mapped
-run must land on exactly the mapped branch ID. An unmapped run must land on the
-same-named or an intent branch, as described above. The job waits for live-doc
+`run create` always receives `--branch` and `--intent-session none`. A mapped or
+pull-request-linked run must land on exactly that branch ID. Any other unmapped
+run must land on the same-named or an intent branch, as described above. The job waits for live-doc
 sync and checks the resulting branch before reporting success. The authentic run
 then adopts existing case identities or imports the reported cases. Reported
 step failures and missing required verifications are also recorded as failed
@@ -82,6 +100,22 @@ unimplemented plans as `no_test`: the branch verdict is `NOT VERIFIED`, while
 main reports `BLOCKED` for those coverage gaps. Status is not a release-scope
 filter. Preserve that result and inspect its per-spec causes; do not fabricate
 coverage or weaken CI to make a planning inventory pass a release gate.
+
+Create new future-only specs on independent proposal branches. The existing
+merged backlog needs a verified identity/history-preserving relocation; COW
+updates or deleting/recreating cards do not establish that preservation. Keep
+real defects and required operational acceptance visible in the current scope.
+
+Readiness also requires a captured candidate release gate and an explicit review
+of unresolved production issues, including unattributed ones. The native main
+gate's production-issue signal is not a replacement for release-scope triage.
+Missing release evidence is unknown. Report the native verdict separately from
+the project's readiness decision. See the workflow's readiness section.
+
+Messaging telemetry currently emits `anymsg@0.9.19` from its package version.
+DeedKit is the platform name; this string does not identify an exact deployed
+commit. Preserve historical release/test identities and require an explicit
+SHA/environment/build association before claiming a release is verified.
 
 Review spec and test-link changes in the matching Tiden branch before merging
 them to main. A Git merge does not by itself merge the spec branch. After both

@@ -161,13 +161,35 @@ def encrypt_snapshot(directory,output,recipient,age='age',*,consume_staged_blobs
 
 
 def decrypt_snapshot(encrypted,identity,destination,age='age',max_bytes=20*1024**3):
+    return _decrypt_snapshot([age,'-d','-i',str(identity),str(encrypted)],destination,max_bytes)
+
+
+def decrypt_snapshot_stream(source,identity,destination,age='age',max_bytes=20*1024**3):
+    """Bounded stdin decryption, published after EOF and authentication.
+
+    The isolated worker owns stdin. Its coordinator enforces a whole-job deadline
+    and kills the owned process on stalled input. No ciphertext is staged.
+    """
+    return _decrypt_snapshot([age,'-d','-i',str(identity)],destination,max_bytes,source=source)
+
+
+def _decrypt_snapshot(command,destination,max_bytes,*,source=None):
     destination=Path(destination)
     if destination.exists(): raise ValueError('restore_destination_exists')
     destination.parent.mkdir(mode=0o700,parents=True,exist_ok=True)
-    temporary=Path(tempfile.mkdtemp(prefix='.decrypt-',dir=destination.parent)); process=None
+    temporary=Path(tempfile.mkdtemp(prefix='.decrypt-',dir=destination.parent)); process=None;thread=None;failures=[]
     try:
         with tempfile.TemporaryFile() as errors:
-            process=subprocess.Popen([age,'-d','-i',str(identity),str(encrypted)],stdout=subprocess.PIPE,stderr=errors)
+            process=subprocess.Popen(command,stdin=subprocess.PIPE if source is not None else None,stdout=subprocess.PIPE,stderr=errors)
+            if source is not None:
+                def feed():
+                    try:
+                        while chunk:=source.read(1024**2):process.stdin.write(chunk)
+                    except BaseException as exc:failures.append(exc)
+                    finally:
+                        try:process.stdin.close()
+                        except BrokenPipeError:pass
+                thread=threading.Thread(target=feed,name='backup-decrypt-input',daemon=True);thread.start()
             total=0; seen=set()
             with tarfile.open(fileobj=process.stdout,mode='r|') as archive:
                 for member in archive:
@@ -179,16 +201,20 @@ def decrypt_snapshot(encrypted,identity,destination,age='age',max_bytes=20*1024*
                     if total>max_bytes or shutil.disk_usage(temporary).free-member.size<1024**3:
                         raise ValueError('restore_size_limit')
                     seen.add(name); target=temporary/name; target.parent.mkdir(mode=0o700,exist_ok=True)
-                    source=archive.extractfile(member)
+                    member_source=archive.extractfile(member)
                     fd=os.open(target,os.O_CREAT|os.O_EXCL|os.O_WRONLY,0o600)
-                    with source,os.fdopen(fd,'wb') as out:
-                        shutil.copyfileobj(source,out,1024**2); out.flush(); os.fsync(out.fileno())
+                    with member_source,os.fdopen(fd,'wb') as out:
+                        shutil.copyfileobj(member_source,out,1024**2); out.flush(); os.fsync(out.fileno())
             # Drain authenticated trailing bytes before accepting the decryption result.
             while trailing:=process.stdout.read(1024**2):
                 total+=len(trailing)
                 if total>max_bytes: raise ValueError('restore_size_limit')
             process.stdout.close()
             if process.wait(timeout=60): raise RuntimeError('backup_decryption_failed')
+            if thread is not None:
+                thread.join(timeout=10)
+                if thread.is_alive():raise RuntimeError('backup_decryption_failed')
+                if failures:raise failures[0]
             if not {'manifest.json','database.dump'}<=seen: raise ValueError('incomplete_backup')
         from .recovery_state import read_manifest
         from .backup import verify_bundle
@@ -203,4 +229,5 @@ def decrypt_snapshot(encrypted,identity,destination,age='age',max_bytes=20*1024*
     finally:
         if process is not None and process.poll() is None:
             process.terminate(); process.wait(timeout=10)
+        if thread is not None:thread.join(timeout=10)
         if temporary.exists(): shutil.rmtree(temporary)

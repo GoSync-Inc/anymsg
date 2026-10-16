@@ -1,7 +1,7 @@
 ARG PYTHON_IMAGE=python:3.13-slim-bookworm@sha256:a1165e272e578941b84abc79e4ab38a0305cd12803a5c4247979ac7655f4d641
 ARG NODE_IMAGE=node:24-bookworm-slim@sha256:51b1100cc2a83d370c6a60952e3f2989c8a43159d0e38586e090f3b3326efefd
 ARG POSTGRES_IMAGE=postgres:18-bookworm@sha256:afc7e2d441324c0388fa80c3d24f733b4194a4eb7f47dd8ee2b08eb1a24a647c
-ARG GO_IMAGE=golang:1.26.2-bookworm@sha256:47ce5636e9936b2c5cbf708925578ef386b4f8872aec74a67bd13a627d242b19
+ARG GO_IMAGE=golang:1.26.9-bookworm@sha256:d9c68c2c51161e12fd77e4c6320687c9cd86e1af1e3ad6e6cd63ff970641453c
 FROM ${GO_IMAGE} AS whatsmeow-build
 WORKDIR /src
 COPY whatsapp/whatsmeow/go.mod whatsapp/whatsmeow/go.sum ./
@@ -128,7 +128,8 @@ ENV HOME=/tmp PUPPETEER_SKIP_DOWNLOAD=true
 USER probe
 CMD ["python", "-m", "messaging_service.whatsapp_collector", "--config", "/run/secrets/whatsapp_config"]
 
-# Operator-only image. Never receives Docker socket, SSH key or age private key.
+# Operator-only image; no Docker socket or SSH key. The producer receives no
+# recovery key; only the isolated restore helper gets an explicit read-only key.
 FROM ${POSTGRES_IMAGE} AS backup
 USER root
 RUN apt-get update && apt-get install -y --no-install-recommends ca-certificates \
