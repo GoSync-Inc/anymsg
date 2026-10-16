@@ -1,127 +1,82 @@
-# Claude Code: работа с DeedKit через Tiden
+# Claude Code with Tiden
 
-Это инструкция агенту, а не второй бэклог. Актуальные требования, приоритеты,
-история и доказательства находятся в
-[существующем продукте DeedKit](https://app.tiden.ai/1dc18e09-4a09-4d74-8300-cd4302622357/products/75bd0580-2af4-4d5a-b236-c5a9d7ff7ce1).
+This is the Claude Code entry point for DeedKit's Tiden workflow. It adds only what
+is specific to Claude Code. The rules live in
+[tiden-product-workflow.md](tiden-product-workflow.md) (product work, readiness and
+naming) and [TIDEN-CI.md](../../TIDEN-CI.md) (CI evidence). Requirements, priorities
+and evidence live in the
+[DeedKit Tiden product](https://app.tiden.ai/1dc18e09-4a09-4d74-8300-cd4302622357/products/75bd0580-2af4-4d5a-b236-c5a9d7ff7ce1);
+this file is not a backlog.
 
-## Начало работы
+## Setup check
 
-1. Прочитай `AGENTS.md`, `README.md`, документацию затронутого модуля,
-   `docs/operations/tiden-product-workflow.md` и `TIDEN-CI.md`.
-2. Проверь Git-ветку, изменения, актуальный `origin/main`, открытые PR и ветки
-   Tiden. Не перезаписывай работу другого агента. Git merge и Tiden merge — разные
-   операции; наличие кода в main ещё не доказывает актуальность спецификации.
-3. Используй штатные навыки Tiden. Проверь локальную установку:
+Run `tiden doctor`. For Claude Code it must report the six skills, the Tiden allow
+rules and the `claude-code` intent hooks. Skills are not in Git: check
+`tiden skill list --agent claude-code --global` and `--local`, and install missing
+ones with `tiden skill install --agent claude-code --global`, because a new worktree
+has no local copy. Do not copy or edit skills by hand, and do not change other
+agents' hooks, hook trust or credentials. When a worktree is not bound, pass
+workspace `1dc18e09-4a09-4d74-8300-cd4302622357` and product
+`75bd0580-2af4-4d5a-b236-c5a9d7ff7ce1` explicitly.
 
-   ```sh
-   tiden --version
-   tiden skill list --agent claude-code --global
-   tiden skill list --agent claude-code --local
-   ```
+## Session sequence
 
-   Новый worktree не содержит локальной копии навыков. Если их нет ни глобально,
-   ни локально, установи их через `tiden skill install --agent claude-code
-   --global`, предварительно проверив текущий `--help`. Прочитай соответствующий
-   `SKILL.md`. Не копируй навыки вручную и не меняй глобальные hooks, доверие,
-   credentials или настройки других проектов.
-4. Выполни `product-context`: отдельный вопрос на каждую независимую часть задачи.
-   Найденная карточка или путь — кандидат для проверки, а не доказательство
-   реализации. При усечённом ответе дочитай нужные спецификации отдельно.
+1. Answer the per-prompt start directive yourself: continue a listed candidate,
+   start a new intent, look up, or skip. Documentation, process and read-only work
+   use skip.
+2. Before `tiden intent start`, run `product-context` for each independent part and
+   read the code its results point to. Promises are frozen at start and cannot be
+   edited; a promise written before reading the code may later need a waiver.
+3. After the first edit, run `tiden intent refine` with the session objective. Drop
+   retrieval hits unrelated to the diff with
+   `tiden intent radius drop <seq> --reason "<one line>"`.
+4. Open the pull request with the exact `Tiden intent branch:` line from the
+   contract in its description, on a line of its own rather than inside a list or
+   quote, then run `tiden intent link-pr`. CI publishes the pull request's evidence
+   to that intent branch; without a matching line it lands on a branch named after
+   the Git branch (TIDEN-CI.md).
+5. Evidence comes from CI. While a run is in progress, answer the stop hook with the
+   current `tiden intent progress` status and the run you are waiting for. A local
+   run that bypasses the reporter does not change the gate.
+6. After CI, run `tiden intent progress`, link reviewed tests, then use
+   `capture-intent` (candidates, settle, waive) and `tiden intent close`. Defer a
+   connected item that has no test yet with `--propose-tests`; never accept risk to
+   clear an unrelated Backlog card.
+7. After merging `main` into the branch, pass the session's own commit range to
+   `progress`, `candidates` and `close` with `--changes`
+   (`startSha` = merge base with `origin/main`, `endSha` = `HEAD`). Otherwise the
+   merged files, such as `BACKLOG.md`, pull unrelated specs into the close gate.
+8. On a non-`main` branch, `tiden test link-spec` creates a link proposal; check it
+   with `tiden branch link-proposals list --name <intent-branch>`, not `test links`.
+   The close gate reads the latest run in the product, so close right after your
+   own run when other pull requests are publishing evidence.
+9. Merge the pull request and then its Tiden branch yourself only under the merge
+   delegation rule in `AGENTS.md`; otherwise hand the decision to the owner.
 
-Работай в прежнем workspace `1dc18e09-4a09-4d74-8300-cd4302622357` и product
-`75bd0580-2af4-4d5a-b236-c5a9d7ff7ce1`. Передавай эти параметры явно, если
-worktree не привязан. Не создавай новый продукт взамен старого.
+## Where work goes
 
-## Где хранить работу
-
-| Содержание | Место и правило |
+| Content | Place |
 | --- | --- |
-| Действующее поведение | Существующая спецификация в Tiden main; сохраняй ID, источники и тестовые связи. |
-| Ошибка действующего поведения | Текущий контракт и связанный issue/ремонтная ветка. Ошибка остаётся препятствием готовности до доказанного исправления. |
-| Новая будущая возможность | Отдельная proposal/intent-ветка Tiden на независимо поставляемое изменение. Не вливай план в main ради регистрации задачи. |
-| Приёмка реальной установки | Отдельно от синтетических тестов: версия, окружение, полномочия и проверяемое доказательство. До него результат неизвестен. |
-| Навигация и старые DK-ID | `BACKLOG.md`; не добавляй туда редактируемые статусы и приоритеты. |
+| Maintained behavior | Its existing spec on Tiden main; keep IDs, sources and test links. |
+| Defect in maintained behavior | The current contract plus an issue or repair branch; it blocks readiness until a fix is proven. |
+| New future capability | A separate proposal or intent branch per independently deliverable change. |
+| Acceptance on a real installation | Separate from synthetic tests: version, environment, authority and checkable evidence. Unknown until then. |
+| Navigation and legacy DK IDs | `BACKLOG.md`, without editable statuses or priorities. |
 
-Смешанную карточку сначала разбери по критериям: что уже обещано и нарушено,
-что требует проверки установки, а что является новым предложением. Сохрани
-исторический DK-ID и ссылки на исходные контракты. Не объявляй все её критерии
-выполненными по одному проходящему тесту.
+Split a mixed card first: what is promised and broken now, what needs an
+installation check, and what is a new proposal. Keep its DK ID and source links.
 
-`Backlog`, `Review`, `Active`, `Done` — статусы работы. В проверенной конфигурации
-они не исключают карточку из gate. Уже импортированные в main планы требуют
-отдельного переноса с сохранением идентичности. CLI 0.33.0 `update --branch`
-создаёт COW-предложение и оставляет исходник в main. Без подтверждённого механизма
-переноса не удаляй и не пересоздавай карточки; явно укажи ограничение.
+## Production errors
 
-## Выполнение изменения
+Use `triage-issues` and the readiness rules in the workflow guide. Do not resolve an
+issue on age, path proximity or a nearby green test. Never start a provider session,
+send a message or weaken telemetry redaction to diagnose one.
 
-Для изменения поведения используй `start-intent`, сформулируй наблюдаемые
-обещания и опирайся на существующие требования. Для расследования, документации
-и обслуживания спецификаций применяй skip-правило штатного навыка: не создавай
-фиктивную продуктовую историю «обновить бэклог».
+## Final report
 
-Сначала проверь границы поведения и напиши подходящий синтетический regression
-case. Выполни нужные проверки и передай реальные результаты через существующий
-reporter с точным SHA и веткой. Не переименовывай старые тесты, пути,
-параметризацию и семь проверок `anymsg-ci::*`. Связывай тест со спецификацией
-только после чтения assertions. Коммит, успешный CI, публикация пакета и
-проверка production фиксируются отдельно.
+State separately:
 
-Перед массовым изменением сохрани два согласованных полных снимка через
-`scripts/tiden_snapshot.py`, включая все страницы, источники и test links.
-После изменения проверь `scripts/verify_tiden_preservation.py` с узким
-проверенным allowlist. Храни снимки приватно вне Git. Одинаковые счётчики не
-доказывают сохранение ID. Правило сохранения исторических source-record ID и
-metadata при COW/merge описано в общем workflow.
-
-В PR укажи ветку Tiden и реальную проверку. Прочитай merge preview и конфликты;
-не выбирай автоматически одну сторону для чужих изменений. После разрешённого
-merge перечитай main и фактический gate. Закрывая intent, используй его измеренный
-progress/verdict и следующий шаг. Не выдавай финальный статус из памяти чата.
-
-## Ошибки production и готовность
-
-Используй `triage-issues`. Начни с unresolved в production, учитывая повторы,
-влияние, время и выпуск. Читай `tiden issue fix-context <issue-id>` и каждый
-`suspectPath`. Старый stack trace сверяй с подходящей исторической ревизией,
-а не с теми же номерами строк в сегодняшнем main.
-
-Проверяй отдельно component attribution и наличие захваченного release gate.
-Перед любым новым решением перечитай состояние. `prod_issues: PASS` в main
-не подтверждает отсутствие непривязанных инцидентов. Теги событий и пути должны
-сопоставляться с реальными компонентами; не привязывай случайные тесты ради gate.
-
-Не закрывай issue по старому `lastSeen`, совпавшему пути или зелёному тесту
-соседнего сценария. Требуются воспроизведение соответствующего дефекта и
-проверка исправления. Не отключай redaction: телеметрия намеренно не передаёт
-текст исключений, личные данные и locals. Для production не запускай сессии
-провайдеров и не отправляй сообщения ради диагностики.
-
-В конце сообщи отдельно:
-
-- Фактический native gate, область и время вычисления.
-- Точный SHA/окружение и наличие release gate.
-- Оставшиеся текущие дефекты, production issues и непроверенные условия приёмки.
-- Будущие предложения и незавершённый перенос старого бэклога.
-
-Готовность заблокирована, пока значимая текущая проблема не имеет доказанного
-решения. Это правило проекта; не подменяй им показание native gate и не снимай
-блокировку переводом задачи в Backlog или принятием риска без решения владельца.
-
-## Почему встречается AnyMsg
-
-DeedKit — продукт и репозиторий. `anymsg` — сохранённый пакет сообщений,
-`messaging_service` — импорт, `ANYMSG_*` — совместимые настройки. Телеметрия
-формирует `anymsg@0.9.19` из версии этого пакета. `ANYM-*` — исторический префикс
-спецификаций, а не второй проект. Несколько сборок могут иметь одну версию
-пакета, поэтому она не доказывает SHA развёрнутой системы.
-
-Используй DeedKit в новых пользовательских текстах. Не переименовывай старые
-пакеты, выпуски, тестовые ID и ссылки массовой заменой. Новую схему release ID
-нужно согласованно провести через runtime и CI с SHA, environment и build URL;
-исторические записи сохранить.
-
-Основа порядка работы — штатная документация Tiden:
-[ветки](https://docs.tiden.ai/docs/product/branches),
-[quality gate](https://docs.tiden.ai/docs/how-to/configure-quality-gate),
-[API и его ограничения](https://docs.tiden.ai/docs/reference/rest-api).
+- The native gate verdict, its scope and when it was computed.
+- The exact SHA and environment, and whether a release gate exists.
+- Remaining current defects, production issues and unverified acceptance conditions.
+- Future proposals and the unfinished relocation of the old backlog.

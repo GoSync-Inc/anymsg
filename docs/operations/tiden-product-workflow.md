@@ -150,21 +150,25 @@ obtain a gate. Contributor headings and display text can use DeedKit immediately
 1. Read this guide and `TIDEN-CI.md`. Fetch the relevant current Tiden main specs
    and inspect open intent branches/PRs before creating anything. A match in an
    unmerged branch is still an existing identity, not a reason to duplicate it.
-2. For product changes, use `product-context` and `start-intent`. Keep promises
-   about observable behavior; never invent a product requirement merely to track
-   a documentation edit or bookkeeping session. Use an explicit review branch
-   for a bulk spec/backlog maintenance import.
+2. For product changes, use `product-context`, read the code its results point
+   to, and only then run `start-intent`. Promises are frozen when the session
+   starts, so phrase them from what the code actually does. Keep promises about
+   observable behavior; never invent a product requirement merely to track a
+   documentation edit or bookkeeping session. Use an explicit review branch for
+   a bulk spec/backlog maintenance import.
 3. Implement in the appropriate Git branch. Update the existing requirement when
    its behavior changes; create a child only for an independent increment.
    Preserve preimages, historical source anchors and accepted test links.
 4. Run the appropriate synthetic checks and publish authentic results through
-   the existing reporter with exact checkout SHA and branch. Never rename old
+   the existing reporter with exact checkout SHA and branch. Open the pull request
+   with the `Tiden intent branch:` line the contract prints; CI routing uses it
+   (TIDEN-CI.md). Never rename old
    tests or the seven `anymsg-ci::*` checks. Review assertions before proposing
    links: even an exact source-file match does not prove a whole specification.
 5. Review the Tiden merge preview, conflicts and link proposals. Record a Git PR
    and Tiden branch together. A closed intent session or merged Git PR does not
-   merge its Tiden branch. Merge reviewed spec changes under the owner's authority;
-   never blanket-merge unrelated open branches.
+   merge its Tiden branch. Merge reviewed spec changes under the merge delegation
+   rule in `AGENTS.md`; never blanket-merge unrelated open branches.
 6. Read back actual Tiden main IDs, sources, links, gate and GitHub drift after
    merging. A green branch projection is not a main result. `no_test`, `not_run`
    and failed executions remain visible. Do not create passing evidence or
