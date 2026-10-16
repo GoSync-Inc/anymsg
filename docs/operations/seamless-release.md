@@ -66,15 +66,34 @@ socket. Its private parent configuration directory is bind-mounted so persisted
 JSON can be replaced atomically. It runs from an immutable image built from
 reviewed, verified `main` source.
 
-The shared public Caddy continues handling HTTPS and voice. Routine promotions
+The shared public Caddy handles HTTPS and voice. A running container does not
+establish a reproducible deployment or a working restart path. Routine promotions
 never reload it. Reloading Caddy alone does not prove its previous HTTP server
 has finished accepting work, so its upstream counters cannot safely authorize
 backend retirement.
 
+Before first enrollment, prepare and review a reproducible private ingress
+manifest. It must pin the inspected immutable image and preserve the current
+command, configuration mounts, published listeners, existing certificate/state
+volumes and networks. Declare retained volumes and networks as external with
+their exact existing names, so a different Compose project cannot silently
+substitute empty certificate storage or a new network. Include a persistent
+restart/startup policy; a container configured never to restart is an unresolved
+enrollment prerequisite. A Compose label referring to a missing source file is
+not a usable deployment manifest.
+
+Resolve that manifest and compare it with inspected live identities, mounts,
+networks, ports and restart settings. Validate the proxy configuration without
+recreating or reloading the serving listener. Record the reviewed manifest and
+validation evidence privately. Any required live restart or reboot acceptance
+belongs to a separately scheduled operation with the applicable call authority;
+document review alone does not prove restart recovery.
+
 `bootstrap --sha <verified-main-sha>` checks main/CI, the private clean-build
 receipt and the router image's source and revision labels, then generates initial
-JSON and Compose artifacts. It starts nothing and changes no ingress. Review and start only that internal router, then
-verify its initial routes still reach the current healthy services.
+JSON and Compose artifacts. It starts nothing and changes no ingress. After the
+enrollment prerequisites are satisfied, review and start only that internal
+router, then verify its initial routes still reach the current healthy services.
 
 The one-time ingress conversion must preserve Host and pass `/deedkit/*` and
 `/pos-probe/*` to the router **without stripping their prefixes twice**. Preserve
@@ -82,6 +101,25 @@ voice and unrelated configuration. The legacy ingress has no trusted drain
 protocol for active voice WebSockets: establish quiescence and prevent new call
 admissions for this conversion window, or review a separate transport migration.
 Synthetic tests do not establish that live quiescence.
+
+If current and candidate SQL inventories differ, complete a separate reviewed
+compatibility and migration plan before enrollment. Verify that the pinned
+backup and restore runtimes support the current database schema and the planned
+target schema. Resolve receiver capacity or delivery failures such as
+`receiver_quota` through a reviewed storage/retention operation that preserves
+the protected restore anchor. Then obtain a fresh compatible pre-migration
+snapshot with confirmed durable delivery. Retain its ID, snapshot time, schema,
+image revision, ciphertext size/hash and receiver receipt privately, and verify
+restore integrity in an isolated quarantine as described in
+[backup and recovery](../../BACKUP.md). Measure freshness from snapshot time,
+not from a later retry or receipt timestamp. A failed delivery, a local-only
+snapshot or an old successful receipt does not satisfy this migration gate.
+
+These are live enrollment and migration prerequisites for the operator to
+verify and record. The release scripts do not enforce or attest all of them;
+successful source CI, router preparation and bootstrap artifacts do not prove
+ingress reproducibility, restart persistence, backup freshness or durable
+delivery.
 
 Legacy gateway/API containers lack trusted lifecycle sockets. Missing evidence
 never means zero requests. Their unprefixed `/deedkit/v1/files/*` route remains
