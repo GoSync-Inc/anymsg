@@ -8,7 +8,66 @@ on:
 permissions:
   contents: read
 jobs:
+  changes:
+    # A pull request whose merge commit changes no image input skips the builds; the
+    # calling job still succeeds. Every other event, and any doubt, builds all targets.
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    outputs:
+      build: ${{ steps.decide.outputs.build }}
+    steps:
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6.1.0
+        if: ${{ github.event_name == 'pull_request' }}
+        with:
+          persist-credentials: false
+          fetch-depth: 2
+      - name: Decide whether the image targets must be built
+        id: decide
+        env:
+          EVENT_NAME: ${{ github.event_name }}
+          HEAD_SHA: ${{ github.event.pull_request.head.sha }}
+          # Path prefixes copied into the images.yml targets (tests/test_tiden_ci.py
+          # checks them against scripts/production.py BUILDS and the Dockerfiles).
+          IMAGE_INPUTS: |
+            .dockerignore
+            Dockerfile
+            LICENSE
+            THIRD_PARTY_NOTICES.md
+            licenses/
+            packages/platform-contracts/
+            services/calendar/
+            services/calls/
+            services/gateway/
+            services/messaging/
+            whatsapp/
+            scripts/production.py
+            .github/workflows/ci.yml
+            .github/workflows/images.yml
+        run: |
+          build=true reason="$EVENT_NAME runs always build"
+          if [ "$EVENT_NAME" = pull_request ]; then
+            reason='the pull request merge commit could not be established'
+            # Only GitHub's two-parent merge of this exact head yields the pull request's diff.
+            if [ "$(git rev-parse HEAD^@ | wc -l | tr -d ' ')" = 2 ] && [ "$(git rev-parse HEAD^2)" = "$HEAD_SHA" ]; then
+              # NUL-separated names are never quoted, so non-ASCII or quoted paths still match.
+              changed="$(mktemp)"
+              git diff -z --name-only --no-renames HEAD^1 HEAD > "$changed"
+              build=false reason='no image input changed'
+              while IFS= read -r -d '' path; do
+                while IFS= read -r input; do
+                  if [ -n "$path" ] && [ -n "$input" ] && [[ "$path" == "$input"* ]]; then
+                    build=true reason="image input changed: $path"
+                    break 2
+                  fi
+                done <<< "$IMAGE_INPUTS"
+              done < "$changed"
+            fi
+          fi
+          echo "build=$build" >> "$GITHUB_OUTPUT"
+          echo "Image build: $build ($reason)" >> "$GITHUB_STEP_SUMMARY"
   build:
+    needs: changes
+    if: ${{ needs.changes.outputs.build == 'true' }}
     runs-on: ubuntu-latest
     timeout-minutes: 30
     strategy:

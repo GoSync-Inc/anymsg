@@ -539,11 +539,13 @@ def test_ci_reports_required_checks_for_merge_queue_runs_without_cancelling_them
     assert "if" not in checks["jobs"]["verify"]
     step_ids = {step.get("id") for step in checks["jobs"]["verify"]["steps"]}
     assert set(CHECKS) <= step_ids
-    # A queue run gets its own group and cancels nothing; other runs keep their groups.
+    # A queue run gets its own group and cancels nothing; so does a main push run.
+    # Pull request and dispatch runs keep their groups.
     assert ci["concurrency"] == {
         "group": "ci-${{ github.event_name == 'merge_group' && format('merge-queue-{0}', github.run_id) "
+                 "|| github.event_name == 'push' && format('main-push-{0}', github.run_id) "
                  "|| github.event.pull_request.number || github.ref }}",
-        "cancel-in-progress": "${{ github.event_name != 'merge_group' }}"}
+        "cancel-in-progress": "${{ github.event_name != 'merge_group' && github.event_name != 'push' }}"}
 
 
 def test_merge_queue_reporting_gets_no_tiden_credential_or_cli(tmp_path):
@@ -599,3 +601,179 @@ def test_merge_queue_reporting_gets_no_tiden_credential_or_cli(tmp_path):
                           ("pull_request", "codex/gh-readonly-queue/x")]:
         queue = configure(EVENT_NAME=event, SOURCE_BRANCH=branch, **configured)[1] == ["enabled=false", "queue=true"]
         assert queue == merge_queue_run({"event": event, "git_branch": branch}), (event, branch)
+
+
+def image_workflow():
+    import yaml
+    root = Path(__file__).resolve().parents[1]
+    jobs = yaml.safe_load((root / ".github/workflows/images.yml").read_text())["jobs"]
+    decide = next(step for step in jobs["changes"]["steps"] if step.get("id") == "decide")
+    return root, jobs, decide, [line for line in decide["env"]["IMAGE_INPUTS"].splitlines() if line]
+
+
+def image_decision(cwd, tmp_path, event, head_sha=""):
+    import subprocess
+    _, _, decide, _ = image_workflow()
+    output, summary = tmp_path / "output", tmp_path / "summary"
+    for path in (output, summary):
+        path.write_text("")
+    # GitHub runs `run` scripts with `bash -e -o pipefail`.
+    completed = subprocess.run(["bash", "-e", "-o", "pipefail", "-c", decide["run"]], cwd=cwd, capture_output=True, text=True,
+                               env={"PATH": "/usr/bin:/bin:/usr/local/bin:/opt/homebrew/bin", "GITHUB_OUTPUT": str(output),
+                                    "GITHUB_STEP_SUMMARY": str(summary), "EVENT_NAME": event, "HEAD_SHA": head_sha,
+                                    "IMAGE_INPUTS": decide["env"]["IMAGE_INPUTS"]})
+    assert completed.returncode == 0, completed.stderr
+    return output.read_text().split(), summary.read_text()
+
+
+def pull_request_checkout(tmp_path, change, merge=True):
+    """A shallow checkout of GitHub's synthetic merge commit for a pull request."""
+    import subprocess
+
+    def git(*args, cwd=tmp_path / "origin"):
+        return subprocess.run(["git", "-c", "user.name=ci", "-c", "user.email=ci@example.invalid", "-c", "commit.gpgsign=false",
+                               *args], cwd=cwd, check=True, capture_output=True, text=True).stdout.strip()
+
+    origin = tmp_path / "origin"
+    for path in ("README.md", "LICENSE", "services/gateway/src/app.py", "deploy/compose.yaml", "docs/guide.md"):
+        (origin / path).parent.mkdir(parents=True, exist_ok=True)
+        (origin / path).write_text("base\n")
+    git("init", "-q", "-b", "main")
+    git("add", "-A")
+    git("commit", "-q", "-m", "base")
+    git("switch", "-q", "-c", "feature")
+    change(origin, git)
+    git("add", "-A")
+    git("commit", "-q", "-m", "change")
+    head = git("rev-parse", "HEAD")
+    git("switch", "-q", "main")
+    (origin / "docs/main.md").write_text("main moved on\n")
+    git("add", "-A")
+    git("commit", "-q", "-m", "main")
+    git("merge", "-q", "--no-ff", "-m", "merge", "feature") if merge else git("reset", "-q", "--hard", "feature")
+    git("clone", "-q", "--depth", "2", f"file://{origin}", str(tmp_path / "checkout"), cwd=tmp_path)
+    return tmp_path / "checkout", head
+
+
+@pytest.mark.parametrize("change, build", [
+    (lambda root, git: (root / "README.md").write_text("docs\n"), False),
+    (lambda root, git: [(root / name).write_text("new\n") for name in ("docs/guide.md", "docs/new.md")], False),
+    # deploy/ is copied only into the test stage, which images.yml never builds.
+    (lambda root, git: (root / "deploy/compose.yaml").write_text("changed\n"), False),
+    (lambda root, git: (root / "services/gateway/src/app.py").write_text("changed\n"), True),
+    (lambda root, git: git("mv", "services/gateway/src/app.py", "docs/app.py"), True),
+    (lambda root, git: git("rm", "-q", "LICENSE"), True),
+    # Git quotes these names in its default output; the decision must still see them.
+    (lambda root, git: (root / "services/gateway/src/модуль.py").write_text("new\n"), True),
+    (lambda root, git: (root / 'services/gateway/src/with"quote.py').write_text("new\n"), True),
+    (lambda root, git: (root / "docs/заметки.md").write_text("new\n"), False),
+], ids=["readme", "docs", "deploy", "service-source", "renamed-out-of-a-service", "deleted-license",
+        "non-ascii-service-source", "quoted-service-source", "non-ascii-docs"])
+def test_pull_request_builds_images_only_when_an_image_input_changes(tmp_path, change, build):
+    checkout, head = pull_request_checkout(tmp_path, change)
+    outputs, summary = image_decision(checkout, tmp_path, "pull_request", head)
+    assert outputs == [f"build={str(build).lower()}"]
+    assert ("image input changed:" in summary) == build and summary.startswith(f"Image build: {str(build).lower()}")
+
+
+def test_image_build_runs_whenever_the_pull_request_diff_is_uncertain(tmp_path):
+    docs_only = lambda root, git: (root / "README.md").write_text("docs\n")  # noqa: E731
+    checkout, head = pull_request_checkout(tmp_path / "other-head", docs_only)
+    assert image_decision(checkout, tmp_path, "pull_request", "0" * 40)[0] == ["build=true"]
+    assert image_decision(checkout, tmp_path, "pull_request", "")[0] == ["build=true"]
+    assert image_decision(checkout, tmp_path, "pull_request", head)[0] == ["build=false"]
+    checkout, head = pull_request_checkout(tmp_path / "not-a-merge", docs_only, merge=False)
+    outputs, summary = image_decision(checkout, tmp_path, "pull_request", head)
+    assert outputs == ["build=true"] and "could not be established" in summary
+    # Other events build without reading Git at all, even outside a checkout.
+    for event in ("push", "merge_group", "workflow_dispatch"):
+        empty = tmp_path / event
+        empty.mkdir()
+        assert image_decision(empty, tmp_path, event, head)[0] == ["build=true"]
+
+
+def test_image_build_job_is_gated_only_by_the_change_decision():
+    import yaml
+    root, jobs, decide, _ = image_workflow()
+    ci = yaml.safe_load((root / ".github/workflows/ci.yml").read_text())
+    assert ci["jobs"]["images"] == {"uses": "./.github/workflows/images.yml",
+                                    "with": {"source_ref": "${{ inputs.source_ref || '' }}"}}
+    assert set(jobs) == {"changes", "build"}
+    changes, build = jobs["changes"], jobs["build"]
+    assert changes["outputs"] == {"build": "${{ steps.decide.outputs.build }}"} and "if" not in changes
+    checkout = changes["steps"][0]
+    assert checkout["uses"].startswith("actions/checkout@") and len(checkout["uses"].split("@")[1].split()[0]) == 40
+    assert checkout["if"] == "${{ github.event_name == 'pull_request' }}"
+    assert checkout["with"] == {"persist-credentials": False, "fetch-depth": 2}
+    assert decide["env"]["EVENT_NAME"] == "${{ github.event_name }}"
+    assert decide["env"]["HEAD_SHA"] == "${{ github.event.pull_request.head.sha }}"
+    # A skipped build leaves the called workflow green; a failed decision or build turns it red,
+    # and the CI gate requires `images` to succeed. Main push runs keep `images / build (<target>)`.
+    assert build["needs"] == "changes" and build["if"] == "${{ needs.changes.outputs.build == 'true' }}"
+    assert "name" not in build  # production.py finds `images / build (backup)` by the job key
+    assert build["strategy"]["matrix"]["target"] == [
+        "runtime", "indexer", "enricher-local", "whatsapp-native", "gateway", "calendar", "calls", "backup"]
+    assert build["steps"][-1]["run"] == 'python3 scripts/production.py check-image --target "$TARGET"'
+
+
+def dockerfile_sources(dockerfile, stage):
+    """Paths a target stage copies from its build context, following FROM and COPY --from stages."""
+    import re
+    stages, names = [], {}
+    for line in re.sub(r"\\\n", " ", dockerfile.read_text()).splitlines():
+        line = line.strip()
+        if match := re.match(r"FROM\s+(?:--\S+\s+)*(\S+)(?:\s+AS\s+(\S+))?$", line, re.I):
+            if match.group(2):
+                names[match.group(2).lower()] = len(stages)
+            stages.append({"parents": {match.group(1)}, "sources": []})
+        elif stages and (match := re.match(r"(?:COPY|ADD)\s+(.+)$", line, re.I)):
+            words = match.group(1).split()
+            options = [word for word in words if word.startswith("--")]
+            sources = [word for word in words if not word.startswith("--")][:-1]
+            parent = [option.split("=", 1)[1] for option in options if option.startswith("--from=")]
+            stages[-1]["parents"].update(parent)
+            if not parent:
+                stages[-1]["sources"].extend(sources)
+
+    def index(reference):
+        # A stage is referenced by name (case-insensitive) or by its zero-based position.
+        return int(reference) if reference.isdigit() else names.get(reference.lower())
+
+    pending, seen, sources = [len(stages) - 1 if not stage else index(stage)], set(), []
+    while pending:
+        number = pending.pop()
+        if number is not None and number < len(stages) and number not in seen:
+            seen.add(number)
+            sources += stages[number]["sources"]
+            pending += [index(parent) for parent in stages[number]["parents"]]
+    return sources
+
+
+def test_image_inputs_cover_every_source_the_image_targets_build_from(tmp_path):
+    import importlib.util
+    root, jobs, _, inputs = image_workflow()
+    spec = importlib.util.spec_from_file_location("production_builds", root / "scripts/production.py")
+    production = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(production)
+    covered = lambda path: any(path == item.rstrip("/") or path.startswith(item) for item in inputs)  # noqa: E731
+    assert {"scripts/production.py", ".github/workflows/images.yml", ".dockerignore"} <= set(inputs)
+    for target in jobs["build"]["strategy"]["matrix"]["target"]:
+        context, dockerfile, stage, _ = production.BUILDS[target]
+        prefix = "" if context == "." else context.rstrip("/") + "/"
+        assert covered(dockerfile) and covered(f"{dockerfile}.dockerignore"), target
+        assert covered(prefix + ".dockerignore") or not (root / prefix / ".dockerignore").exists(), target
+        sources = dockerfile_sources(root / dockerfile, stage)
+        assert sources, target
+        for source in sources:
+            path = prefix + source.removeprefix("./").split("*")[0]
+            assert covered(path), (target, source)
+    # The parser follows only the stages a target needs: the test stage's deploy/ is not an input.
+    assert "deploy" in dockerfile_sources(root / "services/messaging/Dockerfile", "test")
+    assert not covered("deploy/compose.yaml") and not covered("docs/README.md")
+    # Continued COPY lines and FROM options are parsed too, so a later Dockerfile edit cannot hide a source.
+    (tmp_path / "Dockerfile").write_text("FROM --platform=linux/amd64 base AS build\nCOPY a \\\n    b ./\n"
+                                         "FROM base AS Tools\nCOPY c ./\nFROM scratch\nCOPY d ./\n"
+                                         "FROM build AS final\nCOPY --from=build /out /out\nCOPY --from=tools /t /t\n"
+                                         "COPY --from=2 /s /s\n")
+    assert sorted(dockerfile_sources(tmp_path / "Dockerfile", "final")) == ["a", "b", "c", "d"]
+    assert dockerfile_sources(tmp_path / "Dockerfile", "") == dockerfile_sources(tmp_path / "Dockerfile", "final")

@@ -2,7 +2,9 @@
 import copy
 import json
 from pathlib import Path
+import shutil
 import socket
+import subprocess
 import threading
 import tempfile
 from types import SimpleNamespace
@@ -125,12 +127,92 @@ def test_candidate_has_unique_aliases_no_ports_and_reuses_external_state(tmp_pat
     assert 'policy' not in private
 
 
+def test_isolation_preserves_empty_resolved_network_ipam_metadata(tmp_path):
+    cfg = settings(tmp_path)
+    source = documents(cfg)
+    for project in source.values():
+        for network in project['networks'].values():
+            network['ipam'] = {}
+    before = copy.deepcopy(source)
+
+    isolated, _ = s.isolate(cfg, source, {'runtime': IMAGE, 'gateway': IMAGE}, tmp_path, GEN, SHA)
+
+    assert source == before
+    for project, document in source.items():
+        for key, network in document['networks'].items():
+            assert isolated['networks'][project + '-' + key] == {
+                'external': True, 'name': network['name'], 'ipam': {}}
+
+
+def test_synthetic_candidate_roundtrips_through_installed_compose(tmp_path):
+    docker = shutil.which('docker')
+    if not docker:
+        pytest.skip('Docker Compose CLI is needed for the native config parser regression')
+    version = subprocess.run([docker, 'compose', 'version'], capture_output=True, timeout=15)
+    if version.returncode:
+        pytest.skip('Docker Compose plugin is not installed')
+    cfg = settings(tmp_path)
+
+    def resolve(document, name):
+        path = tmp_path / (name + '.json')
+        path.write_text(json.dumps(s.p.escaped(document)))
+        result = subprocess.run([docker, 'compose', '--profile', '*', '-f', str(path),
+                                 'config', '--format', 'json'],
+                                text=True, capture_output=True, timeout=30)
+        assert result.returncode == 0, result.stderr
+        return json.loads(result.stdout)
+
+    source = documents(cfg)
+    source['messages']['services']['api'].pop('depends_on')
+    source = {name: resolve(document, 'source-' + name) for name, document in source.items()}
+    isolated, _ = s.isolate(cfg, source, {'runtime': IMAGE, 'gateway': IMAGE}, tmp_path, GEN, SHA)
+
+    assert resolve(isolated, 'isolated') == isolated
+    assert all(network['external'] is True for network in isolated['networks'].values())
+    assert all(not unit.get('ports') and 'depends_on' not in unit
+               for unit in isolated['services'].values())
+
+
 def test_candidate_rejects_collector_command_even_if_target_is_runtime(tmp_path):
     cfg = settings(tmp_path)
     docs = documents(cfg)
     docs['messages']['services']['api']['command'] = ['python', '-m', 'messaging_service.telegram_collector']
     with pytest.raises(s.Refused, match='canonical'):
         s.isolate(cfg, docs, {'runtime': IMAGE, 'gateway': IMAGE}, tmp_path, GEN, SHA)
+
+
+def test_root_preparation_makes_each_private_control_directory_runtime_owned(tmp_path, monkeypatch):
+    cfg = settings(tmp_path)
+    release = Path(cfg['state_directory']) / SHA
+    release.mkdir()
+    ownership = []
+    monkeypatch.setattr(s.os, 'geteuid', lambda: 0)
+    monkeypatch.setattr(s.os, 'chown', lambda path, uid, gid: ownership.append((Path(path), uid, gid)))
+
+    document, private = s.isolate(cfg, documents(cfg), {'runtime': IMAGE, 'gateway': IMAGE}, release, GEN, SHA)
+
+    assert ownership == [(release / role, 10001, 10001) for role in ('api', 'gateway')]
+    for role in ('api', 'gateway'):
+        directory = release / role
+        assert directory.is_dir() and directory.stat().st_mode & 0o777 == 0o700
+        assert private['controls'][role] == str(directory / 'control.sock')
+        assert {'type': 'bind', 'source': str(directory), 'target': '/run/deedkit/release'} in document['services']['http-' + role + '-' + GEN]['volumes']
+
+
+def test_root_preparation_aborts_when_private_control_ownership_cannot_be_set(tmp_path, monkeypatch):
+    cfg = settings(tmp_path)
+    release = Path(cfg['state_directory']) / SHA
+    release.mkdir()
+    monkeypatch.setattr(s.os, 'geteuid', lambda: 0)
+    def denied(*_args):
+        raise PermissionError('synthetic ownership denied')
+    monkeypatch.setattr(s.os, 'chown', denied)
+
+    with pytest.raises(PermissionError, match='synthetic ownership denied'):
+        s.isolate(cfg, documents(cfg), {'runtime': IMAGE, 'gateway': IMAGE}, release, GEN, SHA)
+
+    assert not (release / 'gateway').exists()
+    assert not (release / 'http.json').exists()
 
 
 def fixture(tmp_path, monkeypatch):
