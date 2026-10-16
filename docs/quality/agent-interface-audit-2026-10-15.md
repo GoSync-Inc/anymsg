@@ -7,6 +7,14 @@ tests do not establish production recovery or host acceptance.
 
 Priorities and follow-up status belong in [BACKLOG.md](../../BACKLOG.md).
 
+Status reconciled **2026-10-16** against main
+[`27ec8bf`](https://github.com/GoSync-Inc/deedkit/commit/27ec8bfc4d0a328dd4b639bab138cc21f6853ce7):
+the source changes below are merged through PRs #29/#31, with follow-up fixes
+in #33/#35/#37–39. The reviewed main has a successful
+[CI run](https://github.com/GoSync-Inc/deedkit/actions/runs/38780132404).
+The acceptance column remains open under DK-33; no new deployed/provider
+readback was performed for this reconciliation.
+
 | Finding | Source change in this review | Acceptance still required |
 | --- | --- | --- |
 | B1: chat listing times out | Page before expensive presentation; share scoped attention candidates and reply heads; cover populated private/group histories and dense replies. | Verify the deployed archive's read latency and query plans. |
@@ -39,11 +47,20 @@ Priorities and follow-up status belong in [BACKLOG.md](../../BACKLOG.md).
 ## Separate work and operational boundaries
 
 Host onboarding links, verified idle-agent wake-up, unsolicited MCP streaming,
-silence timers, quiet hours, debounce/batching, minimal response projection and
+silence timers, quiet hours, debounce/batching and
 an owner-reviewed primary/duplicate calendar mapping remain separate work in the
 backlog. A receiver registration is an operator action, not a URL accepted from
 an agent. Real provider actions and live acceptance require their existing
 authorization and synthetic tests never substitute for them.
 
-The separate Grok voice change is [PR #28](https://github.com/GoSync-Inc/deedkit/pull/28).
-No voice-engine delivery or live-call success is asserted by this review.
+Minimal response projection is merged in
+[PR #35](https://github.com/GoSync-Inc/deedkit/pull/35) (DK-34); deployed response-size
+and latency measurements remain DK-33. The evening-audit liveness, conflict-alert,
+self-chat receipt and local-storage error fixes are merged in
+[PR #38](https://github.com/GoSync-Inc/deedkit/pull/38); actual storage capacity,
+spool drain and old exhausted media jobs still require operational evidence.
+
+The separate Grok voice integration is merged in
+[PR #28](https://github.com/GoSync-Inc/deedkit/pull/28) (DK-37). Its minimal-prompt
+comparison remains open in [PR #34](https://github.com/GoSync-Inc/deedkit/pull/34)
+(DK-40). Live-call acceptance remains DK-21.
