@@ -39,37 +39,47 @@ Without a local CLI, run `scripts/tiden_agent_setup.sh` when `TIDEN_API_TOKEN` i
 set; otherwise say in the PR that its specs were not updated.
 
 Review levels: the level follows risk, not diff size. The agent that starts the
-work sets it from the Tiden working contract's signals: priority of the affected
-specs, the number of specs and components in the impact radius, and the number of
-lanes (file areas that concurrent PRs must not share). It writes
-`Review level: <level> — <reason>` in the PR description; a reviewer may only
-raise it. In doubt, or when a change fits several levels, take the higher one.
+work sets it from the Tiden working contract's signals, when there is one:
+priority of the affected specs, the number of specs and components in the impact
+radius, and the number of lanes (file areas that concurrent PRs must not share).
+It writes `Review level: <level> — <reason>` in the PR description; a reviewer may
+only raise it. In doubt, or when a change fits several levels, take the higher one.
 A High or Critical spec, several components or lanes, security, access, data, CI or
 releases make it at least important; so does a mixed PR with several kinds of
 change, and higher when its hard or risky part needs it. Agent rules and
 instructions (`AGENTS.md`, `CLAUDE.md`, `.claude/`, process documents) are never
-micro, even for one line.
+micro, even for one line: normal by default, higher when a signal or the owner row
+applies.
 
 | Level | Covers | Review | Merge |
 | --- | --- | --- | --- |
 | Micro | Typos and wording in documentation without a change of meaning; code comments | None | Agent, after green CI |
-| Normal | A small fix or feature in one lane with a test on a Medium or Low spec; a patch dependency update; a new test or changed assertions for such a spec; a change of meaning in a contract document | One, from the other model family: Astra for code Claude wrote, Fable for code Codex wrote | Agent |
+| Normal | A small fix or feature in one lane with a test on a Medium or Low spec; a patch dependency update; a new test or changed assertions for such a spec; a change of meaning in a contract document | One, from the other model family: Astra for what Claude wrote, Fable for what Codex wrote | Agent |
 | Important | A new capability; several lanes or components; High or Critical specs and their tests; security and access; CI and releases; the data model; major and security dependency updates; mixed PRs | Astra and Fable | Agent |
 | Owner | Every escalation condition below; deleting or moving backlog cards; changes to these review levels or merge authority | Astra and Fable | Owner |
 
-The Tiden loop follows the kind of change. Use `tiden intent skip` when observable
-product behavior does not change: agent rules, process documents, wording. Run the
-full intent loop for every pull request that changes code beyond comments,
-including that code's documentation, and when a product contract document
-(SENDING.md, ACCESS.md, SEARCH.md and the like) changes meaning, because its spec
-changes with it. Backlog and specs are reviewed too: a new proposal branch or spec
-edit needs Fable (testable acceptance criteria, no duplicates, right component,
-priority and dependencies); a bulk backlog import or restructuring needs Astra and
-Fable; deleting or moving cards is the owner's.
+The Tiden loop follows the kind of change. Use `tiden intent skip` only for
+changes without code beyond comments that leave observable product behavior
+unchanged (agent rules, process documents, wording), for questions and read-only
+work, and for spec maintenance only in Tiden (review and proposal branches without
+code). Run the full intent loop for every pull request that changes code beyond
+comments, including that code's documentation, and when a product contract
+document (SENDING.md, ACCESS.md, SEARCH.md and the like) changes meaning, because
+its spec changes with it.
+
+Backlog and specs are reviewed too, on top of the level's reviews. A new proposal
+branch or spec edit needs Fable: clear, testable acceptance criteria, no
+duplicates, right component, priority and dependencies. A bulk backlog import or
+restructuring needs Astra and Fable. Without a code PR, a reviewed spec edit in
+Tiden merges as normal and a bulk restructuring as important. A proposal branch
+for future requirements stays open until implemented instead of merging to
+register it (docs/operations/tiden-product-workflow.md). Deleting or moving cards
+is the owner's.
 
 Order: code and local tests; push and open the PR, which starts CI; reviews in
 parallel with CI, once on the ready PR; fixes, rechecked by the same reviewer on
-the fix diff only; settle, `tiden intent progress`, `tiden intent close`; merge.
+the fix diff only; settle, with Fable reviewing any spec text it wrote;
+`tiden intent progress`, `tiden intent close`; merge.
 Reviewers get the intent goal and promises (the task goal for a skip), the current
 text of the affected Tiden specs with acceptance criteria, the diff and the PR
 description. They have no Tiden access, so specs go to them as a file. Fable
@@ -81,13 +91,13 @@ model `fable`.
 
 An agent merges a pull request and its Tiden branch itself only at a level that
 allows it and when every condition holds. All required checks and branch
-protection pass without bypass. Every review the level requires approved with no
-open findings. The intent session closed with PASS, or the change is a recorded
-skip. The Tiden merge preview contains only this change's specs, tests and links,
-with no conflicts or blocking sessions. Whatever the level, escalate to the owner
-instead of merging anything that applies or changes a production service, starts
-a live provider action, adds a schema migration, changes required checks, branch
-protection, secrets or access rights, accepts risk or waives a promise by owner
-decision, weakens or removes an existing contract, spec or test, has disagreeing
-reviewers or unclear product direction, or cannot be undone by a follow-up pull
-request.
+protection pass without bypass. Every required review, for the level and for
+specs or backlog, approved with no open findings. The intent session closed with
+PASS, or the change is a recorded skip. The Tiden merge preview contains only this
+change's specs, tests and links, with no conflicts or blocking sessions.
+Whatever the level, escalate to the owner instead of merging anything that applies
+or changes a production service, starts a live provider action, adds a schema
+migration, changes required checks, branch protection, secrets or access rights,
+accepts risk or waives a promise by owner decision, weakens or removes an existing
+contract, spec or test, has disagreeing reviewers or unclear product direction, or
+cannot be undone by a follow-up pull request.

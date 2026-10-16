@@ -20,7 +20,7 @@ cannot infer. Do not copy or fork the vendor skill bodies into another workflow.
 | Skill | Use it for |
 | --- | --- |
 | `product-context` | Find existing specs and source anchors before planning or investigating; keep a mapping for each independent part. |
-| `start-intent` | Begin or continue a scoped product change with observable promises; classify docs-only/spec-maintenance work using its skip rule. |
+| `start-intent` | Begin or continue a scoped product change with observable promises; decide skip or the full loop by the Tiden rule under Review levels in `AGENTS.md`. |
 | `capture-intent` | Reconcile the actual product change into existing specs or new narrowly scoped stories on the session branch, then close with the measured ledger verdict. |
 | `link-coverage` | Connect already reported tests to requirements after reviewing the assertions; preserve existing links. |
 | `generate-tests` | Reconcile genuinely missing test cases. For this existing product, review the import plan and identity/link preservation before any authoritative ingest. |
