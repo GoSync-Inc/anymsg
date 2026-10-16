@@ -70,11 +70,12 @@ its spec changes with it.
 Backlog and specs are reviewed too, on top of the level's reviews. A new proposal
 branch or spec edit needs Fable: clear, testable acceptance criteria, no
 duplicates, right component, priority and dependencies. A bulk backlog import or
-restructuring needs Astra and Fable. Without a code PR, a reviewed spec edit in
-Tiden merges as normal and a bulk restructuring as important. A proposal branch
-for future requirements stays open until implemented instead of merging to
-register it (docs/operations/tiden-product-workflow.md). Deleting or moving cards
-is the owner's.
+restructuring needs Astra and Fable. Without a code PR, the agent itself merges a
+spec edit in Tiden that Fable approved, or a bulk restructuring that Astra and
+Fable approved. A proposal branch for future requirements stays open until
+implemented instead of merging to register it
+(docs/operations/tiden-product-workflow.md). Deleting or moving cards is the
+owner's.
 
 Order: code and local tests; push and open the PR, which starts CI; reviews in
 parallel with CI, once on the ready PR; fixes, rechecked by the same reviewer on
