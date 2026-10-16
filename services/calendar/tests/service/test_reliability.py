@@ -134,11 +134,22 @@ def test_plan_preview_reports_instant_event_end_as_its_start(household):
         # Writes are always timed, so an update gives the instant a duration.
         "event": {"start": point, "end": "2026-10-19T09:00:00Z", "timezone": "UTC"},
     }
-    [step] = service.plan(key, [update])["steps"]
+    result = service.plan(key, [update])
+    [step] = result["steps"]
     assert step["before"]["end"] == step["before"]["start"]
     assert instant(step["before"]["end"]) == instant(point)
     assert set(step["diff"]) == {"end"}
     assert instant(step["diff"]["end"]["before"]) == instant(point)
+    # The provider identity the worker writes against is unchanged.
+    plan = household.one("SELECT payload FROM plans WHERE id=%s", (result["plan_id"],))
+    [stored] = plan["payload"]["steps"]
+    assert (stored["target_id"], stored["expected_etag"]) == ("provider-private-cal-a", '"v1"')
+    # Moving only the start keeps the source end, so the end is not a change.
+    earlier = dict(update, event={"start": "2026-10-19T08:00:00Z", "end": point, "timezone": "UTC"})
+    [step] = service.plan(key, [earlier])["steps"]
+    assert set(step["diff"]) == {"start"}
+    with pytest.raises(CalendarError, match="invalid_window"):
+        service.plan(key, [dict(update, event={"start": point, "end": point, "timezone": "UTC"})])
     delete = {"action": "delete", "calendar_ref": "cal-a", "event_ref": "event-cal-a"}
     [step] = service.plan(key, [delete])["steps"]
     assert step["before"]["end"] == step["before"]["start"] == step["diff"]["end"]["before"]
@@ -146,10 +157,27 @@ def test_plan_preview_reports_instant_event_end_as_its_start(household):
 
 def test_plan_preview_keeps_stored_end_of_timed_event(household):
     service, key = setup(household)
-    publish(household)
+    # Providers always mark timed events as non-instant.
+    publish(household, details={"title": "Private canary", "timezone": "UTC", "instant": False})
+    end = "2026-10-19T09:00:00Z"
+    update = dict(create(START, end), action="update", event_ref="event-cal-a")
+    [step] = service.plan(key, [update])["steps"]
+    assert instant(step["before"]["end"]) == instant(end)
+    assert step["diff"] == {"title": {"before": "Private canary", "after": "Proposed"}}
     delete = {"action": "delete", "calendar_ref": "cal-a", "event_ref": "event-cal-a"}
     [step] = service.plan(key, [delete])["steps"]
-    assert instant(step["before"]["end"]) == instant("2026-10-19T09:00:00Z")
+    assert instant(step["before"]["end"]) == instant(end)
+
+
+def test_plan_rejects_recurring_guest_and_special_instant_events(household):
+    service, key = setup(household)
+    point = "2026-10-19T08:30:00Z"
+    delete = {"action": "delete", "calendar_ref": "cal-a", "event_ref": "event-cal-a"}
+    for flag in ("recurring", "guests", "special"):
+        details = {"title": "Reminder", "instant": True, flag: True}
+        publish(household, start=point, end=point, busy=False, details=details)
+        with pytest.raises(CalendarError, match="capability_unverified"):
+            service.plan(key, [delete])
 
 
 def test_plan_multi_action_removes_deleted_and_reports_proposed_overlap(household):
