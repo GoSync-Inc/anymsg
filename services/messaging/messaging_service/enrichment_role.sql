@@ -6,6 +6,7 @@ DO $$ BEGIN
 END $$;
 GRANT USAGE ON SCHEMA public TO messaging_enricher;
 GRANT SELECT ON attachments,messages,attachment_text TO messaging_enricher;
+GRANT SELECT ON attachment_residency,attachment_eviction_journal TO messaging_enricher;
 GRANT SELECT,UPDATE ON attachment_enrichment TO messaging_enricher;
 GRANT SELECT,INSERT,UPDATE ON enrichment_budget TO messaging_enricher;
 

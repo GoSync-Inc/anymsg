@@ -16,6 +16,34 @@ have usable current processing evidence. Unprocessed, stale, failed or
 incompletely extracted/transcribed files are retained. A video description is
 explicitly based on sampled frames and does not claim a complete transcript.
 
+An operator who accepts losing originals without retained descriptions can add
+`--expire-unprocessed` explicitly. This allows the same journaled eviction without
+requiring extraction, ASR or descriptions. Every active occurrence of the shared
+bytes must also have a message older than 30 days. Pins, the 30-day original-access
+clock, active requests/grants/processing, backup fences, integrity checks and pass
+limits still apply. Existing messages and any derived text remain unchanged;
+missing descriptions are reported honestly. The original can be requested through
+the existing bounded provider queue; provider availability is not guaranteed.
+Without this flag, usable complete current processing remains required.
+
+Extraction and original-dependent enrichment pause while a matching managed
+eviction journal is prepared/completed. They preserve processing attempts,
+budgets and existing text until verified re-publication makes the original
+resident again. Unknown missing or corrupt originals keep their normal failure
+diagnostics. Install the updated indexer/enrichment SELECT grants with the release;
+these roles gain no residency or journal mutation permission.
+
+The flag does not shorten the migration's initial access grace period. If the
+owner explicitly chooses immediate expiry of historical originals, adopt their
+historical age as a separate one-time operation during the initial maintenance
+window: retain the fresh compatible restore proof, record the exact residency
+preimage and latest shared-source timestamps, quiesce original readers and
+publishers, and update only unchanged unpinned resident entries under the
+lifecycle/source locks. Reject active grants, requests, processing and backup
+fences. Never backdate a real original access or a new publication. Preserve
+this audit on the host, then inspect the bounded preview before applying. Do
+not edit migration 033 or delete directly from the original directory.
+
 Destructive retention is opt-in and defaults to a dry run. Each pass has file
 and byte limits. It rechecks pins, recent access, active downloads/grants,
 processing and durable backup fences, verifies the exact regular file's size
@@ -74,7 +102,8 @@ network namespace; container loopback refers to that container. Text/vision
 profiles and their processing limits require explicit configuration. Existing
 ASR results remain retained when model profiles change. Originals without usable
 current processing evidence continue to occupy disk; enabling TTL alone cannot
-reclaim a backlog of unprocessed videos.
+reclaim a backlog of unprocessed videos under the default policy. The explicit
+`--expire-unprocessed` policy can reclaim old originals without that evidence.
 
 ### Optional object storage
 
