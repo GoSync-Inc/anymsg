@@ -29,11 +29,14 @@ intent loop requires:
 Tiden intent branch: [intent/<date>-<slug>](https://app.tiden.ai/<workspace>/products/<product>/branches/<id>)
 ```
 
-CI reads only the IDs from that untrusted text and never stores it. The link must
-name this workspace and product and resolve to exactly one open `intent/` branch,
-which then becomes an explicit target; any other link is ignored. Without a usable
-link, a feature branch without a mapping is reported under its own Git branch
-name. Tiden skips live-doc sync for a branch name it does not know, so the
+CI reads only that line, from the pull request event file rather than an
+environment variable, and keeps only the branch name and IDs. The link must be in
+this workspace and product, its text must name the branch its ID resolves to, and
+that `intent/` branch must be open. Exactly one such branch becomes an explicit
+target; any other link is ignored. The event is captured when a run starts and a
+re-run reuses it, so add the line before opening or pushing the pull request.
+Without a usable link, a feature branch without a mapping is reported under its
+own Git branch name. Tiden skips live-doc sync for a branch name it does not know, so the
 publisher first creates a Tiden branch of that name when none exists. Tiden may
 instead attribute the run to the intent branch whose session (`tiden intent
 start` on that Git branch) recorded it. The publisher reads the result back and

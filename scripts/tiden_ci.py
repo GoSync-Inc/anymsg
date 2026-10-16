@@ -29,8 +29,10 @@ MAX_BYTES = 20 * 1024 * 1024
 # Tiden branch names: lowercase letters, digits, slashes, underscores and hyphens.
 TIDEN_BRANCH_NAME = re.compile(r"[a-z0-9]+(?:[/_-][a-z0-9]+)*")
 _UUID = r"[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}"
-# The intent loop puts this link to the session's Tiden branch in the pull request description.
-TIDEN_BRANCH_LINK = re.compile(rf"https://app\.tiden\.ai/({_UUID})/products/({_UUID})/branches/({_UUID})")
+# The intent loop puts exactly this line, naming the session's Tiden branch, in the pull request description.
+TIDEN_INTENT_LINE = re.compile(
+    rf"^[ \t]*Tiden intent branch:[ \t]*\[(intent/[a-z0-9]+(?:[/_-][a-z0-9]+)*)\]"
+    rf"\(https://app\.tiden\.ai/({_UUID})/products/({_UUID})/branches/({_UUID})\)", re.MULTILINE)
 MAX_INTENT_LINKS = 5
 
 
@@ -157,21 +159,34 @@ def route_branch(manifest: dict, mapping: dict) -> tuple[str, bool]:
         return git_branch, True
 
 
+def pull_request_body(event_path: str | None) -> str:
+    """The pull request description from the GitHub event file, or empty outside a pull request."""
+    try:
+        event = json.loads(Path(event_path).read_text()) if event_path else {}
+    except (OSError, ValueError):
+        return ""
+    body = (event.get("pull_request") or {}).get("body") if isinstance(event, dict) else None
+    return body if isinstance(body, str) else ""
+
+
 def intent_links(text: str) -> list[dict]:
-    """Tiden branch links in a pull request description, as IDs only; the text is not retained."""
+    """`Tiden intent branch:` lines of a pull request description, as names and IDs only."""
     links = []
-    for workspace, product, branch in TIDEN_BRANCH_LINK.findall(text or ""):
-        link = {"workspace": workspace, "product": product, "branch": branch}
+    for name, workspace, product, branch in TIDEN_INTENT_LINE.findall(text or ""):
+        link = {"name": name, "workspace": workspace, "product": product, "branch": branch}
         if link not in links:
             links.append(link)
     return links[:MAX_INTENT_LINKS]
 
 
 def linked_intent_branch(links: list, branches: list, product: str, workspace: str) -> str | None:
-    """The one open intent branch of this product that the pull request links to, if unambiguous."""
-    ids = {link.get("branch") for link in links
-           if link.get("product") == product and link.get("workspace") == workspace}
-    names = {b["name"] for b in branches if b.get("id") in ids and b.get("status") == "open"
+    """The one open intent branch of this product that the pull request links to, if unambiguous.
+
+    The link text must name the same branch its ID resolves to.
+    """
+    wanted = {(link.get("branch"), link.get("name")) for link in links
+              if link.get("product") == product and link.get("workspace") == workspace}
+    names = {b["name"] for b in branches if (b.get("id"), b.get("name")) in wanted and b.get("status") == "open"
              and isinstance(b.get("name"), str) and b["name"].startswith("intent/")}
     return names.pop() if len(names) == 1 else None
 
@@ -283,13 +298,14 @@ def main() -> int:
     directory = args.directory.resolve()
     if args.command == "prepare":
         metadata = json.loads((directory / "metadata.json").read_text())
-        metadata["pr_tiden_links"] = intent_links(os.environ.get("TIDEN_PR_BODY", ""))
+        metadata["pr_tiden_links"] = intent_links(pull_request_body(os.environ.get("GITHUB_EVENT_PATH")))
         result = prepare(args.source_root.resolve(), directory, metadata)
         print(json.dumps({"test_counts": result["test_counts"], "check_counts": result["check_counts"]}))
         return 0
     manifest = json.loads((directory / "manifest.json").read_text())
+    mapping = json.loads(os.environ.get("TIDEN_BRANCH_MAP") or "{}")  # a malformed map fails loudly
     try:
-        branch, routed = route_branch(manifest, json.loads(os.environ.get("TIDEN_BRANCH_MAP") or "{}"))
+        branch, routed = route_branch(manifest, mapping)
     except ValueError:
         if not manifest.get("pr_tiden_links"):
             raise

@@ -204,8 +204,6 @@ jobs:
             {"gateway":"${{ steps.gateway.outcome }}","calendar":"${{ steps.calendar.outcome }}","calls":"${{ steps.calls.outcome }}","calls_frontend":"${{ steps.calls_frontend.outcome }}","load":"${{ steps.load.outcome }}"}
           SOURCE_BRANCH: ${{ github.head_ref || github.ref_name }}
           TIDEN_BRANCH_OVERRIDE: ${{ inputs.tiden_branch }}
-          # Only Tiden branch IDs are extracted from this untrusted text; it is never executed or stored.
-          TIDEN_PR_BODY: ${{ github.event.pull_request.body || '' }}
         run: |
           python - <<'PY'
           import json, os
