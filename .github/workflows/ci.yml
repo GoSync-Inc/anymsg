@@ -21,8 +21,8 @@ on:
 permissions:
   contents: read
 concurrency:
-  # Each merge queue run has a group of its own and cancels nothing; the queue
-  # itself decides when a group run is no longer needed. Other runs are unchanged.
+  # Each merge queue run has a group of its own and cancels nothing; a superseded
+  # group run finishes and the queue ignores it. Other runs keep their groups.
   group: ci-${{ github.event_name == 'merge_group' && format('merge-queue-{0}', github.run_id) || github.event.pull_request.number || github.ref }}
   cancel-in-progress: ${{ github.event_name != 'merge_group' }}
 jobs:
@@ -32,7 +32,8 @@ jobs:
       source_ref: ${{ inputs.source_ref || '' }}
       tiden_branch: ${{ inputs.tiden_branch || '' }}
     secrets:
-      TIDEN_API_TOKEN: ${{ secrets.TIDEN_API_TOKEN }}
+      # A queued group can hold a fork's unmerged code, so it never gets the credential.
+      TIDEN_API_TOKEN: ${{ github.event_name != 'merge_group' && secrets.TIDEN_API_TOKEN || '' }}
   native:
     uses: ./.github/workflows/whatsmeow.yml
     with:

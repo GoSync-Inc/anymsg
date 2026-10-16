@@ -58,11 +58,15 @@ evidence to a same-named Tiden branch.
 
 A merge queue run (`merge_group`, Git branch `gh-readonly-queue/...`) verifies
 the temporary group commit with the same required checks, `CI gate` and
-`checks / verify`, but publishes nothing to Tiden and creates no Tiden branch,
-whatever an override, map entry or pull request link names. Before any Tiden call
-the reporting job records `skipped` with the reason in `tiden-route.json`, logs a
-notice and stays green; the merged code reaches Tiden through the main push run.
-Each queue run has its own concurrency group and cancels no other run.
+`checks / verify`, but publishes nothing to Tiden and creates no Tiden branch.
+This takes precedence over every target above, including an override, a map
+entry or a pull request link. A queued group can contain a fork's unmerged code,
+so the queue run never receives `TIDEN_API_TOKEN`, checks no Tiden configuration
+and installs no CLI: its reporting job records `skipped` with the reason in
+`tiden-route.json`, logs a notice and stays green. The merged code reaches Tiden
+through the main push run. Each queue run has its own concurrency group and
+cancels no other run. Queue runs take their workflow files from the group commit,
+so review workflow changes in a fork's pull request before queuing it.
 
 For an explicit baseline rerun, dispatch `CI` on the reporting-code branch with
 `source_ref` set to the exact source revision and `tiden_branch` to the matching

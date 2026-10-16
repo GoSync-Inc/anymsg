@@ -332,8 +332,10 @@ def main() -> int:
         print(json.dumps({"test_counts": result["test_counts"], "check_counts": result["check_counts"]}))
         return 0
     manifest = json.loads((directory / "manifest.json").read_text())
-    branch, routed = None, False
-    if not merge_queue_run(manifest):  # publish() skips a queue run; it needs no map or route
+    if merge_queue_run(manifest):
+        # publish() skips a queue run before any Tiden call: no credentials, map or route needed.
+        result = publish(directory, manifest, None, "")
+    else:
         mapping = json.loads(os.environ.get("TIDEN_BRANCH_MAP") or "{}")  # a malformed map fails loudly
         try:
             branch, routed = route_branch(manifest, mapping)
@@ -341,8 +343,8 @@ def main() -> int:
             if not manifest.get("pr_tiden_links") and manifest.get("event") != "pull_request":
                 raise
             branch, routed = None, True  # publish() resolves the pull request's intent link or skips
-    result = publish(directory, manifest, branch, os.environ["TIDEN_PRODUCT_ID"], routed=routed,
-                     workspace=os.environ.get("TIDEN_WORKSPACE_ID", ""))
+        result = publish(directory, manifest, branch, os.environ["TIDEN_PRODUCT_ID"], routed=routed,
+                         workspace=os.environ.get("TIDEN_WORKSPACE_ID", ""))
     print(json.dumps({k: result[k] for k in ("seqNum", "status", "branchName", "branchId", "buildSha", "stats", "liveDocStatus")}))
     return 0 if result["status"] in {"passed", "skipped"} else 1
 
