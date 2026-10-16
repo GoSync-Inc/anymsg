@@ -23,7 +23,8 @@ jobs:
     with:
       source_ref: ${{ inputs.source_ref || '' }}
       tiden_branch: ${{ inputs.tiden_branch || '' }}
-    secrets: inherit
+    secrets:
+      TIDEN_API_TOKEN: ${{ secrets.TIDEN_API_TOKEN }}
   native:
     uses: ./.github/workflows/whatsmeow.yml
     with:
