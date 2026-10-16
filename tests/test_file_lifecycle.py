@@ -585,3 +585,125 @@ def test_replay_syncs_missing_directory_before_marking_evicted(archive,monkeypat
     assert not (s.files/blob.digest).exists()
     assert worker.run_once(apply=True)['evicted']==1
     assert len(calls)==2
+
+
+def old_unprocessed(archive,*,mid='old-unprocessed',mime='application/pdf'):
+    fid,blob=stored(archive,mid=mid,mime=mime)
+    _,s,_,_=archive
+    with s.pool.connection() as c:
+        c.execute("UPDATE messages SET sent_at=clock_timestamp()-interval '31 days' WHERE id=(SELECT message FROM attachments WHERE id=%s)",(fid,))
+        c.execute("UPDATE attachment_residency SET last_accessed_at=clock_timestamp()-interval '31 days' WHERE digest=%s",(blob.digest,))
+    return fid,blob
+
+
+@pytest.mark.parametrize('mime',['application/pdf','application/vnd.openxmlformats-officedocument.spreadsheetml.sheet',
+    'audio/ogg','image/png','video/mp4'])
+def test_explicit_policy_expires_old_unprocessed_media_without_fabricating_detail(archive,mime):
+    _,s,_,_=archive;fid,blob=old_unprocessed(archive,mime=mime);api=lifecycle()
+    with s.pool.connection() as c:
+        before=dict(c.execute('SELECT * FROM attachments WHERE id=%s',(fid,)).fetchone())
+        message=dict(c.execute('SELECT * FROM messages WHERE id=%s',(before['message'],)).fetchone())
+        detail=dict(c.execute('SELECT * FROM attachment_understanding WHERE attachment=%s',(fid,)).fetchone())
+    assert api.LifecycleWorker(s).run_once(apply=True)['evicted']==0
+    worker=api.LifecycleWorker(s,expire_unprocessed=True)
+    preview=worker.run_once()
+    assert preview['expire_unprocessed'] and preview['dry_run'] and preview['candidates']==1
+    assert (s.files/blob.digest).exists()
+    result=worker.run_once(apply=True)
+    assert result['evicted']==1 and result['evicted_bytes']==blob.bytes
+    assert not (s.files/blob.digest).exists()
+    with s.pool.connection() as c:
+        assert api.is_managed_evicted(c,blob.digest,blob.bytes)
+        assert dict(c.execute('SELECT * FROM attachments WHERE id=%s',(fid,)).fetchone())==before
+        assert dict(c.execute('SELECT * FROM messages WHERE id=%s',(before['message'],)).fetchone())==message
+        assert dict(c.execute('SELECT * FROM attachment_understanding WHERE attachment=%s',(fid,)).fetchone())==detail
+
+
+@pytest.mark.parametrize('blocker',['recent_source','recent_access','pin','backup','media_lease','demand',
+    'grant','text_lease','asr_lease','understanding_lease','shared_recent_source'])
+def test_unprocessed_policy_preserves_current_use_pins_fences_and_shared_recent_sources(archive,blocker):
+    _,s,key,_=archive;fid,blob=old_unprocessed(archive);api=lifecycle()
+    if blocker=='shared_recent_source':stored(archive,mid='shared-recent')
+    if blocker=='grant':s.get_attachment(key,fid)
+    with s.pool.connection() as c:
+        if blocker in ('grant','shared_recent_source'):
+            c.execute("UPDATE attachment_residency SET last_accessed_at=clock_timestamp()-interval '31 days' WHERE digest=%s",(blob.digest,))
+        if blocker=='recent_source':c.execute('UPDATE messages SET sent_at=clock_timestamp()')
+        if blocker=='recent_access':api.touch_original(c,blob.digest,blob.bytes)
+        if blocker=='pin':api.pin_original(c,blob.digest,True)
+        if blocker=='backup':api.begin_backup_fence(c,'unprocessed-policy-backup')
+        if blocker=='media_lease':c.execute("UPDATE media_jobs SET state='leased',lease_until=clock_timestamp()+interval '1 hour' WHERE id=%s",(fid,))
+        if blocker=='demand':c.execute("UPDATE media_jobs SET requested_until=clock_timestamp()+interval '1 hour' WHERE id=%s",(fid,))
+        if blocker in ('text_lease','asr_lease','understanding_lease'):
+            table={'text_lease':'attachment_text','asr_lease':'attachment_enrichment',
+                'understanding_lease':'attachment_understanding'}[blocker]
+            from psycopg import sql
+            c.execute(sql.SQL("UPDATE {} SET state='leased',lease_until=clock_timestamp()+interval '1 hour' WHERE attachment=%s").format(sql.Identifier(table)),(fid,))
+    result=api.LifecycleWorker(s,expire_unprocessed=True).run_once(apply=True)
+    assert result['evicted']==0
+    assert (s.files/blob.digest).exists()
+    with s.pool.connection() as c:assert not api.is_managed_evicted(c,blob.digest,blob.bytes)
+
+
+@pytest.mark.parametrize('unsafe',['corrupt','symlink','missing'])
+def test_unprocessed_policy_never_labels_unknown_or_corrupt_absence_managed(archive,unsafe,tmp_path):
+    _,s,_,_=archive;_,blob=old_unprocessed(archive);api=lifecycle();path=s.files/blob.digest
+    path.unlink()
+    target=tmp_path/'synthetic-unrelated';target.write_bytes(b'Keep unrelated bytes')
+    if unsafe=='corrupt':path.write_bytes(b'x'*blob.bytes)
+    if unsafe=='symlink':path.symlink_to(target)
+    assert api.LifecycleWorker(s,expire_unprocessed=True).run_once(apply=True)['evicted']==0
+    with s.pool.connection() as c:assert not api.is_managed_evicted(c,blob.digest,blob.bytes)
+    assert target.read_bytes()==b'Keep unrelated bytes'
+
+
+def test_unprocessed_original_can_be_requested_again_without_resetting_retries(archive):
+    from messaging_service.blobs import BlobWriter
+    ar,s,key,_=archive;fid,blob=old_unprocessed(archive);api=lifecycle()
+    with s.pool.connection() as c:c.execute('UPDATE media_jobs SET attempts=2 WHERE id=%s',(fid,))
+    assert api.LifecycleWorker(s,expire_unprocessed=True).run_once(apply=True)['evicted']==1
+    assert s.request_file_download(key,fid)['request_status']=='queued'
+    job=ar.claim_media('synthetic-recovery');assert job['id']==fid and job['attempts']==3
+    writer=BlobWriter(s.files,reserve_bytes=0);again=writer.write([b'Synthetic retained contract'])
+    ar.finish_media(job,again,writer)
+    assert (s.files/blob.digest).read_bytes()==b'Synthetic retained contract'
+    with s.pool.connection() as c:
+        assert not api.is_managed_evicted(c,blob.digest,blob.bytes)
+        assert c.execute('SELECT attempts FROM media_jobs WHERE id=%s',(fid,)).fetchone()['attempts']==3
+        assert c.execute('SELECT state FROM attachment_understanding WHERE attachment=%s',(fid,)).fetchone()['state']!='ready'
+    assert api.LifecycleWorker(s,expire_unprocessed=True).run_once(apply=True)['evicted']==0
+
+
+def test_unprocessed_policy_still_reports_provider_unavailability(archive):
+    ar,s,key,_=archive;fid,blob=old_unprocessed(archive);api=lifecycle()
+    assert api.LifecycleWorker(s,expire_unprocessed=True).run_once(apply=True)['evicted']==1
+    assert s.request_file_download(key,fid)['request_status']=='queued'
+    ar.fail_media(ar.claim_media('synthetic-unavailable'),'unavailable',permanent=True)
+    result=s.request_file_download(key,fid)
+    assert result['request_status']=='failed' and result['reason']=='unavailable'
+    with s.pool.connection() as c:assert api.is_managed_evicted(c,blob.digest,blob.bytes)
+
+
+def test_unprocessed_policy_rejects_ambiguous_values(archive):
+    _,s,_,_=archive
+    for value in (1,0,'true',None):
+        with pytest.raises(ValueError,match='invalid_retention_policy'):
+            lifecycle().LifecycleWorker(s,expire_unprocessed=value)
+
+
+def test_unprocessed_expiry_keeps_partial_text_and_produces_explicit_backup_absence(archive):
+    from messaging_service.backup import blob_inventory
+    _,s,key,_=archive;fid,blob=old_unprocessed(archive);api=lifecycle()
+    with s.pool.connection() as c:
+        c.execute("UPDATE attachment_text SET state='ready',text_content='Synthetic partial detail',truncated=true WHERE attachment=%s",(fid,))
+        partial=dict(c.execute('SELECT * FROM attachment_text WHERE attachment=%s',(fid,)).fetchone())
+    assert api.LifecycleWorker(s,expire_unprocessed=True).run_once(apply=True)['evicted']==1
+    with s.pool.connection() as c:
+        present,absent=blob_inventory(c,34)
+        journal=c.execute('SELECT eviction_id FROM attachment_residency WHERE digest=%s',(blob.digest,)).fetchone()['eviction_id']
+        assert not any(item['digest']==blob.digest for item in present)
+        assert {'digest':blob.digest,'bytes':blob.bytes,'eviction_id':str(journal)} in absent
+        assert dict(c.execute('SELECT * FROM attachment_text WHERE attachment=%s',(fid,)).fetchone())==partial
+    metadata=s.get_attachment(key,fid)
+    assert metadata['reason']=='original_evicted' and metadata['next_action']=='request_file_download'
+    assert metadata['understanding']['state']!='ready'
