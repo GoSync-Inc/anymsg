@@ -1,6 +1,9 @@
 name: CI
 on:
+  # Feature branches are verified by their pull request run; pushing them again
+  # would duplicate CI and publish evidence to a second, same-named Tiden branch.
   push:
+    branches: [main]
   pull_request:
   workflow_dispatch:
     inputs:
