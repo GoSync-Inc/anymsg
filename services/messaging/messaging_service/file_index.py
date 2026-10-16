@@ -595,12 +595,12 @@ class FileIndexer:
     def claim(self):
         self._expire_leases()
         with resource_admission.transaction(self.connection()) as (c,resources):
-            from .file_lifecycle import lifecycle_lock
+            from .file_lifecycle import lifecycle_lock,PROCESSABLE_ORIGINAL
             lifecycle_lock(c)
             c.execute('SELECT pg_advisory_xact_lock(74509139)')
             rows = c.execute('''SELECT f.*,a.message,m.account FROM attachment_text f
                 JOIN attachments a ON a.id=f.attachment JOIN messages m ON m.id=a.message
-                WHERE ''' + CURRENT + ''' AND f.attempts<%s AND
+                WHERE ''' + CURRENT + ' AND ' + PROCESSABLE_ORIGINAL + ''' AND f.attempts<%s AND
                 ((f.state='queued' AND f.next_due<=clock_timestamp()) OR
                  (f.state='leased' AND f.lease_until<clock_timestamp()))
                 ORDER BY (m.sent_at>=clock_timestamp()-interval '1 day') DESC,f.next_due,f.attachment

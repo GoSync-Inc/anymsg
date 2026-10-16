@@ -256,6 +256,14 @@ understanding keeps its last successful title and summary during refreshes and
 reports the current refresh state and published model separately. This also
 preserves useful content when the original has been deliberately evicted.
 
+Unprocessed originals may also be deliberately evicted under the explicit
+[retention policy](MEDIA_STORAGE.md). A matching prepared/completed eviction
+journal pauses original-dependent ASR/image/document claims without consuming
+attempts or inference budget. Verified re-publication resumes the queued work;
+unknown missing/corrupt files retain normal failure diagnostics. The current
+enrichment role needs read-only residency/journal grants, without mutation rights.
+Independent understanding can still summarize available retained source text.
+
 Whisper, Ollama requests and native PDF/image OCR share one `local-heavy` slot.
 The database lease records ownership and expiry. All local worker containers
 must additionally bind-mount the **same existing host directory**,
