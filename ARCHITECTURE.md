@@ -12,28 +12,38 @@ container, package or database per component.
 
 ## Logical components
 
-These names also identify the product components in Tiden. Paths are relative
-to this repository; a source anchor identifies an implementation location,
-not proof that its behavior has been tested.
+The first column gives the exact Tiden component names. The `AnyMsg` prefix
+marks the messaging module's components and keeps their historical identity.
+Paths are relative to this repository; a source anchor identifies an
+implementation location, not proof that its behavior has been tested. Each
+component's path list in Tiden is the complete scope; the table names its
+principal sources.
 
 | Component | Responsibility and principal sources | Verification boundary |
 | --- | --- | --- |
-| Gateway & Access | `app.py`, `policy.py`, `commands.py`, `outgoing.py`, `messenger_operations.py`, `formatting.py`, `presentation.py`, gateway SQL role | REST/MCP contracts, authorization, redaction, typed arguments, preview and mutation fences |
-| Archive & Search | `archive.py`, `envelope.py`, `spool.py`, `collector_state.py`, query/evidence modules, `conversation.py`, `conversation_state.py`, `people.py`, `reviews.py`, `receipts.py`, `reply_state.py`, `history_plan.py` | Transactions, revisions, conflicts, scope, cursors, coverage, normalized conversation views and explainable reply hints |
-| Telegram Connector | `telegram_collector.py`, pairing, governor, identity, receipts and operations modules | Synthetic Telethon adapters, durable cursors, FloodWait, session/lease fences and native-operation outcomes |
-| WhatsApp Connector | `whatsapp_collector.py`, pairing/identity modules, `whatsapp/` | Synthetic provider/IPC tests, command lanes, history bounds, identity evidence, passive receipts and media handling |
-| Media Storage & Index | `blobs.py`, `storage_admission.py`, `file_extract.py`, `file_index.py` | Original integrity, scoped retrieval, extraction safety, passages, provenance, derivative invalidation and reuse |
-| AI Enrichment | `enrichment.py`, `enrichment_providers.py`, `codex_enrichment.py`, `resource_admission.py` | Budgets, isolated processing, profile validation, result fences and untrusted model output |
-| Subscriptions & Events | `subscriptions.py`, `subscription_worker.py`, `processing_events.py`, subscription SQL role | Key ownership, committed frontier, lifecycle/version checks, fair matching, atomic checkpointing and artifact references |
-| Backup & Recovery | `backup.py`, crypto, runner, worker, receiver and recovery modules | Consistent table/blob manifests, encrypted transfer, restore equality, quarantine and retention anchors |
-| Deployment & Verification | SQL migrations, `Dockerfile`, Compose overlays, `.github/`, `scripts/`, `telemetry.py` | Schema checksums, least privilege, images/packages, synthetic network drills and authentic CI evidence |
-| Python Client & Operator CLI | `anymsg/`, `messaging_service/__main__.py`, packaged assets | Safe HTTP client, token-file CLI, source assets and explicit owner administration |
-| JavaScript Client | `packages/npm/` | Dependency-free HTTP client, local argument validation, TypeScript declarations and token-file CLI |
+| AnyMsg Gateway & Access | `app.py`, `policy.py`, `commands.py`, `outgoing.py`, `send_wait.py`, `messenger_operations.py`, `formatting.py`, `presentation.py`, `security_logging.py`, `error_details.py`, `feedback.py`, shared `store.py`, gateway SQL role | REST/MCP contracts, authorization, redaction, typed arguments, safe error codes, preview and mutation fences, bounded observation of queued sends and private agent feedback |
+| AnyMsg Archive & Search | `archive.py`, shared `store.py`, `envelope.py`, `adapters.py`, `spool.py`, collector state/control and operational modules, query/evidence modules, `conversation.py`, `conversation_state.py`, `people.py`, `reviews.py`, `receipts.py`, `reply_state.py`, `reply_evidence.py`, `incoming_formatting.py`, `history_plan.py`, collector SQL role | Transactions, revisions, conflicts, scope, cursors, coverage, normalized conversation views, exact reply proofs and explainable reply hints |
+| AnyMsg Telegram Connector | `telegram_collector.py`, pairing, governor, identity, receipts and operations modules, Telegram deployment examples | Synthetic Telethon adapters, durable cursors, FloodWait, session/lease fences and native-operation outcomes |
+| AnyMsg WhatsApp Connector | Primary whatsmeow adapter `whatsapp/whatsmeow/` for new connections; whatsapp-web.js fallback and rollback adapter `whatsapp/*.mjs`; `whatsapp_collector.py`, pairing/identity modules, `whatsapp_capabilities.py`, WhatsApp deployment examples | Synthetic provider/IPC tests for both adapters, command lanes, history bounds, identity evidence, account provider identity, passive receipts and media handling |
+| AnyMsg Media Storage & Index | `blobs.py`, `storage_admission.py`, `media_policy.py`, `media_requests.py`, `attachment_metadata.py`, `uploads.py`, `file_extract.py`, `file_index.py`, `file_lifecycle.py`, indexer and file-lifecycle SQL roles | Original integrity, scoped retrieval, bounded original requests and staged uploads, extraction safety, passages, provenance, derivative invalidation and reuse, operator-only original residency |
+| AnyMsg AI Enrichment | `enrichment.py`, `enrichment_providers.py`, `codex_enrichment.py`, `file_understanding.py`, `resource_admission.py`, enrichment SQL role | Budgets, isolated processing, profile validation, result fences, independent file descriptions and untrusted model output |
+| AnyMsg Subscriptions & Events | `subscriptions.py`, `subscription_worker.py`, `subscription_consumption.py`, `processing_events.py`, `event_delivery.py`, `delivery_worker.py`, subscription and delivery SQL roles | Key ownership, committed frontier, lifecycle/version checks, fair matching, atomic checkpointing, receipt-bound ACK, signed hints that never ACK and artifact references |
+| AnyMsg Backup & Recovery | `backup.py`, crypto, runner, worker, receiver, R2 receiver/verifier, restore worker and recovery modules | Consistent table/blob manifests, encrypted transfer, restore equality, quarantine and retention anchors |
+| AnyMsg Deployment & Verification | SQL migrations, `schema.sql`, `__init__.py` version, `release.py`, `telemetry.py`, root `Dockerfile`, Compose overlays, `services/release-router/`, `.github/`, `scripts/` | Schema checksums, least privilege, images/packages, release routing, synthetic network drills and authentic CI evidence |
+| AnyMsg Python Client & Operator CLI | `services/messaging/anymsg/`, `__main__.py` operator entry point, root `client_check.py` and `media_benchmark.py`, packaged assets | Safe HTTP client, token-file CLI, source assets and explicit owner administration |
+| AnyMsg JavaScript Client | `packages/npm/` | Dependency-free HTTP client, local argument validation, TypeScript declarations and token-file CLI |
+| Platform Gateway | `services/gateway/` | Selected module tools, exact action ceilings, per-principal backend credentials, bounded original downloads and preserved domain receipts, without provider sessions |
+| Family Calendar | `services/calendar/` | Google and CalDAV accounts, explicit roles and grants, plan/apply receipts, encrypted provider credentials and a singleton synchronization worker |
+| Voice Calls | `services/calls/` | Principal-owned briefs and call tasks, durable follow-ups and owner decisions, scoped messaging context, Pipecat runtime and signed provider media boundaries |
+| Platform Integration & Operations | `tests/platform/`, `docs/quality/`, Tiden snapshot and preservation scripts | Migration compatibility, specification/test identity preservation and cross-module verification |
 
-Unless otherwise specified, Python module names in the table are under
-`services/messaging/messaging_service/`. `store.py` supplies shared transaction/authorization and
+Bare file names in the table are under `services/messaging/messaging_service/`;
+paths with a directory are relative to the repository root, and root files are
+marked as such. `store.py` supplies shared transaction/authorization and
 dispatch infrastructure; components may intentionally overlap there. The
 operator entry point and schema migrations likewise cross domain boundaries.
+The Tiden snapshot and preservation scripts belong to both Deployment &
+Verification (through `scripts/`) and Platform Integration & Operations.
 Do not interpret a change in a shared file as coverage of every affected domain.
 
 ## Data flow and process boundaries
@@ -80,14 +90,20 @@ Examples of boundaries that must stay explicit:
   and document source spans. There is no query argument to `get_file_segments`.
 - `history-plan` previews a recent-first plan. Durable multi-wave execution is
   planned; a successful preview does not prove provider history was downloaded.
-- Subscriptions are durable and passive. Host wake-up/push delivery and event ACK
-  are planned; a new MCP result alone cannot activate an idle agent.
+- Subscriptions are durable. Passive event reads never ACK; explicit
+  receipt-bound ACK and operator-registered signed hints are implemented. A
+  delivered hint is neither an ACK nor a verified host turn. Host wake-up
+  remains planned; a hint or a new MCP result alone cannot activate an idle agent.
 - Owner-read observations, recipient delivery/read receipts and a credential's
   local reply dismissal are different evidence. Passive reads do not send a
   provider read receipt.
 - Original deduplication and context-bound derivative reuse are implemented.
-  Cold-original eviction/rehydration and independent AI artifact reuse remain
-  planned. An unavailable original is not a download guarantee.
+  Opt-in managed eviction of unpinned originals and best-effort recovery
+  through the collector are implemented; eviction requires usable current
+  processing unless the operator explicitly expires old unprocessed originals.
+  A cold archive before eviction with verified rehydration, and independent AI
+  artifact reuse, remain planned. An unavailable original is not a download
+  guarantee.
 - Container defaults describe the deployment template. Synthetic tests do not
   prove current provider completeness, transcription quality, server capacity
   or health of an off-site backup receiver.
