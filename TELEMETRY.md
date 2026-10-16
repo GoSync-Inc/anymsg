@@ -9,9 +9,10 @@ where `<sha>` is the full 40-character lowercase source commit in
 Without a valid value, for example in a package installation, a local checkout or
 an image built without `DEEDKIT_SOURCE_SHA`, the release keeps the historical
 `anymsg@` plus `messaging_service.__version__`; that version is shared by several
-commits and does not identify a deployment. An invalid value is never sent. Historical `anymsg@` releases and their issue links
-are preserved, not relabelled. An event alone only names its release: the Tiden
-release record's environment, CI build URL and gate are a separate step. See the
+commits and does not identify a deployment. An invalid value is never sent.
+Historical `anymsg@` releases and their issue links are preserved, not relabelled.
+An event alone only names its release: the Tiden release record's environment, CI
+build URL and gate are a separate step. See the
 [Tiden readiness workflow](docs/operations/tiden-product-workflow.md).
 
 Install `anymsg[telemetry]` or build the intended Docker target with
