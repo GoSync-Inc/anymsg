@@ -135,17 +135,15 @@ Deployment acceptance remains separate, and old `lastSeen` alone proves nothing.
 ### Names and release identity
 
 DeedKit is the platform; AnyMsg is the compatibility identity of its messaging
-package. Messaging telemetry names its release `deedkit@` plus the full source
-commit from `DEEDKIT_SOURCE_SHA`; without a valid commit it keeps `anymsg@` plus
-`messaging_service.__version__` (0.9.19 at the reviewed revision), a module version
-that is not a platform deployment SHA. Stack frames are repository-root paths, so
-Tiden can attribute them to components. The Tiden product's historical `ANYM`
+package. Current messaging telemetry constructs `anymsg@` plus
+`messaging_service.__version__` (0.9.19 at the reviewed revision). It is a module
+version, not a platform deployment SHA. The Tiden product's historical `ANYM`
 prefix and existing component/test identities likewise survive the rename.
 
-Keep historical release records and links. The release record for a revision must
-carry the same `deedkit@<sha>` version, its environment and its build URL; the
-runtime string alone does not create that association. Do not relabel old events or
-manufacture a production release to obtain a gate. Contributor headings and display text can use DeedKit immediately.
+Keep historical release records and links. A future build-identity change must
+coordinate the runtime release string, CI release record, environment, source SHA
+and build URL. Do not relabel old events or manufacture a production release to
+obtain a gate. Contributor headings and display text can use DeedKit immediately.
 
 ### Implementation sequence
 
