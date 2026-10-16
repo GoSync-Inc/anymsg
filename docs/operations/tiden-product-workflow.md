@@ -20,7 +20,7 @@ cannot infer. Do not copy or fork the vendor skill bodies into another workflow.
 | Skill | Use it for |
 | --- | --- |
 | `product-context` | Find existing specs and source anchors before planning or investigating; keep a mapping for each independent part. |
-| `start-intent` | Begin or continue a scoped product change with observable promises; classify docs-only/spec-maintenance work using its skip rule. |
+| `start-intent` | Begin or continue a scoped product change with observable promises; decide skip or the full loop by the Tiden rule under Review levels in `AGENTS.md`. |
 | `capture-intent` | Reconcile the actual product change into existing specs or new narrowly scoped stories on the session branch, then close with the measured ledger verdict. |
 | `link-coverage` | Connect already reported tests to requirements after reviewing the assertions; preserve existing links. |
 | `generate-tests` | Reconcile genuinely missing test cases. For this existing product, review the import plan and identity/link preservation before any authoritative ingest. |
@@ -167,8 +167,8 @@ obtain a gate. Contributor headings and display text can use DeedKit immediately
    links: even an exact source-file match does not prove a whole specification.
 5. Review the Tiden merge preview, conflicts and link proposals. Record a Git PR
    and Tiden branch together. A closed intent session or merged Git PR does not
-   merge its Tiden branch. Merge reviewed spec changes under the merge delegation
-   rule in `AGENTS.md`; never blanket-merge unrelated open branches.
+   merge its Tiden branch. Merge reviewed spec changes under the review levels in
+   `AGENTS.md`; never blanket-merge unrelated open branches.
 6. Read back actual Tiden main IDs, sources, links, gate and GitHub drift after
    merging. A green branch projection is not a main result. `no_test`, `not_run`
    and failed executions remain visible. Do not create passing evidence or
