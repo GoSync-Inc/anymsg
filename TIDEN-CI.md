@@ -65,12 +65,12 @@ Normal pull requests record their actual tested merge SHA.
 
 `run create` always receives `--branch` and `--intent-session none`. A mapped or
 pull-request-linked run must land on exactly that branch ID. Any other unmapped
-run must land on the same-named or an intent branch, as described above. The job waits for live-doc
-sync and checks the resulting branch before reporting success. The authentic run
-then adopts existing case identities or imports the reported cases. Reported
-step failures and missing required verifications are also recorded as failed
-or blocked; optional test skips remain skipped. A test run is not a statement
-that every specification is covered.
+run must land on the same-named or an intent branch, as described above. The job
+waits for live-doc sync and checks the resulting branch before reporting success.
+The authentic run then adopts existing case identities or imports the reported
+cases. Reported step failures and missing required verifications are also recorded
+as failed or blocked; optional test skips remain skipped. A test run is not a
+statement that every specification is covered.
 
 Link specs only to tests whose assertions actually verify them. Use
 `tiden test link-spec <test-id> --spec-id <spec-id> --branch <branch>` after
