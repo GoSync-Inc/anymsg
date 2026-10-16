@@ -384,3 +384,74 @@ def test_ci_keeps_the_description_out_of_the_environment_and_pushes_only_main():
     assert "pull_request" in trigger and "workflow_dispatch" in trigger
     for workflow in ("ci.yml", "checks.yml"):
         assert "pull_request.body" not in (root / ".github/workflows" / workflow).read_text()
+
+
+def pull_request_manifest(manifest, *lines):
+    return {**linked_manifest(manifest, *lines), "event": "pull_request"}
+
+
+@pytest.mark.parametrize("existing, lines", [
+    ((INTENT,), ()),
+    ((INTENT,), (intent_line(product="22222222-2222-4333-8444-555555555555"),)),
+    (({**INTENT, "status": "merged"},), (intent_line(),)),
+    (({**INTENT, "name": "intent/2026-10-16-renamed"},), (intent_line(),)),
+], ids=["no-link", "other-product", "merged-branch", "text-names-another-branch"])
+def test_pull_request_without_usable_link_publishes_nothing(tmp_path, monkeypatch, capsys, existing, lines):
+    calls, manifest = routed_cli(monkeypatch, tmp_path, existing=existing)
+    result = publish(tmp_path, pull_request_manifest(manifest, *lines), "codex/feature", PRODUCT,
+                     routed=True, workspace=WORKSPACE)
+    assert result["status"] == "skipped" and result["branchName"] is None
+    assert not any(call[1:3] in (["branch", "create"], ["run", "create"]) for call in calls)
+    receipt = json.loads((tmp_path / "tiden-route.json").read_text())
+    assert receipt["source"] == "skipped" and receipt["branch"] is None and "intent branch link" in receipt["reason"]
+    assert "::notice title=Tiden evidence not published::" in capsys.readouterr().out
+
+
+def test_linked_pull_request_still_publishes_to_its_intent_branch(tmp_path, monkeypatch):
+    calls, manifest = routed_cli(monkeypatch, tmp_path, created=INTENT["name"], final_id=INTENT_ID,
+                                 final_branches=(), existing=(INTENT,))
+    result = publish(tmp_path, pull_request_manifest(manifest, intent_line()), "codex/feature", PRODUCT,
+                     routed=True, workspace=WORKSPACE)
+    assert result["branchId"] == INTENT_ID
+    assert json.loads((tmp_path / "tiden-route.json").read_text())["source"] == "pull-request-link"
+
+
+def test_non_pull_request_routing_is_unchanged_by_the_skip(tmp_path, monkeypatch):
+    calls, manifest = routed_cli(monkeypatch, tmp_path)
+    result = publish(tmp_path, {**manifest, "event": "workflow_dispatch"}, "codex/feature", PRODUCT,
+                     routed=True, workspace=WORKSPACE)
+    assert result["branchId"] == "new-id"
+    assert any(call[1:3] == ["branch", "create"] for call in calls)
+    calls, manifest = routed_cli(monkeypatch, tmp_path, created="main", final_id="main-id", final_branches=())
+    assert publish(tmp_path, {**manifest, "event": "push", "git_branch": "main"}, "main", PRODUCT)["branchId"] == "main-id"
+
+
+def test_unroutable_pull_request_branch_without_link_is_skipped(tmp_path, monkeypatch):
+    import sys
+    from scripts import tiden_ci
+    calls, manifest = routed_cli(monkeypatch, tmp_path)
+    (tmp_path / "manifest.json").write_text(json.dumps({**manifest, "event": "pull_request", "git_branch": "Release/1.2",
+                                                        "pr_tiden_links": []}))
+    monkeypatch.delenv("TIDEN_BRANCH_MAP", raising=False)
+    monkeypatch.setenv("TIDEN_PRODUCT_ID", PRODUCT)
+    monkeypatch.setenv("TIDEN_WORKSPACE_ID", WORKSPACE)
+    monkeypatch.setattr(sys, "argv", ["tiden_ci.py", "publish", "--directory", str(tmp_path)])
+    assert tiden_ci.main() == 0
+    assert not any(call[1:3] in (["branch", "create"], ["run", "create"]) for call in calls)
+    assert json.loads((tmp_path / "tiden-route.json").read_text())["source"] == "skipped"
+    (tmp_path / "manifest.json").write_text(json.dumps({**manifest, "event": "workflow_dispatch",
+                                                        "git_branch": "Release/1.2", "pr_tiden_links": []}))
+    with pytest.raises(ValueError, match="mapping"):
+        tiden_ci.main()
+
+
+def test_prepare_records_the_ci_event_name(tmp_path, monkeypatch):
+    import sys
+    from scripts import tiden_ci
+    (tmp_path / "metadata.json").write_text(json.dumps(metadata()))
+    monkeypatch.delenv("GITHUB_EVENT_PATH", raising=False)
+    monkeypatch.setenv("GITHUB_EVENT_NAME", "pull_request")
+    monkeypatch.setattr(sys, "argv", ["tiden_ci.py", "prepare", "--directory", str(tmp_path),
+                                      "--source-root", str(tmp_path)])
+    assert tiden_ci.main() == 0
+    assert json.loads((tmp_path / "manifest.json").read_text())["event"] == "pull_request"

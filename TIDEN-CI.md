@@ -35,14 +35,18 @@ this workspace and product, its text must name the branch its ID resolves to, an
 that `intent/` branch must be open. Exactly one such branch becomes an explicit
 target; any other link is ignored. The event is captured when a run starts and a
 re-run reuses it, so add the line before opening or pushing the pull request.
-Without a usable link, a feature branch without a mapping is reported under its
-own Git branch name. Tiden skips live-doc sync for a branch name it does not know, so the
-publisher first creates a Tiden branch of that name when none exists. Tiden may
-instead attribute the run to the intent branch whose session (`tiden intent
-start` on that Git branch) recorded it. The publisher reads the result back and
-accepts only that same-named branch or an `intent/` branch, never `main`. Git
-branch names Tiden cannot use (uppercase, dots) still need a mapping or a usable
-intent link. The `tiden-route.json` receipt records the chosen branch and why.
+Without a usable link, a pull request run publishes nothing: the
+`tiden-route.json` receipt records `skipped` with the reason, the job log shows a
+notice, and the check stays green. The merged code reaches Tiden through the main
+push run. Any other run without an explicit target, such as a manual dispatch
+without `tiden_branch`, is reported under its own Git branch name. Tiden skips
+live-doc sync for a branch name it does not know, so the publisher first creates a
+Tiden branch of that name when none exists. Tiden may instead attribute the run to
+the intent branch whose session (`tiden intent start` on that Git branch) recorded
+it. The publisher reads the result back and accepts only that same-named branch or
+an `intent/` branch, never `main`. For such runs, Git branch names Tiden cannot
+use (uppercase, dots) still need a mapping. The `tiden-route.json` receipt records
+the chosen branch and why.
 Do not label a feature run as `main` just to make the main gate green. Failed
 evidence association fails the reporting job. Without a token the job clearly
 states that reporting is not configured. No workspace credentials belong in Git.

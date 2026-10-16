@@ -221,6 +221,14 @@ def publish(directory: Path, manifest: dict, branch: str | None, product: str, c
         linked = linked_intent_branch(manifest["pr_tiden_links"], branches, product, workspace)
         if linked:
             branch, routed, source = linked, False, "pull-request-link"
+    if routed and manifest.get("event") == "pull_request":
+        # Without its intent branch a pull request has no Tiden home; main publishes the merged code.
+        reason = "pull request description has no usable Tiden intent branch link"
+        (directory / "tiden-route.json").write_text(json.dumps({"branch": None, "source": "skipped",
+                                                                "reason": reason}))
+        print(f"::notice title=Tiden evidence not published::{reason}; main CI publishes it after merge")
+        return {"seqNum": None, "status": "skipped", "branchName": None, "branchId": None,
+                "buildSha": manifest["sha"], "stats": {}, "liveDocStatus": None}
     if branch is None:
         raise ValueError("No Tiden branch mapping, no usable pull request intent link, and the Git branch "
                          "is not a valid Tiden branch name; register this Git branch before publishing evidence")
@@ -300,6 +308,7 @@ def main() -> int:
     if args.command == "prepare":
         metadata = json.loads((directory / "metadata.json").read_text())
         metadata["pr_tiden_links"] = intent_links(pull_request_body(os.environ.get("GITHUB_EVENT_PATH")))
+        metadata["event"] = os.environ.get("GITHUB_EVENT_NAME", "")
         result = prepare(args.source_root.resolve(), directory, metadata)
         print(json.dumps({"test_counts": result["test_counts"], "check_counts": result["check_counts"]}))
         return 0
@@ -308,13 +317,13 @@ def main() -> int:
     try:
         branch, routed = route_branch(manifest, mapping)
     except ValueError:
-        if not manifest.get("pr_tiden_links"):
+        if not manifest.get("pr_tiden_links") and manifest.get("event") != "pull_request":
             raise
-        branch, routed = None, True  # publish() may still resolve the pull request's intent link
+        branch, routed = None, True  # publish() resolves the pull request's intent link or skips
     result = publish(directory, manifest, branch, os.environ["TIDEN_PRODUCT_ID"], routed=routed,
                      workspace=os.environ.get("TIDEN_WORKSPACE_ID", ""))
     print(json.dumps({k: result[k] for k in ("seqNum", "status", "branchName", "branchId", "buildSha", "stats", "liveDocStatus")}))
-    return 0 if result["status"] == "passed" else 1
+    return 0 if result["status"] in {"passed", "skipped"} else 1
 
 
 if __name__ == "__main__":
