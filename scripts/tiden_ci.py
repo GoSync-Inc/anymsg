@@ -233,8 +233,9 @@ def publish(directory: Path, manifest: dict, branch: str | None, product: str, c
         if linked:
             branch, routed, source = linked, False, "pull-request-link"
     if routed and pull_request:
-        return skip("the pull request's Tiden intent branch link is not usable: it must name exactly one "
-                    "open intent branch of this workspace and product", "warning")
+        return skip("the pull request's Tiden intent branch link is not usable: its text must name the "
+                    "branch its ID resolves to, and that must be the one open intent branch of this "
+                    "workspace and product", "warning")
     if branch is None:
         raise ValueError("No Tiden branch mapping, no usable pull request intent link, and the Git branch "
                          "is not a valid Tiden branch name; register this Git branch before publishing evidence")
