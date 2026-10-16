@@ -150,7 +150,7 @@ no `provider` remain `webjs`; they are never silently converted. See
 [the native adapter runbook](docs/whatsapp-native.md) before switching an account.
 
 The Python wheel uses an external `native_executable` for native sessions. Build
-it from the pinned source in `whatsapp/whatsmeow` with Go 1.26.2; binaries and
+it from the pinned source in `whatsapp/whatsmeow` with Go 1.26.9; binaries and
 private sessions are never bundled into the cross-platform Python wheel.
 
 For a legacy browser wheel installation, Node sources are bundled but Node modules are not:
