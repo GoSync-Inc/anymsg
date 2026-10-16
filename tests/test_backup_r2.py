@@ -518,3 +518,69 @@ def test_no_such_upload_cannot_clear_uncertain_completion_evidence(config):
     with pytest.raises(RuntimeError,match='storage_unavailable'):receive(config,cloud)
     assert journal.read_bytes()==before
     assert cloud.calls.count('create_multipart_upload')==1 and 'abort_multipart_upload' not in cloud.calls
+
+
+@pytest.fixture
+def uploader_state_owner(operator,monkeypatch):
+    # Keep real permissions/openat/flock operations. Virtualize only state and
+    # lock UID to model the upload account separately from root maintenance.
+    config,cloud,marker,proof=operator
+    state=Path(config['state_directory']);state_info=state.stat()
+    original=os.fstat
+    def with_upload_owner(fd):
+        info=original(fd)
+        is_state=(info.st_dev,info.st_ino)==(state_info.st_dev,state_info.st_ino)
+        try:lock_info=(state/'.receiver.lock').stat()
+        except FileNotFoundError:lock_info=None
+        is_lock=lock_info is not None and (info.st_dev,info.st_ino)==(lock_info.st_dev,lock_info.st_ino)
+        if is_state or is_lock:
+            values=list(info);values[4]=12345;return os.stat_result(values)
+        return info
+    monkeypatch.setattr(os,'fstat',with_upload_owner)
+    return operator
+
+
+@pytest.mark.parametrize('operation',['download','protect','rotate'])
+def test_root_operations_do_not_create_an_unusable_root_lock_in_uploader_state(uploader_state_owner,tmp_path,operation):
+    config,cloud,marker,proof=uploader_state_owner
+    lock=Path(config['state_directory'])/'.receiver.lock'
+    assert not lock.exists()
+    with pytest.raises(ValueError,match='uploader_lock_initialization_required'):
+        if operation=='download':r2.download(config,BID,tmp_path/'candidate.age',client=cloud)
+        elif operation=='protect':r2.protect(config,marker,proof,client=cloud)
+        else:r2.rotate(config,marker,proof,expected_protected_sha256='0'*64,client=cloud)
+    assert not lock.exists() and not cloud.calls
+
+
+def test_root_shared_lock_reuses_upload_owned_private_lock_without_changing_owner(uploader_state_owner,monkeypatch):
+    config,*_=uploader_state_owner
+    lock=Path(config['state_directory'])/'.receiver.lock';lock.touch(mode=0o600)
+    original=os.open;lock_opens=[]
+    def opening(path,flags,*a,**kw):
+        if str(path)=='.receiver.lock':lock_opens.append(flags)
+        return original(path,flags,*a,**kw)
+    monkeypatch.setattr(os,'open',opening)
+    with r2.state_lock(config) as fd:
+        assert os.fstat(fd).st_uid==12345
+        with pytest.raises(RuntimeError,match='receiver_busy'):
+            with r2.state_lock(config):pytest.fail('second lock acquisition succeeded')
+    assert lock_opens and all(not flags&os.O_CREAT for flags in lock_opens)
+    assert lock.stat().st_mode&0o077==0
+
+
+def test_root_shared_lock_rejects_preexisting_wrong_owner_in_uploader_state(operator,monkeypatch):
+    config,*_=operator
+    state=Path(config['state_directory']);state_info=state.stat()
+    lock=state/'.receiver.lock';lock.touch(mode=0o600)
+    original=os.fstat
+    def different_owner(fd):
+        info=original(fd)
+        if (info.st_dev,info.st_ino)==(state_info.st_dev,state_info.st_ino):
+            values=list(info);values[4]=12345;return os.stat_result(values)
+        return info
+    monkeypatch.setattr(os,'fstat',different_owner)
+    before=lock.stat()
+    with pytest.raises(ValueError,match='uploader_lock_initialization_required'):
+        with r2.state_lock(config):pytest.fail('wrong-owner lock was accepted')
+    after=lock.stat()
+    assert (after.st_uid,after.st_mode,after.st_ino)==(before.st_uid,before.st_mode,before.st_ino)

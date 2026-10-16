@@ -254,24 +254,59 @@ def state_write(directory, name, value):
 
 
 @contextmanager
+def shared_lock(state_fd):
+    """Root must never create an uploader-inaccessible lock in shared state."""
+    owner = os.fstat(state_fd).st_uid
+    root_in_upload_state = os.geteuid() == 0 and owner != 0
+    flags = os.O_RDWR | os.O_NOFOLLOW
+    if not root_in_upload_state:
+        flags |= os.O_CREAT
+    try:
+        lock_fd = os.open('.receiver.lock', flags, 0o600, dir_fd=state_fd)
+    except FileNotFoundError:
+        if root_in_upload_state:
+            raise ValueError('uploader_lock_initialization_required') from None
+        raise
+    try:
+        info = os.fstat(lock_fd)
+        if not stat.S_ISREG(info.st_mode) or info.st_nlink != 1 or info.st_mode & 0o077:
+            raise ValueError('invalid_receiver_lock')
+        if info.st_uid != owner:
+            error = 'uploader_lock_initialization_required' if root_in_upload_state else 'invalid_receiver_lock'
+            raise ValueError(error)
+        try:
+            fcntl.flock(lock_fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        except BlockingIOError:
+            raise RuntimeError('receiver_busy') from None
+        yield
+    finally:
+        os.close(lock_fd)
+
+
+@contextmanager
 def state_lock(config):
     state = Path(config['state_directory'])
     with directory_handle(state) as fd:
         info = os.fstat(fd)
         if info.st_mode & 0o077 or (os.geteuid() != 0 and info.st_uid not in {0, os.geteuid()}):
             raise ValueError('private_receiver_directory_required')
-        lock_fd = os.open('.receiver.lock', os.O_CREAT | os.O_RDWR | os.O_NOFOLLOW, 0o600, dir_fd=fd)
-        try:
-            info = os.fstat(lock_fd)
-            if not stat.S_ISREG(info.st_mode) or info.st_nlink != 1 or info.st_mode & 0o077:
-                raise ValueError('invalid_receiver_lock')
-            try:
-                fcntl.flock(lock_fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
-            except BlockingIOError:
-                raise RuntimeError('receiver_busy') from None
+        with shared_lock(fd):
             yield fd
-        finally:
-            os.close(lock_fd)
+
+
+@contextmanager
+def operator_handles(state, marker, proof):
+    # Preserve the existing trusted root ancestry/openat evidence boundary while
+    # using the same ownership-safe lock as receive/download. The state leaf may
+    # belong to the upload account; root controls and proofs must remain separate.
+    with local.trusted_directory(state, archive=True) as state_fd, \
+         local.trusted_directory(marker.parent) as control_fd, \
+         local.trusted_directory(proof.parent) as proof_fd:
+        identity = lambda fd: (os.fstat(fd).st_dev, os.fstat(fd).st_ino)
+        if identity(state_fd) in {identity(control_fd), identity(proof_fd)}:
+            raise ValueError('separate_operator_evidence_required')
+        with shared_lock(state_fd):
+            yield state_fd, control_fd, proof_fd
 
 
 def attempt_name(bid):
@@ -619,7 +654,7 @@ def protect(config, protected_file, proof_file, *, client=None):
     """Initial root enrollment after independent restore; never deletes anything."""
     state, marker, proof_file = operator_paths(config, protected_file, proof_file)
     client = client if client is not None else make_client(config)
-    with local.rotation_handles(state, marker, proof_file) as (state_fd, control_fd, proof_fd):
+    with operator_handles(state, marker, proof_file) as (state_fd, control_fd, proof_fd):
         proof_raw, proof = read_root(proof_fd, proof_file.name, limit=16384)
         new, receipt = candidate_from_proof(config, client, proof)
         value = marker_value(config, [new]); proof_sha = hashlib.sha256(proof_raw).hexdigest()
@@ -676,7 +711,7 @@ def rotate(config, protected_file, proof_file, *, expected_protected_sha256, cli
     if not isinstance(expected_protected_sha256, str) or not local.DIGEST.fullmatch(expected_protected_sha256):
         raise ValueError('invalid_protected_digest')
     client = client if client is not None else make_client(config)
-    with local.rotation_handles(state, marker, proof_file) as (state_fd, control_fd, proof_fd):
+    with operator_handles(state, marker, proof_file) as (state_fd, control_fd, proof_fd):
         proof_raw, proof = read_root(proof_fd, proof_file.name, limit=16384)
         marker_raw, current = read_root(control_fd, marker.name)
         validate_marker(config, current)
@@ -789,7 +824,8 @@ def main(argv=None):
         safe = {'invalid_header', 'receiver_busy', 'receiver_quota', 'backup_id_conflict', 'truncated_backup',
                 'backup_size_mismatch', 'backup_hash_mismatch', 'encrypted_backup_required', 'invalid_backup_frame',
                 'storage_unavailable', 'receiver_timeout', 'completion_outcome_unknown', 'receipt_outcome_unknown',
-                'creation_outcome_unknown', 'unresolved_upload_required', 'incomplete_upload_aborted_retry'}
+                'creation_outcome_unknown', 'unresolved_upload_required', 'incomplete_upload_aborted_retry',
+                'uploader_lock_initialization_required'}
         error = str(exc) if str(exc) in safe else 'receiver_failed'
         print(json.dumps({'v': 1, 'status': 'error', 'code': error}), flush=True)
         return 1
