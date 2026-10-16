@@ -2,7 +2,9 @@
 import copy
 import json
 from pathlib import Path
+import shutil
 import socket
+import subprocess
 import threading
 import tempfile
 from types import SimpleNamespace
@@ -123,6 +125,52 @@ def test_candidate_has_unique_aliases_no_ports_and_reuses_external_state(tmp_pat
     assert mount['source'] == cfg['http_release']['gateway_policy'] and mount['read_only'] is True
     assert gateway['environment']['DEEDKIT_RELEASE_MESSAGING_URL'] == 'http://http-api-'+GEN+':8080'
     assert 'policy' not in private
+
+
+def test_isolation_preserves_empty_resolved_network_ipam_metadata(tmp_path):
+    cfg = settings(tmp_path)
+    source = documents(cfg)
+    for project in source.values():
+        for network in project['networks'].values():
+            network['ipam'] = {}
+    before = copy.deepcopy(source)
+
+    isolated, _ = s.isolate(cfg, source, {'runtime': IMAGE, 'gateway': IMAGE}, tmp_path, GEN, SHA)
+
+    assert source == before
+    for project, document in source.items():
+        for key, network in document['networks'].items():
+            assert isolated['networks'][project + '-' + key] == {
+                'external': True, 'name': network['name'], 'ipam': {}}
+
+
+def test_synthetic_candidate_roundtrips_through_installed_compose(tmp_path):
+    docker = shutil.which('docker')
+    if not docker:
+        pytest.skip('Docker Compose CLI is needed for the native config parser regression')
+    version = subprocess.run([docker, 'compose', 'version'], capture_output=True, timeout=15)
+    if version.returncode:
+        pytest.skip('Docker Compose plugin is not installed')
+    cfg = settings(tmp_path)
+
+    def resolve(document, name):
+        path = tmp_path / (name + '.json')
+        path.write_text(json.dumps(s.p.escaped(document)))
+        result = subprocess.run([docker, 'compose', '--profile', '*', '-f', str(path),
+                                 'config', '--format', 'json'],
+                                text=True, capture_output=True, timeout=30)
+        assert result.returncode == 0, result.stderr
+        return json.loads(result.stdout)
+
+    source = documents(cfg)
+    source['messages']['services']['api'].pop('depends_on')
+    source = {name: resolve(document, 'source-' + name) for name, document in source.items()}
+    isolated, _ = s.isolate(cfg, source, {'runtime': IMAGE, 'gateway': IMAGE}, tmp_path, GEN, SHA)
+
+    assert resolve(isolated, 'isolated') == isolated
+    assert all(network['external'] is True for network in isolated['networks'].values())
+    assert all(not unit.get('ports') and 'depends_on' not in unit
+               for unit in isolated['services'].values())
 
 
 def test_candidate_rejects_collector_command_even_if_target_is_runtime(tmp_path):
