@@ -201,10 +201,10 @@ def _decrypt_snapshot(command,destination,max_bytes,*,source=None):
                     if total>max_bytes or shutil.disk_usage(temporary).free-member.size<1024**3:
                         raise ValueError('restore_size_limit')
                     seen.add(name); target=temporary/name; target.parent.mkdir(mode=0o700,exist_ok=True)
-                    source=archive.extractfile(member)
+                    member_source=archive.extractfile(member)
                     fd=os.open(target,os.O_CREAT|os.O_EXCL|os.O_WRONLY,0o600)
-                    with source,os.fdopen(fd,'wb') as out:
-                        shutil.copyfileobj(source,out,1024**2); out.flush(); os.fsync(out.fileno())
+                    with member_source,os.fdopen(fd,'wb') as out:
+                        shutil.copyfileobj(member_source,out,1024**2); out.flush(); os.fsync(out.fileno())
             # Drain authenticated trailing bytes before accepting the decryption result.
             while trailing:=process.stdout.read(1024**2):
                 total+=len(trailing)

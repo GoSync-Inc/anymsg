@@ -101,3 +101,28 @@ def test_worker_stage_failure_exposes_only_fixed_safe_code(code):
     def secret_failure():raise OSError('SYNTHETIC_PASSWORD_DO_NOT_PERSIST')
     with pytest.raises(worker.RestoreStageError) as caught:worker.stage(code,secret_failure)
     assert str(caught.value)==code
+
+
+def test_large_stream_keeps_original_ciphertext_source_distinct_from_tar_members(tmp_path,decoder):
+    import os,signal,subprocess
+    content=(b'SYNTHETIC_LARGE_ORIGINAL\n'*(6*1024**2//25+1))[:6*1024**2]
+    digest=hashlib.sha256(content).hexdigest();dump=b'UNIT_DUMP_NOT_A_DATABASE'
+    manifest={'format':1,'schema_version':2,'dump_sha256':hashlib.sha256(dump).hexdigest(),
+              'tables':{},'blobs':[{'digest':digest,'bytes':len(content)}]}
+    source=tmp_path/'synthetic.tar'
+    with tarfile.open(source,'w') as archive:
+        for name,data in [('manifest.json',json.dumps(manifest).encode()),('database.dump',dump),('files/'+digest,content)]:
+            member=tarfile.TarInfo(name);member.size=len(data);archive.addfile(member,io.BytesIO(data))
+    script='from messaging_service.backup_crypto import decrypt_snapshot_stream; import sys\nwith open(sys.argv[1],"rb") as source: decrypt_snapshot_stream(source,"synthetic",sys.argv[2],age=sys.argv[3])'
+    process=subprocess.Popen([sys.executable,'-c',script,str(source),str(tmp_path/'large-restore'),decoder],
+                             stdout=subprocess.PIPE,stderr=subprocess.PIPE,start_new_session=True)
+    try:
+        try:stdout,stderr=process.communicate(timeout=15)
+        except subprocess.TimeoutExpired:
+            os.killpg(process.pid,signal.SIGKILL);stdout,stderr=process.communicate(timeout=5)
+            pytest.fail('large ciphertext stream stalled after tar member extraction')
+        assert process.returncode==0,stderr.decode(errors='replace')
+    finally:
+        if process.poll() is None:
+            os.killpg(process.pid,signal.SIGKILL);process.wait(timeout=5)
+    assert hashlib.sha256((tmp_path/'large-restore/files'/digest).read_bytes()).hexdigest()==digest
