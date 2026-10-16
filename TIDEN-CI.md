@@ -65,9 +65,23 @@ source anchors alongside the reviewed revision.
 Reverse-engineered specs are candidates for review. Check API arguments, state
 semantics, schema versions and deployment exceptions against the implementation;
 a source-file anchor does not guarantee that every sentence is accurate.
-Implemented baseline contracts use `Active`. New work uses an explicit change
-intent or [BACKLOG.md](BACKLOG.md); do not confuse `Backlog` with missing test coverage or set
-`Done` merely because a related test passes.
+Maintained baseline contracts use `Active`; that is not a claim that someone is
+currently implementing them. Tiden is also the primary work queue: future work
+uses `Backlog`, implementations and operational acceptance awaiting review use
+`Review`, and bounded delivered work uses `Done` with its evidence. Keep the
+implemented boundary and remaining acceptance explicit. Do not confuse `Backlog`
+with missing test coverage or set `Done` merely because a related test passes.
+Follow the [product workflow](docs/operations/tiden-product-workflow.md) and the
+standard Tiden skills. [BACKLOG.md](BACKLOG.md) only locates the product and
+historical IDs; it is not a second queue. Do not bulk-change baseline statuses
+without checking their verification scope.
+
+The 2026-10-16 reconciliation measured that the current gate includes Backlog,
+Review and General index specs. The whole-product gate therefore also exposes
+unimplemented plans as `no_test`: the branch verdict is `NOT VERIFIED`, while
+main reports `BLOCKED` for those coverage gaps. Status is not a release-scope
+filter. Preserve that result and inspect its per-spec causes; do not fabricate
+coverage or weaken CI to make a planning inventory pass a release gate.
 
 Review spec and test-link changes in the matching Tiden branch before merging
 them to main. A Git merge does not by itself merge the spec branch. After both
