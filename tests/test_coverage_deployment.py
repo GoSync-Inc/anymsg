@@ -65,7 +65,8 @@ def test_application_units_enforce_sandbox_resource_and_log_bounds():
     applications = units()
     assert set(applications) == {'api', 'db', 'telegram', 'whatsapp1', 'whatsapp2',
         'indexer', 'enricher', 'enricher-local', 'operator', 'subscriptions',
-        'calendar-db', 'calendar-api', 'calendar-worker', 'gateway', 'calls'}
+        'calendar-db', 'calendar-api', 'calendar-worker', 'gateway', 'calls',
+        'file-lifecycle', 'file-understanding'}
     for name, unit in applications.items():
         if name in {'db', 'calendar-db'}:
             continue

@@ -196,10 +196,24 @@ def test_enriched_transcript_search_paging_scope_and_invalidation(seeded):
     with pytest.raises(APIError, match='not_found'):
         text(s, b, 'voice-private', content='enriched')
     with s.pool.connection() as c:
-        c.execute("UPDATE messages SET revision=revision+1 WHERE id='demo-tg-1'")
+        c.execute("UPDATE messages SET body='Updated caption',revision=revision+1 WHERE id='demo-tg-1'")
+    assert ids(search(s, b, 'договорами')) == ['voice-public']
+    page = text(s, b, 'voice-public', content='enriched', offset=100100, limit=321)
+    assert page['text'] == transcript[100100:100421] and page['next_offset'] == 100421
+    assert page['title'] == 'Встреча по контракту' and page['enrichment_status'] == 'ready'
+    assert page['provenance']['revision'] == 2 and page['provenance']['provider'] == 'test-local'
+    replacement = b'replacement non-audio fixture'
+    _, digest = original(s.files, replacement)
+    with s.pool.connection() as c:
+        c.execute("UPDATE attachments SET digest=%s,bytes=%s WHERE id='voice-public'", (digest, len(replacement)))
     assert not search(s, b, 'договорами')['items']
     page = text(s, b, 'voice-public', content='enriched')
     assert page['text'] == '' and page['enrichment_status'] == 'not_configured' and page['title'] == ''
+    with s.pool.connection() as c:
+        c.execute("UPDATE messages SET deleted=true WHERE id='demo-tg-1'")
+    assert not search(s, b, filename='voice.ogg')['items']
+    with pytest.raises(APIError, match='not_found'):
+        text(s, b, 'voice-public', content='enriched')
 
 
 def test_encoded_filename_search_and_stale_extraction_metadata_reset(seeded):
@@ -212,6 +226,17 @@ def test_encoded_filename_search_and_stale_extraction_metadata_reset(seeded):
     assert result['items'][0]['display_name'] == 'Договор.pdf'
     with s.pool.connection() as c:
         c.execute("UPDATE attachment_text SET extraction_metadata=%s WHERE attachment='encoded'", [Jsonb({'pages_total': 5})])
-        c.execute("UPDATE messages SET revision=revision+1 WHERE id='demo-tg-1'")
+        c.execute("UPDATE messages SET body='Updated caption',revision=revision+1 WHERE id='demo-tg-1'")
+    page = text(s, b, 'encoded')
+    assert page['extraction_metadata'] == {'pages_total': 5} and page['status'] == 'ready'
+    assert page['text'] == 'notes' and page['provenance']['revision'] == 2
+    assert ids(search(s, b, 'Договор', search_language='simple')) == ['encoded']
+    replacement = b'replacement notes'
+    _, digest = original(s.files, replacement)
+    with s.pool.connection() as c:
+        c.execute("UPDATE attachments SET digest=%s,bytes=%s,filename='replacement.txt' WHERE id='encoded'",
+                  (digest, len(replacement)))
     page = text(s, b, 'encoded')
     assert page['extraction_metadata'] == {} and page['status'] == 'queued'
+    assert page['text'] == '' and page['source_filename'] == 'replacement.txt'
+    assert not search(s, b, 'Договор', search_language='simple')['items']

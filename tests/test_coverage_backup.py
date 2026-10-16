@@ -201,13 +201,16 @@ def _worker_setup(tmp_path, monkeypatch, mode='staged_v1'):
             assert received_dsn == dsn.read_text(); self.files = files
         def close(self): calls.append('closed')
     monkeypatch.setattr(worker, 'Store', SyntheticStore)
-    def capture(store, destination, command, config, *, captured_callback, reference_blobs):
+    def capture(store, destination, command, config, *, captured_callback, reference_blobs, backup_fence):
+        assert isinstance(store, SyntheticStore) and reference_blobs is (mode == 'stream_v2')
+        assert backup_fence == BACKUP_ID
         assert 'password=' not in ' '.join(command)
         password_path = Path(os.environ['PGPASSFILE'])
         assert password_path.is_file() and password_path.stat().st_mode & 0o777 == 0o600
         assert 'synthetic' in password_path.read_text()
         calls.append('captured')
-        destination.mkdir(); (destination / 'manifest.json').write_text(json.dumps({'captured_at': '2026-10-15T05:30:00+08:00'}))
+        destination.mkdir(); (destination / 'manifest.json').write_text(json.dumps({
+            'captured_at': '2026-10-15T05:30:00+08:00', 'backup_fence': backup_fence}))
         captured_callback()
         return {'status': 'snapshot_created', 'tables': 0, 'blobs': 0, 'blob_bytes': 0}
     monkeypatch.setattr(worker, 'create_snapshot', capture)
@@ -225,6 +228,7 @@ def test_staged_worker_signals_capture_before_encoding_and_restores_pgpass_envir
     monkeypatch.setattr(worker, 'encrypt_snapshot', encode)
     result = worker.run(cfg)
     assert calls == ['captured', 'encoded', 'closed']
+    assert result['backup_fence'] == BACKUP_ID
     assert result['sha256'] == hashlib.sha256((work / 'bundle.tar.age').read_bytes()).hexdigest()
     assert result['bytes'] == (work / 'bundle.tar.age').stat().st_size
     assert worker.private_json(work / 'result.json') == result
@@ -236,8 +240,14 @@ def test_staged_worker_signals_capture_before_encoding_and_restores_pgpass_envir
 def test_stream_worker_reuses_verified_capture_and_requires_host_control(tmp_path, monkeypatch, action):
     cfg, work, calls = _worker_setup(tmp_path, monkeypatch, 'stream_v2')
     snapshot = work / 'snapshot'; snapshot.mkdir()
-    manifest = {'tables': {}, 'blobs': [], 'captured_at': '2026-10-15T05:30:00+08:00'}
+    manifest = {'schema_version': 34, 'tables': {}, 'blobs': [],
+        'captured_at': '2026-10-15T05:30:00+08:00', 'backup_fence': BACKUP_ID}
     (snapshot / 'manifest.json').write_text(json.dumps(manifest))
+    def validate_fence(store, received_manifest, token):
+        assert store.files == Path(cfg['files_directory'])
+        assert received_manifest == manifest and token == BACKUP_ID
+        calls.append('fence_validated')
+    monkeypatch.setattr(worker, 'validate_reference_fence', validate_fence)
     def verify(path, *, blob_root):
         assert path == snapshot; calls.append('verified'); return manifest
     monkeypatch.setattr(worker, 'verify_bundle', verify)
@@ -261,9 +271,10 @@ def test_stream_worker_reuses_verified_capture_and_requires_host_control(tmp_pat
     else:
         result = worker.run(cfg)
         assert result['status'] == ('already_delivered' if action == 'skip' else 'encrypted')
-    assert calls == (['verified', 'encoded', 'closed'] if action == 'start' else ['verified', 'closed'])
+    assert calls == (['fence_validated', 'verified', 'encoded', 'closed'] if action == 'start'
+        else ['fence_validated', 'verified', 'closed'])
     metadata = worker.private_json(work / 'stream.json')
-    assert metadata['id'] == BACKUP_ID and metadata['max_bytes'] == 4096
+    assert metadata['id'] == metadata['backup_fence'] == BACKUP_ID and metadata['max_bytes'] == 4096
     assert metadata['snapshot_sha256'] == hashlib.sha256((snapshot / 'manifest.json').read_bytes()).hexdigest()
     assert (work / 'result.json').exists() is (action == 'start')
     assert not (work / 'bundle.tar.age').exists()
@@ -597,7 +608,7 @@ def test_actual_postgres_age_receiver_restore_drill_preserves_source_and_quarant
             input=(tmp_path / 'restored/database.dump').read_bytes(), check=True, capture_output=True)
         restored = Store(make_conninfo(source.pool.conninfo, dbname=restored_name),
             tmp_path / 'restored/files', 'http://testserver')
-        assert verify_snapshot(restored, tmp_path / 'restored')['tables'] == 58
+        assert verify_snapshot(restored, tmp_path / 'restored')['tables'] == 63
         quarantine_restore(restored)
         with restored.pool.connection() as connection:
             keys = connection.execute('SELECT revoked FROM api_keys').fetchall()
@@ -605,7 +616,7 @@ def test_actual_postgres_age_receiver_restore_drill_preserves_source_and_quarant
         assert keys and all(row['revoked'] for row in keys)
         assert policies and all(not row['enabled'] for row in policies)
         # The original live database, CAS and fake cold session are unchanged.
-        assert verify_snapshot(source, tmp_path / 'restored')['tables'] == 58
+        assert verify_snapshot(source, tmp_path / 'restored')['tables'] == 63
         assert all(hashlib.sha256((source.files / digest).read_bytes()).hexdigest() == value
                    for digest, value in source_hashes.items())
         assert (tmp_path / 'session/example.session').read_bytes() == b'FAKE_SESSION_BYTES'

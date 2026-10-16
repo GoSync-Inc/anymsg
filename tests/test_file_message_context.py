@@ -75,20 +75,25 @@ def test_same_bytes_hidden_caption_never_leaks_to_visible_occurrence(seeded):
 def test_caption_changes_deletes_and_attachment_deactivation_invalidate_matches(seeded):
     s, a, b = seeded
     caption(s, 'demo-tg-1', 'oldcaptionneedle')
-    add_file(s, 'changing', 'demo-tg-1', b'not searchable caption')
+    add_file(s, 'changing', 'demo-tg-1', b'retainedfileneedle file detail')
     drain(worker_for(s))
     assert ids(search(s, b, 'oldcaptionneedle')) == ['changing']
     caption(s, 'demo-tg-1', 'newcaptionneedle')
     assert not search(s, b, 'oldcaptionneedle')['items']
     row = search(s, b, 'newcaptionneedle')['items'][0]
-    assert row['message_context']['revision'] == 3 and row['extraction_status'] == 'queued'
+    assert row['message_context']['revision'] == 3 and row['extraction_status'] == 'ready'
+    page = text(s, b, 'changing')
+    assert page['text'] == 'retainedfileneedle file detail' and page['provenance']['revision'] == 3
+    assert ids(search(s, b, 'retainedfileneedle')) == ['changing']
     with s.pool.connection() as c:
         c.execute("UPDATE attachments SET active=false WHERE id='changing'")
     assert not search(s, b, 'newcaptionneedle')['items']
+    assert not search(s, b, 'retainedfileneedle')['items']
     with s.pool.connection() as c:
         c.execute("UPDATE attachments SET active=true WHERE id='changing'")
         c.execute("UPDATE messages SET deleted=true WHERE id='demo-tg-1'")
     assert not search(s, b, 'newcaptionneedle')['items']
+    assert not search(s, b, 'retainedfileneedle')['items']
 
 
 def test_caption_filters_and_paging_keep_occurrences_and_current_acl(seeded):
