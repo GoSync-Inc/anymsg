@@ -50,6 +50,8 @@ workspace `1dc18e09-4a09-4d74-8300-cd4302622357` and product
    with `tiden branch link-proposals list --name <intent-branch>`, not `test links`.
    The close gate reads the latest run in the product, so close right after your
    own run when other pull requests are publishing evidence.
+9. Merge the pull request and then its Tiden branch yourself only under the merge
+   delegation rule in `AGENTS.md`; otherwise hand the decision to the owner.
 
 ## Where work goes
 

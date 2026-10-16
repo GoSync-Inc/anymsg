@@ -33,7 +33,20 @@ or the seven `anymsg-ci::*` checks. For product changes run the intent loop:
 `tiden intent start "<objective>" --promise ...` before editing, then push,
 open the PR with the printed Tiden branch link in its body, run
 `tiden intent link-pr <url>` and `tiden intent close` before asking for review.
-Merging the Tiden branch is the owner's decision. Use `tiden intent skip` for
-questions and read-only work, and `--format json` when parsing CLI output.
-Without a local CLI, run `scripts/tiden_agent_setup.sh` when `TIDEN_API_TOKEN`
-is set; otherwise say in the PR that its specs were not updated.
+Use `tiden intent skip` for questions and read-only work, and `--format json` when
+parsing CLI output. Without a local CLI, run `scripts/tiden_agent_setup.sh` when
+`TIDEN_API_TOKEN` is set; otherwise say in the PR that its specs were not updated.
+
+Merge delegation: an agent may merge a pull request and its Tiden branch without
+asking the owner when every condition holds. All required checks and branch
+protection pass without bypass. Two independent reviews from different model
+families approved it with no open findings: OpenAI Astra through Codex
+(`codex exec review --base main -m gpt-6-astra`) and Claude Fable. The intent
+session closed with PASS, or the change is a recorded skip. The Tiden merge preview
+contains only this change's specs, tests and links, with no conflicts or blocking
+sessions. Escalate instead of merging anything that applies or changes a production
+service, starts a live provider action, adds a schema migration, changes required
+checks, branch protection, secrets or access rights, accepts risk or waives a
+promise by owner decision, weakens or removes an existing contract, spec or test,
+has disagreeing reviewers or unclear product direction, or cannot be undone by a
+follow-up pull request.

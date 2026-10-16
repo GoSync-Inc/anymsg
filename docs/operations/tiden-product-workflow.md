@@ -167,8 +167,8 @@ obtain a gate. Contributor headings and display text can use DeedKit immediately
    links: even an exact source-file match does not prove a whole specification.
 5. Review the Tiden merge preview, conflicts and link proposals. Record a Git PR
    and Tiden branch together. A closed intent session or merged Git PR does not
-   merge its Tiden branch. Merge reviewed spec changes under the owner's authority;
-   never blanket-merge unrelated open branches.
+   merge its Tiden branch. Merge reviewed spec changes under the merge delegation
+   rule in `AGENTS.md`; never blanket-merge unrelated open branches.
 6. Read back actual Tiden main IDs, sources, links, gate and GitHub drift after
    merging. A green branch projection is not a main result. `no_test`, `not_run`
    and failed executions remain visible. Do not create passing evidence or
