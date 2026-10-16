@@ -1,0 +1,3 @@
+# Optional receiver-only official S3 SDK. Never install on the producer/app image.
+# Verified publisher/version: https://pypi.org/project/boto3/1.43.114/
+boto3==1.43.114
