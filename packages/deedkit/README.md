@@ -55,8 +55,9 @@ gateway's answers given before dispatch (`backend_busy`, `release_unavailable`,
 `policy_unavailable`, or `backend_unavailable` with `operation_sent: false`).
 An unknown outcome is never `retryable`. The action may already have happened:
 do not repeat it automatically and never create a replacement request ID. Look
-it up in history (for example `messages_get_updates`,
-`messages_list_messenger_operations` or `calls_list_calls`) or ask the owner.
+it up (for example `messages_get_updates` for sent messages,
+`messages_get_messenger_operation` when you hold an `operation_id`, or
+`calls_list_calls`) or ask the owner.
 For a send, SENDING.md allows one recovery: the same `request_id` with the exact
 same payload, which the server deduplicates.
 
@@ -71,9 +72,11 @@ await deedkit.downloadFile(grant, './invoice.pdf');
 The grant's `download_url` must be a `/v1/files/<ticket>` URL (or, during a
 release switch, `/_releases/<generation>/v1/files/<ticket>`) of the configured
 gateway; any other URL is refused before a request. The ticket is the temporary
-credential, so the gateway key is not sent with it. The client creates a new
-file with mode 600 (never overwriting), checks the byte count and SHA-256 from
-the grant and deletes the file if the transfer fails or does not match. Do not
+credential, so the gateway key is not sent with it. The client writes a
+private (mode 600) staging file beside the output, checks the byte count and
+SHA-256 from the grant, and only then links it to the output name, which never
+replaces an existing file. On any failure it removes the staging file and leaves
+the output path untouched. The output directory must support hard links. Do not
 log or share the ticket URL.
 
 ## Command line

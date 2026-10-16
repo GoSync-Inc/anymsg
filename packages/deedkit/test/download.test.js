@@ -1,7 +1,7 @@
 import {test} from 'node:test';
 import assert from 'node:assert/strict';
 import {createHash} from 'node:crypto';
-import {existsSync, mkdtempSync, readFileSync, renameSync, rmSync, statSync, writeFileSync} from 'node:fs';
+import {existsSync, mkdtempSync, readdirSync, readFileSync, rmSync, statSync, writeFileSync} from 'node:fs';
 import {open} from 'node:fs/promises';
 import {tmpdir} from 'node:os';
 import {join} from 'node:path';
@@ -99,6 +99,7 @@ test('integrity failures and gateway errors leave no partial file', async () => 
       const client = new DeedKitClient({baseUrl: 'https://gateway.example/deedkit', token, fetch});
       await assert.rejects(client.downloadFile(grant(), output), {code});
       assert.ok(!existsSync(output), code);
+      assert.deepEqual(readdirSync(dir), [], code);
     }
   } finally { rmSync(dir, {recursive: true, force: true}); }
 });
@@ -126,15 +127,27 @@ test('short writes are completed and a stalled write leaves no file', async () =
 test('cleanup never removes a file that replaced the output path', async () => {
   const dir = directory();
   try {
+    // The output path is never used before verification: a file placed there during a
+    // failed or a successful transfer survives, and no staging file is left behind.
     const output = join(dir, 'file.bin');
-    const fetch = async () => new Response(new ReadableStream({pull(controller) {
-      renameSync(output, join(dir, 'moved.bin'));
+    const failing = async () => new Response(new ReadableStream({pull(controller) {
       writeFileSync(output, 'someone else');
       controller.error(new Error('cut'));
     }}), {status: 200});
-    const client = new DeedKitClient({baseUrl: 'https://gateway.example/deedkit', token, fetch});
+    const client = new DeedKitClient({baseUrl: 'https://gateway.example/deedkit', token, fetch: failing});
     await assert.rejects(client.downloadFile(grant(), output), {code: 'transport_error'});
     assert.equal(readFileSync(output, 'utf8'), 'someone else');
+    assert.deepEqual(readdirSync(dir), ['file.bin']);
+    const late = join(dir, 'late.bin');
+    const racing = async () => new Response(new ReadableStream({pull(controller) {
+      writeFileSync(late, 'arrived first');
+      controller.enqueue(bytes);
+      controller.close();
+    }}), {status: 200});
+    const raced = new DeedKitClient({baseUrl: 'https://gateway.example/deedkit', token, fetch: racing});
+    await assert.rejects(raced.downloadFile(grant(), late), {code: 'output_unavailable'});
+    assert.equal(readFileSync(late, 'utf8'), 'arrived first');
+    assert.deepEqual(readdirSync(dir).sort(), ['file.bin', 'late.bin']);
   } finally { rmSync(dir, {recursive: true, force: true}); }
 });
 

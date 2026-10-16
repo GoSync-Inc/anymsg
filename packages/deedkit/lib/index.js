@@ -1,6 +1,7 @@
-import {createHash} from 'node:crypto';
+import {createHash, randomBytes} from 'node:crypto';
 import {constants, readFileSync} from 'node:fs';
-import {lstat, open, unlink} from 'node:fs/promises';
+import {link, lstat, open, unlink} from 'node:fs/promises';
+import {basename, dirname, join} from 'node:path';
 
 // The reviewed gateway catalog (services/gateway/src/agent_gateway/catalog.json)
 // plus platform_capabilities. A drift test keeps this list equal to the catalog.
@@ -237,14 +238,19 @@ export class DeedKitClient {
         !/^(?:_releases\/[0-9a-f]{12}\/)?v1\/files\/[A-Za-z0-9_-]{43}$/.test(url.pathname.slice(prefix.length)))
       throw new DeedKitError('invalid_download_url');
     if (signal?.aborted) throw new DeedKitError('request_aborted');
-    const handle = await open(output, constants.O_WRONLY | constants.O_CREAT | constants.O_EXCL |
+    if (await lstat(output).then(() => true, error => error.code !== 'ENOENT'))
+      throw new DeedKitError('output_unavailable');
+    // Bytes go to a private staging file with an unguessable name beside the output.
+    // Only a verified file is published, with link(), which never replaces an existing
+    // path; a failure removes the staging file and never touches the output path.
+    const staging = join(dirname(output), `.${basename(output).slice(0, 64)}.${randomBytes(12).toString('hex')}.deedkit-part`);
+    const handle = await open(staging, constants.O_WRONLY | constants.O_CREAT | constants.O_EXCL |
       (constants.O_NOFOLLOW ?? 0), 0o600).catch(() => { throw new DeedKitError('output_unavailable'); });
     const controller = new AbortController();
     let timer;
     // The deadline covers each wait for the server, not the whole transfer.
     const arm = () => { clearTimeout(timer); timer = setTimeout(() => controller.abort(), this.#timeout); };
     const activeSignal = signal ? AbortSignal.any([signal, controller.signal]) : controller.signal;
-    let complete = false;
     try {
       arm();
       let response;
@@ -291,19 +297,14 @@ export class DeedKitClient {
         throw new DeedKitError('download_integrity_error', {status: 200});
       await handle.sync();
       if ((await handle.stat()).size !== grant.bytes) throw new DeedKitError('output_unavailable');
-      complete = true;
+      await handle.close();
+      // Fails if anything appeared at the output path meanwhile; nothing is overwritten.
+      await link(staging, output).catch(() => { throw new DeedKitError('output_unavailable'); });
       return {path: output, bytes: total, sha256: grant.sha256};
     } finally {
       clearTimeout(timer);
-      const created = complete ? null : await handle.stat().catch(() => null);
       await handle.close().catch(() => {});
-      // Never leave a partial or unverified file behind under the requested name, and
-      // remove only the file this call created: the path must still name it.
-      if (created) {
-        const current = await lstat(output).catch(() => null);
-        if (current?.isFile() && current.dev === created.dev && current.ino === created.ino)
-          await unlink(output).catch(() => {});
-      }
+      await unlink(staging).catch(() => {});
     }
   }
   async downloadAttachment(args, output, options = {}) {
