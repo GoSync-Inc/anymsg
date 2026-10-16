@@ -73,6 +73,18 @@ For an explicit baseline rerun, dispatch `CI` on the reporting-code branch with
 existing spec branch. The checkout SHA, rather than the workflow SHA, is recorded.
 Normal pull requests record their actual tested merge SHA.
 
+## Environments
+
+The 2026-10-16 cleanup left four Tiden run environments. CI publishes with
+`--environment github-actions-synthetic`, set in `scripts/tiden_ci.py`. A local
+synthetic run, published by hand with `tiden run create` or `tiden run exec`,
+passes `--environment local-synthetic`; no repository script sets it.
+`production` belongs to the live installation (TELEMETRY.md). `synthetic` is
+historical: release 0.9.16 is attached to it, so keep it, but send no new runs
+there. Tiden creates an environment for any unknown slug, so a misspelled or new
+name silently makes a duplicate. One environment per kind of run keeps the
+release gate and per-environment regressions unambiguous.
+
 ## Verdicts and coverage
 
 `run create` always receives `--branch` and `--intent-session none`. A mapped or
