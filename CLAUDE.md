@@ -68,7 +68,8 @@ uv run python scripts/smoke.py --dsn-file <file>      # synthetic MCP/HTTP drill
   or create a replacement request ID (SENDING.md, docs/whatsapp-native.md).
 - Never run two clients on one provider session. Provider auth happens only in the
   owner's terminal. Tests and health checks never send, ACK, call or pair.
-- Required checks: `CI gate` and `checks / verify` (`deploy/main-protection.json`).
+- Required checks: `CI gate` and `checks / verify` (`deploy/main-ruleset.json`, merged
+  through the merge queue).
   `checks.yml` step ids `build release python collector npm smoke distributions`
   are the seven `anymsg-ci::*` Tiden checks; do not rename them.
 - Python and npm versions must equal `messaging_service.__version__` (check_release.py).

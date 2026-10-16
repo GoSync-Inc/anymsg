@@ -22,15 +22,33 @@ gateway/calendar/calls, the isolated native backup restore and load budgets.
 Tiden reports actual outcomes separately.
 No test receives a provider session or production database.
 
-Protect `main` with required GitHub Actions `CI gate` and `checks / verify`,
-strict up-to-date branches, PR-only merges, administrator enforcement, conversation
-resolution, and disabled force pushes/deletion. A single maintainer may use zero
-required approving reviews; this still requires a PR and green checks. Native
-verification is reusable and unconditional in CI, so path filters cannot hide it.
-The reviewed desired settings are in `deploy/main-protection.json`. An
-administrator can apply them with
-`gh api --method PUT repos/GoSync-Inc/deedkit/branches/main/protection --input deploy/main-protection.json`
-and read back that endpoint to verify the actual settings.
+Protect `main` with a repository ruleset: required GitHub Actions `CI gate` and
+`checks / verify`, PR-only squash merges through the GitHub merge queue, no bypass
+actors (administrators included), conversation resolution, and disabled force
+pushes/deletion. A single maintainer may use zero required approving reviews;
+this still requires a PR and green checks. Native verification is reusable and
+unconditional in CI, so path filters cannot hide it.
+
+The queue replaces strict up-to-date branches: it tests each pull request on top
+of the current `main` and the entries ahead of it, so a branch need not be updated
+after every merge. It merges one pull request per squash commit, so every `main`
+SHA gets its own push CI for promotion. A queue run takes its workflow files from
+the group commit; queue a fork's pull request only after reviewing its workflow
+changes (TIDEN-CI.md).
+
+The reviewed desired ruleset is `deploy/main-ruleset.json`. An administrator
+creates it with
+`gh api --method POST repos/GoSync-Inc/deedkit/rulesets --input deploy/main-ruleset.json`,
+or updates the existing one with
+`gh api --method PUT repos/GoSync-Inc/deedkit/rulesets/<id> --input deploy/main-ruleset.json`,
+and verifies the effective rules with
+`gh api repos/GoSync-Inc/deedkit/rules/branches/main`. Classic branch protection
+must stay absent: GitHub enforces it together with the ruleset, and its strict
+up-to-date check would again require updating each branch before it can enter
+the queue. `deploy/main-protection.json` keeps the previous classic protection
+for rollback only: restore it with
+`gh api --method PUT repos/GoSync-Inc/deedkit/branches/main/protection --input deploy/main-protection.json`,
+then delete the ruleset.
 
 ## Host setup
 
