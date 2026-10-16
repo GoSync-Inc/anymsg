@@ -61,8 +61,8 @@ the temporary group commit with the same required checks, `CI gate` and
 `checks / verify`, but publishes nothing to Tiden and creates no Tiden branch.
 This takes precedence over every target above, including an override, a map
 entry or a pull request link. A queued group can contain a fork's unmerged code,
-so the queue run never receives `TIDEN_API_TOKEN`, checks no Tiden configuration
-and installs no CLI: its reporting job records `skipped` with the reason in
+so a `merge_group` run never receives `TIDEN_API_TOKEN`. A queue run checks no
+Tiden configuration and installs no CLI: its reporting job records `skipped` with the reason in
 `tiden-route.json`, logs a notice and stays green. The merged code reaches Tiden
 through the main push run. Each queue run has its own concurrency group and
 cancels no other run. Queue runs take their workflow files from the group commit,

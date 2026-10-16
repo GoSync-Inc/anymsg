@@ -549,16 +549,20 @@ def test_ci_reports_required_checks_for_merge_queue_runs_without_cancelling_them
 def test_merge_queue_reporting_gets_no_tiden_credential_or_cli(tmp_path):
     import subprocess
     import yaml
+    from scripts.tiden_ci import merge_queue_run
     root = Path(__file__).resolve().parents[1]
     ci = yaml.safe_load((root / ".github/workflows/ci.yml").read_text())
     assert ci["jobs"]["checks"]["secrets"] == {
         "TIDEN_API_TOKEN": "${{ github.event_name != 'merge_group' && secrets.TIDEN_API_TOKEN || '' }}"}
-    job = yaml.safe_load((root / ".github/workflows/checks.yml").read_text())["jobs"]["tiden"]
+    jobs = yaml.safe_load((root / ".github/workflows/checks.yml").read_text())["jobs"]
+    job = jobs["tiden"]
     assert "github.event_name != 'pull_request'" in job["if"]  # queue runs still reach the reporting job
     steps = {step.get("name") or step["uses"].split("@")[0]: step for step in job["steps"]}
     config = steps["Check optional Tiden configuration"]
-    assert config["env"]["MERGE_QUEUE"] == ("${{ github.event_name == 'merge_group' || "
-                                            "startsWith(github.head_ref || github.ref_name, 'gh-readonly-queue/') }}")
+    # The job classifies the same event and Git branch that the evidence manifest records.
+    prepared = next(step for step in jobs["verify"]["steps"] if step.get("name") == "Prepare honest CI evidence")
+    assert config["env"]["SOURCE_BRANCH"] == prepared["env"]["SOURCE_BRANCH"] == "${{ github.head_ref || github.ref_name }}"
+    assert config["env"]["EVENT_NAME"] == "${{ github.event_name }}"
     enabled_or_queue = "steps.config.outputs.enabled == 'true' || steps.config.outputs.queue == 'true'"
     assert steps["actions/checkout"]["if"] == steps["actions/download-artifact"]["if"] == enabled_or_queue
     # Only a configured non-queue run installs the CLI and receives the credential.
@@ -579,10 +583,19 @@ def test_merge_queue_reporting_gets_no_tiden_credential_or_cli(tmp_path):
         return completed.returncode, output.read_text().split(), summary.read_text()
 
     configured = {"TIDEN_API_TOKEN": "synthetic-token", "TIDEN_PRODUCT_ID": PRODUCT, "TIDEN_WORKSPACE_ID": WORKSPACE}
+    queued = {"EVENT_NAME": "merge_group", "SOURCE_BRANCH": QUEUE_BRANCH}
+    feature = {"EVENT_NAME": "pull_request", "SOURCE_BRANCH": "codex/feature"}
     # The queue path needs no credential, product or workspace, and never enables publication.
-    assert configure(MERGE_QUEUE="true") == (0, ["enabled=false", "queue=true"], "")
-    assert configure(MERGE_QUEUE="true", **configured)[1] == ["enabled=false", "queue=true"]
-    assert configure(MERGE_QUEUE="false", **configured) == (0, ["enabled=true"], "")
-    unconfigured = configure(MERGE_QUEUE="false")
+    assert configure(**queued) == (0, ["enabled=false", "queue=true"], "")
+    assert configure(**queued, **configured)[1] == ["enabled=false", "queue=true"]
+    assert configure(**feature, **configured) == (0, ["enabled=true"], "")
+    unconfigured = configure(**feature)
     assert unconfigured[:2] == (0, ["enabled=false"]) and "not configured" in unconfigured[2]
-    assert configure(MERGE_QUEUE="false", TIDEN_API_TOKEN="synthetic-token", TIDEN_PRODUCT_ID=PRODUCT)[0] != 0
+    assert configure(**feature, TIDEN_API_TOKEN="synthetic-token", TIDEN_PRODUCT_ID=PRODUCT)[0] != 0
+    # The job and scripts/tiden_ci.py agree on every run, including prefixes that differ only in case.
+    for event, branch in [("merge_group", QUEUE_BRANCH), ("merge_group", "codex/feature"),
+                          ("workflow_dispatch", QUEUE_BRANCH), ("pull_request", "GH-readonly-queue/feature"),
+                          ("pull_request", "Gh-Readonly-Queue/main/pr-1"), ("push", "main"),
+                          ("pull_request", "codex/gh-readonly-queue/x")]:
+        queue = configure(EVENT_NAME=event, SOURCE_BRANCH=branch, **configured)[1] == ["enabled=false", "queue=true"]
+        assert queue == merge_queue_run({"event": event, "git_branch": branch}), (event, branch)

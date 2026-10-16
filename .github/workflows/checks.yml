@@ -279,10 +279,12 @@ jobs:
           TIDEN_API_TOKEN: ${{ secrets.TIDEN_API_TOKEN }}
           TIDEN_PRODUCT_ID: ${{ vars.TIDEN_PRODUCT_ID }}
           TIDEN_WORKSPACE_ID: ${{ vars.TIDEN_WORKSPACE_ID }}
-          # A merge queue run publishes nothing, so it needs no Tiden configuration or CLI.
-          MERGE_QUEUE: ${{ github.event_name == 'merge_group' || startsWith(github.head_ref || github.ref_name, 'gh-readonly-queue/') }}
+          EVENT_NAME: ${{ github.event_name }}
+          SOURCE_BRANCH: ${{ github.head_ref || github.ref_name }}
         run: |
-          if [ "$MERGE_QUEUE" = true ]; then
+          # A merge queue run publishes nothing, so it needs no Tiden configuration or CLI.
+          # Matched with case, like scripts/tiden_ci.py; expression startsWith() ignores case.
+          if [ "$EVENT_NAME" = merge_group ] || [[ "$SOURCE_BRANCH" == gh-readonly-queue/* ]]; then
             echo 'enabled=false' >> "$GITHUB_OUTPUT"
             echo 'queue=true' >> "$GITHUB_OUTPUT"
           elif [ -z "$TIDEN_API_TOKEN" ]; then
