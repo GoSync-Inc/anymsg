@@ -849,3 +849,75 @@ def test_run_listings_are_followed_across_pages_or_refused():
         return value
     with pytest.raises(p.Refused, match="completely"):
         p.verify(SHA, short)
+
+
+@pytest.mark.parametrize("pages", [
+    [{"workflow_runs": [{"id": n} for n in range(100)]}, {"workflow_runs": [{"id": 100}], "total_count": 5}],
+    [{"workflow_runs": [{"id": 1}], "total_count": 2}, {"workflow_runs": [{"id": 1}], "total_count": 2}],
+    [{"workflow_runs": [{"id": 1}], "total_count": 3}, {"workflow_runs": [{"id": 2}], "total_count": 2}],
+    [{"workflow_runs": [{"id": 1}, {"id": 2}], "total_count": 1}],
+    [{"workflow_runs": [{"id": 1}], "total_count": "1"}],
+    [{"workflow_runs": [{"id": n} for n in range(100)]}] * 11,
+], ids=["count-appears-late", "repeated-page", "changing-total", "more-than-total", "invalid-total", "endless-full-pages"])
+def test_incomplete_or_inconsistent_run_listings_are_refused(pages):
+    responses = iter(pages + [{"workflow_runs": []}] * 20)
+    with pytest.raises(p.Refused, match="CI listing"):
+        p.complete_listing(lambda page: next(responses), "workflow_runs")
+
+
+def test_a_full_first_page_without_a_count_is_followed_to_the_next_page():
+    first = [{"id": n} for n in range(100)]
+    pages = {1: {"workflow_runs": first}, 2: {"workflow_runs": [{"id": 500}]}}
+    assert len(p.complete_listing(lambda page: pages[page], "workflow_runs")) == 101
+
+
+def test_a_job_listing_that_stops_short_of_its_total_never_hides_a_duplicate_required_job():
+    passed = [{"id": 1, "name": "checks / verify", "status": "completed", "conclusion": "success"},
+              {"id": 2, "name": "CI gate", "status": "completed", "conclusion": "success"}]
+    hidden = {"id": 3, "name": "checks / verify", "status": "completed", "conclusion": "failure"}
+    for second_page in ([], [hidden]):
+        get, _, _ = queue_github()
+        def response(path, second_page=second_page):
+            if "runs/30/attempts/2/jobs?" in path:
+                return {"jobs": passed, "total_count": 3} if path.endswith("&page=1") else {"jobs": second_page, "total_count": 3}
+            return get(path)
+        with pytest.raises(p.Refused):
+            p.verify(SHA, response)
+
+
+@pytest.mark.parametrize("event", ["merge_group", "push"])
+def test_a_newer_run_appearing_between_the_reads_is_refused(event):
+    get, push, group = queue_github()
+    reads = {"push": 0, "merge_group": 0}
+    def response(path):
+        if "/runs?" in path:
+            kind = "merge_group" if "event=merge_group" in path else "push"
+            reads[kind] += 1
+            if kind == event and reads[kind] > 1:
+                # Same attempt, status and conclusion, only a newer run of the same commit.
+                newer = {**(group if kind == "merge_group" else push), "id": 99}
+                return {"workflow_runs": [push if kind == "push" else group, newer]}
+        return get(path)
+    with pytest.raises(p.Refused, match="changed while"):
+        p.verify(SHA, response)
+
+
+def test_after_a_reset_the_newest_push_run_of_the_commit_decides_whether_the_queue_counts():
+    get, push, group = queue_github()
+    ran_itself = {**push, "id": 20, "html_url": "https://example.invalid/run/20"}
+    def response(path, push_runs):
+        if "/runs?" in path and "event=push" in path:
+            return {"workflow_runs": push_runs}
+        if "runs/20/attempts/1/jobs?" in path:
+            return {"jobs": [{"name": name, "status": "completed", "conclusion": "success"} for name in p.REQUIRED_JOBS]}
+        return get(path)
+    # The newest push run (40) skipped verify: an older exact-commit queue run supplies it, however old.
+    reused = p.verify(SHA, lambda path: response(path, [ran_itself, push]))
+    assert reused["run_id"] == 40 and reused["verify_run_id"] == 30
+    # The newest push run (20 renumbered newest) ran verify itself: only its own result counts.
+    newest_ran = {**ran_itself, "id": 50}
+    def own(path):
+        if "runs/50/attempts/1/jobs?" in path:
+            path = path.replace("runs/50/", "runs/20/")
+        return response(path, [push, newest_ran])
+    assert p.verify(SHA, own)["verify_run_id"] == 50

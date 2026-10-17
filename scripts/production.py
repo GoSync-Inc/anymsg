@@ -65,34 +65,49 @@ def api(path):
     return json.loads(payload)
 
 
-def latest_run(sha, event, get):
-    """The newest ci.yml run of `event` for `sha`, from a listing followed across pages, or None."""
-    runs = []
+def complete_listing(fetch, key):
+    """Every item of a paginated GitHub listing, or Refused when the pages cannot prove they are complete.
+
+    A page that reports `total_count` must agree with every other page, and the distinct items collected
+    must reach exactly that count. A page without a count is complete only when it is shorter than a page.
+    """
+    items, total = {}, None
     for page in range(1, MAX_PAGES + 1):
-        query = {"event": event, "head_sha": sha, "per_page": 100, "page": page}
-        if event == "push":
-            query["branch"] = "main"
-        listing = get("actions/workflows/ci.yml/runs?" + urllib.parse.urlencode(query))
-        runs.extend(listing["workflow_runs"])
-        if len(runs) >= listing.get("total_count", len(runs)):
-            # A later failed/pending rerun must supersede a previous successful run.
-            return max(runs, key=lambda value: value["id"]) if runs else None
-        if not listing["workflow_runs"]:
-            break
-    raise Refused("the CI run listing could not be read completely")
+        listing = fetch(page)
+        chunk = listing[key]
+        count = listing.get("total_count")
+        if count is not None:
+            if not isinstance(count, int) or isinstance(count, bool) or count < 0 or total not in (None, count):
+                raise Refused("the CI listing reported an invalid or changing total")
+            total = count
+        for item in chunk:
+            items[item.get("id", len(items))] = item
+        if total is not None:
+            if len(items) > total:
+                raise Refused("the CI listing returned more items than its total")
+            if len(items) == total:
+                return list(items.values())
+            if not chunk:
+                break
+        elif len(chunk) < 100:
+            return list(items.values())
+    raise Refused("the CI listing could not be read completely")
+
+
+def latest_run(sha, event, get):
+    """The newest ci.yml run of `event` for `sha`, from a complete listing, or None."""
+    query = {"event": event, "head_sha": sha, "per_page": 100}
+    if event == "push":
+        query["branch"] = "main"
+    runs = complete_listing(lambda page: get("actions/workflows/ci.yml/runs?" + urllib.parse.urlencode(
+        {**query, "page": page})), "workflow_runs")
+    # A later failed/pending rerun must supersede a previous successful run.
+    return max(runs, key=lambda value: value["id"]) if runs else None
 
 
 def attempt_jobs(run, get):
-    jobs = []
-    page = 1
-    while True:
-        chunk = get(f"actions/runs/{run['id']}/attempts/{run['run_attempt']}/jobs?per_page=100&page={page}")["jobs"]
-        jobs.extend(chunk)
-        if len(chunk) < 100:
-            return jobs
-        page += 1
-        if page > MAX_PAGES:
-            raise Refused("too many CI jobs")
+    return complete_listing(lambda page: get(
+        f"actions/runs/{run['id']}/attempts/{run['run_attempt']}/jobs?per_page=100&page={page}"), "jobs")
 
 
 def job_concluded(jobs, name, conclusion="success"):
