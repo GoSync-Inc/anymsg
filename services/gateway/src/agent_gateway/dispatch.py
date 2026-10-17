@@ -1,5 +1,6 @@
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 import asyncio
+import logging
 from platform_contracts import Capability, safe_error
 from .adapters.calls import receipt_reference
 
@@ -26,9 +27,56 @@ CALENDAR_CONSTRAINTS = {
 }
 
 
+WARNING_WINDOW_DAYS = 7
+
+
+def utcnow():
+    return datetime.now(timezone.utc)
+
+
+def expiry_of(agent):
+    return datetime.fromisoformat(agent["expires_at"].replace("Z", "+00:00")).astimezone(timezone.utc)
+
+
+def credential_expiry(agent, now=None):
+    """The holder's own expiry; never another principal's or any key material."""
+    expiry = expiry_of(agent)
+    remaining = expiry - (now or utcnow())
+    warning = remaining < timedelta(days=WARNING_WINDOW_DAYS)
+    return {
+        "expires_at": expiry.isoformat().replace("+00:00", "Z"),
+        "expires_in_days": max(remaining.days, 0),
+        "expiry_warning": warning,
+        "warning_window_days": WARNING_WINDOW_DAYS,
+        "next_action": "ask_owner_to_extend_gateway_key" if warning else "none",
+    }
+
+
+def expiring(snapshot, now=None):
+    """Operator view: principals in the warning window or expired, by id and date only."""
+    now = now or utcnow()
+    return [
+        {"id": agent["id"], "expires_at": info["expires_at"], "expired": expiry_of(agent) <= now}
+        for agent in snapshot["principals"]
+        if (info := credential_expiry(agent, now))["expiry_warning"]
+    ]
+
+
 class Dispatch:
     def __init__(self, policy, clients, tickets=None):
         self.policy, self.clients, self.tickets = policy, clients, tickets
+        self.warned = {}
+
+    def credential(self, agent):
+        """Expiry for the authenticated holder; logs one warning per principal per UTC day."""
+        now = utcnow()
+        info = credential_expiry(agent, now)
+        if info["expiry_warning"] and self.warned.get(agent["id"]) != now.date():
+            self.warned[agent["id"]] = now.date()
+            logging.getLogger("agent_gateway").warning(
+                "gateway key for principal %s expires at %s", agent["id"], info["expires_at"]
+            )
+        return info
 
     def actions(self, snapshot, agent, caps, account=None):
         """Intersect reviewed grants with explicit current account implementation support.
@@ -178,6 +226,7 @@ class Dispatch:
                     not CATALOG[n].get("annotations", {}).get("readOnlyHint", False) for n in visible
                 ),
                 "owner_authorization_verified": False,
+                "credential": self.credential(agent),
                 "capability": Capability("gateway", "capabilities", snapshot["revision"]).to_dict(),
             }
         module = tool["module"]

@@ -23,10 +23,26 @@ from .policy import Denied, Policy
 from .release import messaging_dial_url
 
 current_key = ContextVar("deedkit_key", default="")
+# The authenticated holder's own expiry, taken at the boundary's admission check.
+current_credential = ContextVar("deedkit_credential", default=None)
 HEADERS = {"Cache-Control": "no-store", "Referrer-Policy": "no-referrer", "X-Content-Type-Options": "nosniff"}
 NORMAL_BODY_LIMIT = 65536
 UPLOAD_BODY_LIMIT = 360448
 UPLOAD_CHUNK_TOOL = "messages_upload_file_chunk"
+
+
+def expiry_notice(credential):
+    """In-band warning for the key holder, only inside the warning window."""
+    if not credential or not credential["expiry_warning"]:
+        return None
+    return (
+        f"DeedKit gateway key expires at {credential['expires_at']} "
+        f"(in {credential['expires_in_days']} days). Ask the owner to extend it."
+    )
+
+
+def expiry_headers(credential):
+    return {"X-DeedKit-Key-Expires": credential["expires_at"]} if expiry_notice(credential) else {}
 
 
 def is_chunk_call(path, body):
@@ -107,9 +123,15 @@ def create_app(policy_path, public_url, *, transports=None):
     async def call_tool(context, params):
         try:
             result = await dispatch.call(current_key.get(), params.name, params.arguments or {})
+            content = [TextContent(type="text", text=json.dumps(result, ensure_ascii=False))]
+            notice = expiry_notice(current_credential.get())
+            if not notice:
+                return CallToolResult(content=content, structuredContent=result)
+            # structuredContent stays exactly the declared outputSchema shape.
             return CallToolResult(
-                content=[TextContent(type="text", text=json.dumps(result, ensure_ascii=False))],
+                content=[*content, TextContent(type="text", text=notice)],
                 structuredContent=result,
+                _meta={"deedkit.credential": current_credential.get()},
             )
         except Denied as error:
             result = getattr(error, "detail", {"error": error.code})
@@ -164,14 +186,16 @@ def create_app(policy_path, public_url, *, transports=None):
 
     @app.post("/v1/{name}")
     async def rest(name: str, request: Request):
+        headers = expiry_headers(current_credential.get())
         try:
             value = await request.json()
             result = await dispatch.call(current_key.get(), name, value)
-            return JSONResponse(result)
+            return JSONResponse(result, headers=headers)
         except Denied as error:
-            return JSONResponse(getattr(error, "detail", {"error": error.code}), status_code=error.status)
+            return JSONResponse(getattr(error, "detail", {"error": error.code}), status_code=error.status,
+                                headers=headers)
         except ValueError:
-            return JSONResponse({"error": "invalid_arguments"}, status_code=422)
+            return JSONResponse({"error": "invalid_arguments"}, status_code=422, headers=headers)
 
     @app.get("/v1/files/{ticket}")
     async def download(ticket: str, request: Request):
@@ -208,7 +232,7 @@ def create_app(policy_path, public_url, *, transports=None):
                     raise Denied("invalid_origin", 403)
                 if request.url.path == "/healthz" and request.method == "GET":
                     return await app(scope, receive, protected_send)
-                key = ""
+                key, credential = "", None
                 if not request.url.path.startswith("/v1/files/"):
                     auth = request.headers.get("authorization", "")
                     if len(request.headers.getlist("authorization")) != 1 or not auth.startswith("Bearer "):
@@ -216,7 +240,7 @@ def create_app(policy_path, public_url, *, transports=None):
                     key = auth[7:]
                     if len(key) > 512 or not key or any(c.isspace() for c in key):
                         raise Denied("unauthorized", 401)
-                    policy.authenticate(key)
+                    credential = dispatch.credential(policy.authenticate(key)[1])
                 if request.method == "GET" and request.url.path.rstrip("/") == "/mcp":
                     return await JSONResponse(
                         {"error": "server_notifications_not_supported"},
@@ -268,10 +292,11 @@ def create_app(policy_path, public_url, *, transports=None):
                         return await original_receive()
 
                     receive = replay
-                token = current_key.set(key)
+                token, held = current_key.set(key), current_credential.set(credential)
                 try:
                     await app(scope, receive, protected_send)
                 finally:
+                    current_credential.reset(held)
                     current_key.reset(token)
             except Denied as error:
                 if response_started:

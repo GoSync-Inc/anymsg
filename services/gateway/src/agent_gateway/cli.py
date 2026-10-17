@@ -8,6 +8,7 @@ from urllib.parse import urlsplit
 import uvicorn
 
 from .app import create_app
+from .dispatch import expiring
 from .policy import Policy
 
 
@@ -29,7 +30,13 @@ def main(argv=None):
         policy = Policy(args.policy).load()
         print(
             json.dumps(
-                {"valid": True, "revision": policy["revision"], "modules": policy["deployment"]["modules"]}
+                {
+                    "valid": True,
+                    "revision": policy["revision"],
+                    "modules": policy["deployment"]["modules"],
+                    # Ids and dates only: principals within the 7-day window or already expired.
+                    "expiring": expiring(policy),
+                }
             )
         )
         return
