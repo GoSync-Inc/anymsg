@@ -677,16 +677,17 @@ def test_failed_cold_abort_keeps_the_journal_for_reconciliation(config):
     # Backup admission ignores cold journals.
     assert receive(config,cloud)['status']=='stored'
 
-@pytest.mark.parametrize('age_seconds,settled',[(60,False),(2*86400,True)])
-def test_sent_cold_completion_blocks_replacement_until_it_is_settled(config,age_seconds,settled):
+@pytest.mark.parametrize('age_seconds',[60,30*86400])
+def test_sent_cold_completion_blocks_replacement_until_it_is_settled(config,age_seconds):
     cloud=Cloud();data=r2.AGE_HEADER+b'synthetic cold ciphertext'*8;key=config['prefix']+'/cold/'+COLD+'.age'
     cold_dir=Path(config['state_directory'])/'cold';cold_dir.mkdir(mode=0o700);journal=cold_dir/(COLD+'.json')
     # The completion was sent and its upload is already gone, but no object is visible yet.
     write_json(journal,{'v':1,'key':key,'phase':'completing','upload_id':'consumed-upload',
                         'at':datetime.now(timezone.utc).timestamp()-age_seconds})
-    if not settled:
-        with pytest.raises(RuntimeError,match='completion_outcome_unknown'):cold(config,cloud,'put',data=data)
-        assert journal.exists() and cloud.objects=={}
-    else:
-        responses,_=cold(config,cloud,'put',data=data)
-        assert responses[-1]['status']=='stored' and cloud.objects[key]==data and not journal.exists()
+    # No age of the evidence settles it: only its object or an operator can.
+    with pytest.raises(RuntimeError,match='completion_outcome_unknown'):cold(config,cloud,'put',data=data)
+    assert journal.exists() and cloud.objects=={}
+    # Its object appearing settles it: the key then answers `exists`, never replaced.
+    cloud.objects[key]=r2.AGE_HEADER+b'the earlier completion landed'*4
+    responses,_=cold(config,cloud,'put',data=data)
+    assert responses==[{'v':1,'status':'exists','key':key,'bytes':len(cloud.objects[key])}] and not journal.exists()

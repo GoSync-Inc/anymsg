@@ -431,10 +431,12 @@ write is conditional (`If-None-Match: *`). Cold state lives in a private
 upload does not block cold writes, and one `<digest>.json` journal per
 multipart write. The next attempt for that key settles the journal first: an
 upload whose completion was never sent is aborted; a sent completion is
-settled only by its object (`exists`), by aborting the still-open upload, or
-after 24 hours without either. Until then the key answers
-`completion_outcome_unknown`, so an earlier completion can never replace a
-later object. Backup admission and the verifier ignore the `cold/` directory.
+settled only by its object (`exists`) or by aborting the still-open upload.
+Otherwise the key answers `completion_outcome_unknown` and its original stays
+resident, so an earlier completion can never replace a later object. An
+operator resolves such a journal only after confirming, as root with the
+receiver credential, that the key is still absent and no multipart upload for
+it is open; then the journal file may be removed and the next pass retries. Backup admission and the verifier ignore the `cold/` directory.
 Objects must be age ciphertext; the optional `cold_max_bytes` (default 5 GiB)
 bounds each one and must exceed the archiver's `max_object_bytes` plus age
 overhead. Larger objects use the configured multipart part size.

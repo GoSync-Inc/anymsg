@@ -833,17 +833,13 @@ def cold_attempt_name(key):
     return key.rsplit('/', 1)[1][:-len('.age')] + '.json'
 
 
-# No single storage request outlives this; an unseen completion after it is settled.
-COLD_COMPLETION_SETTLE_SECONDS = 86400
-
-
 def cold_reconcile(config, client, key, cold_fd):
     """Settle an earlier interrupted multipart attempt for this key first.
 
     Before completion was sent, aborting the journaled upload is enough. A sent
-    completion is settled only by its object (then `exists`), by aborting the
-    still-open upload, or by the settle window passing with neither, so an
-    older completion can never replace a newer object.
+    completion is settled only by its object (then `exists`) or by aborting
+    the still-open upload; otherwise the key stays blocked until an operator
+    resolves the journal, so an older completion can never replace a newer object.
     """
     name = cold_attempt_name(key)
     attempt = state_read(cold_fd, name)
@@ -861,9 +857,10 @@ def cold_reconcile(config, client, key, cold_fd):
         except Exception as exc:
             if code(exc) != 'NoSuchUpload':
                 raise RuntimeError('storage_unavailable') from None
-            # The upload is gone. A sent completion may still publish it.
-            if (attempt['phase'] == 'completing' and cold_head(config, client, key) is None and
-                    datetime.now(timezone.utc).timestamp() - attempt['at'] < COLD_COMPLETION_SETTLE_SECONDS):
+            # The upload is gone and a sent completion may still publish it.
+            # Nothing observable proves otherwise, so the key stays blocked
+            # until its object appears or an operator resolves the journal.
+            if attempt['phase'] == 'completing' and cold_head(config, client, key) is None:
                 raise RuntimeError('completion_outcome_unknown') from None
     os.unlink(name, dir_fd=cold_fd); local.fsync_dir(cold_fd)
 
