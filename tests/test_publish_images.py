@@ -87,11 +87,15 @@ def published(registry, target, sha=SHA, salt="", **change):
 
 
 def never_attested(*_):
-    return False
+    return "none"
 
 
 def always_attested(*_):
-    return True
+    return "complete"
+
+
+def attested_only_in_github(*_):
+    return "github"
 
 
 def test_publication_targets_are_the_image_build_matrix():
@@ -125,6 +129,62 @@ def test_only_a_main_push_runs_the_publish_job_and_only_it_can_write():
     assert "publish" not in production.REQUIRED_JOBS  # Story B adds it; this change only publishes
 
 
+def test_build_jobs_export_the_tested_image_and_dry_run_its_publication():
+    steps = yaml.safe_load((ROOT / ".github/workflows/images.yml").read_text())["jobs"]["build"]["steps"]
+    names = [step.get("name") or step["uses"].split("@")[0] for step in steps]
+    check = names.index("Build and smoke-test the production target without providers")
+    export = names.index("Export the tested image and publish it to a local registry as a dry run")
+    upload = names.index("Keep the tested image for the publish job")
+    assert check < export < upload == len(steps) - 1
+    run = steps[export]["run"]
+    # The export names the same commit check-image built, and the dry run never leaves the runner.
+    assert 'sha="$(git rev-parse HEAD)"' in run and "export --target \"$TARGET\" --sha \"$sha\"" in run
+    assert "--local-dry-run --registry localhost:5000/dry-run" in run and "for expected in push attest" in run
+    assert '--directory "$RUNNER_TEMP/images/image-$TARGET"' in run
+    assert steps[upload]["with"]["path"] == "${{ runner.temp }}/images/image-${{ matrix.target }}"
+    # Pull requests and main pushes run it; merge queue runs and other-revision baselines do not.
+    assert steps[export]["if"] == ("${{ github.event_name == 'pull_request' || (github.event_name == 'push' && "
+                                   "github.ref == 'refs/heads/main' && inputs.source_ref == '') }}")
+    service = yaml.safe_load((ROOT / ".github/workflows/images.yml").read_text())["jobs"]["build"]["services"]["registry"]
+    assert re.fullmatch(r"registry:3@sha256:[0-9a-f]{64}", service["image"]) and service["ports"] == ["127.0.0.1:5000:5000"]
+
+
+def test_publication_is_serialized_per_commit_and_never_cancelled():
+    job = yaml.safe_load((ROOT / ".github/workflows/ci.yml").read_text())["jobs"]["publish"]
+    assert job["concurrency"] == {"group": "publish-images-${{ github.sha }}", "cancel-in-progress": False}
+
+
+def test_a_dry_run_writes_no_step_outputs(tmp_path, monkeypatch):
+    outputs = tmp_path / "outputs"
+    outputs.write_text("")
+    monkeypatch.setenv("GITHUB_OUTPUT", str(outputs))
+    seen = []
+    monkeypatch.setattr(pi, "publish", lambda registry, sha, images, out, verify, targets: seen.append(out) or [])
+    pi.main(["publish", "--local-dry-run", "--registry", "localhost:5000/dry-run", "--sha", SHA,
+             "--directory", str(tmp_path), "--target", "gateway"])
+    pi.main(["publish", "--sha", SHA, "--directory", str(tmp_path), "--target", "gateway"])
+    assert seen == [None, str(outputs)]
+
+
+def test_a_damaged_archive_does_not_block_reuse_of_an_attested_tag(tmp_path):
+    registry = FakeRegistry()
+    published(registry, "calls")
+    (tmp_path / "image-calls").mkdir()
+    (tmp_path / "image-calls" / "image.json").write_text("{}")
+    (tmp_path / "image-calls" / "image.tar").write_bytes(b"truncated")
+    assert pi.publish_one(registry, "calls", SHA, tmp_path, always_attested)["action"] == "reuse"
+    with pytest.raises(tarfile.ReadError):  # an unattested tag still needs an intact archive
+        pi.publish_one(registry, "calls", SHA, tmp_path, never_attested)
+
+
+def test_a_timed_out_command_is_a_refusal(monkeypatch):
+    def slow(*args, **kwargs):
+        raise subprocess.TimeoutExpired(args[0], 1800)
+    monkeypatch.setattr(pi.subprocess, "run", slow)
+    with pytest.raises(pi.Refused, match="did not finish"):
+        pi.run(["skopeo", "copy"])
+
+
 def test_publish_job_pushes_the_tested_archives_without_building():
     job = yaml.safe_load((ROOT / ".github/workflows/ci.yml").read_text())["jobs"]["publish"]
     text = json.dumps(job)
@@ -156,10 +216,13 @@ def test_every_target_is_attested_with_push_to_registry():
 
 @pytest.mark.parametrize("existing, attested, artifact, action", [
     (None, None, {"config_digest": "sha256:a"}, "push"),
-    (("sha256:m", {}), True, None, "reuse"),
-    (("sha256:m", {}), True, {"config_digest": "sha256:other"}, "reuse"),
-    (("sha256:m", {}), False, {"config_digest": "sha256:a"}, "attest"),
-], ids=["absent", "attested-without-artifact", "attested-after-full-rerun", "pushed-not-attested"])
+    (("sha256:m", {}), "complete", None, "reuse"),
+    (("sha256:m", {}), "complete", {"config_digest": "sha256:other"}, "reuse"),
+    (("sha256:m", {}), "none", {"config_digest": "sha256:a"}, "attest"),
+    (("sha256:m", {}), "github", None, "attest"),
+    (("sha256:m", {}), "github", {"config_digest": "sha256:other"}, "attest"),
+], ids=["absent", "attested-without-artifact", "attested-after-full-rerun", "pushed-not-attested",
+        "registry-bundle-missing", "registry-bundle-missing-after-full-rerun"])
 def test_write_once_decision(existing, attested, artifact, action):
     assert pi.decide(existing, "sha256:a", attested, artifact) == action
 
@@ -171,7 +234,7 @@ def test_write_once_decision(existing, attested, artifact, action):
 ], ids=["absent-and-expired", "unattested-and-expired", "unattested-and-rebuilt"])
 def test_write_once_decision_never_moves_an_unverified_tag(existing, artifact, message):
     with pytest.raises(pi.Refused, match=message):
-        pi.decide(existing, "sha256:a", False, artifact)
+        pi.decide(existing, "sha256:a", "none", artifact)
 
 
 def test_first_publication_pushes_the_exact_tested_config(tmp_path):
@@ -249,7 +312,7 @@ def test_publication_writes_digest_and_attest_outputs_for_every_target(tmp_path)
         exported(tmp_path, target)
     published(registry, "gateway")
     outputs = tmp_path / "outputs"
-    results = pi.publish(registry, SHA, tmp_path, str(outputs), lambda name, *_: name.endswith("deedkit-gateway"))
+    results = pi.publish(registry, SHA, tmp_path, str(outputs), lambda name, *_: "complete" if name.endswith("deedkit-gateway") else "none")
     assert [result["action"] for result in results] == ["reuse" if t == "gateway" else "push" for t in pi.TARGETS]
     lines = dict(line.split("=", 1) for line in outputs.read_text().splitlines())
     assert lines["attest_gateway"] == "false" and lines["attest_enricher_local"] == "true"
@@ -262,24 +325,41 @@ def test_confirmation_requires_an_attested_image_for_every_target():
         published(registry, target)
     result = pi.confirm(registry, SHA, always_attested)
     assert set(result) == set(pi.TARGETS) and all("@sha256:" in reference for reference in result.values())
-    with pytest.raises(pi.Refused, match="calls is not published"):
-        pi.confirm(registry, SHA, lambda name, *_: not name.endswith("deedkit-calls"))
+    for state in ("none", "github"):  # a bundle missing from the registry is not a complete publication
+        with pytest.raises(pi.Refused, match="calls is not published"):
+            pi.confirm(registry, SHA, lambda name, *_, state=state: state if name.endswith("deedkit-calls") else "complete")
     del registry.tags[f"ghcr.io/gosync-inc/deedkit-backup:{SHA}"]
     with pytest.raises(pi.Refused, match="backup is not published"):
         pi.confirm(registry, SHA, always_attested)
 
 
-def test_attestation_check_pins_workflow_ref_commit_and_hosted_runners(monkeypatch):
+def test_rerun_attaches_a_missing_registry_bundle_without_pushing(tmp_path):
+    registry = FakeRegistry()
+    published(registry, "runtime")
+    result = pi.publish_one(registry, "runtime", SHA, tmp_path / "expired", attested_only_in_github)
+    assert result["action"] == "attest" and result["attest"] and registry.pushes == []
+
+
+@pytest.mark.parametrize("api, registry_bundle, state", [
+    (1, 1, "none"), (0, 1, "github"), (0, 0, "complete"),
+], ids=["no-attestation", "registry-bundle-missing", "complete"])
+def test_attestation_check_pins_workflow_ref_commit_and_hosted_runners(monkeypatch, api, registry_bundle, state):
     calls = []
-    monkeypatch.setattr(pi, "run", lambda argv, check=True: calls.append(argv) or subprocess.CompletedProcess(argv, 1))
-    assert pi.attested("ghcr.io/gosync-inc/deedkit-runtime", "sha256:" + "1" * 64, SHA) is False
-    argv = calls[0]
-    assert argv[:4] == ["gh", "attestation", "verify", "oci://ghcr.io/gosync-inc/deedkit-runtime@sha256:" + "1" * 64]
-    flags = dict(zip(argv[4::2], argv[5::2]))
-    assert flags["--repo"] == "GoSync-Inc/deedkit"
-    assert flags["--signer-workflow"] == "GoSync-Inc/deedkit/.github/workflows/ci.yml"
-    assert flags["--source-ref"] == "refs/heads/main" and flags["--source-digest"] == SHA
-    assert "--deny-self-hosted-runners" in argv
+
+    def run(argv, check=True):
+        calls.append(argv)
+        return subprocess.CompletedProcess(argv, registry_bundle if "--bundle-from-oci" in argv else api)
+    monkeypatch.setattr(pi, "run", run)
+    assert pi.attested("ghcr.io/gosync-inc/deedkit-runtime", "sha256:" + "1" * 64, SHA) == state
+    assert len(calls) == (1 if state == "none" else 2) and "--bundle-from-oci" not in calls[0]
+    for argv in calls:
+        assert argv[:4] == ["gh", "attestation", "verify", "oci://ghcr.io/gosync-inc/deedkit-runtime@sha256:" + "1" * 64]
+        rest = [word for word in argv[4:] if word not in {"--bundle-from-oci", "--deny-self-hosted-runners"}]
+        flags = dict(zip(rest[::2], rest[1::2]))
+        assert flags["--repo"] == "GoSync-Inc/deedkit"
+        assert flags["--signer-workflow"] == "GoSync-Inc/deedkit/.github/workflows/ci.yml"
+        assert flags["--source-ref"] == "refs/heads/main" and flags["--source-digest"] == SHA
+        assert "--deny-self-hosted-runners" in argv
 
 
 def test_export_saves_the_tested_tag_and_records_its_config(tmp_path, monkeypatch):

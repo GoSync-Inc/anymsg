@@ -27,7 +27,8 @@ jobs:
           EVENT_NAME: ${{ github.event_name }}
           HEAD_SHA: ${{ github.event.pull_request.head.sha }}
           # Path prefixes copied into the images.yml targets (tests/test_tiden_ci.py
-          # checks them against scripts/production.py BUILDS and the Dockerfiles).
+          # checks them against scripts/production.py BUILDS and the Dockerfiles), plus
+          # the build driver, the publication script the build jobs run and the workflows.
           IMAGE_INPUTS: |
             .dockerignore
             Dockerfile
@@ -76,7 +77,8 @@ jobs:
       matrix:
         target: [runtime, indexer, enricher-local, whatsapp-native, gateway, calendar, calls, backup]
     services:
-      # A throwaway registry for the publication dry run; it holds nothing after the job.
+      # A throwaway registry for the publication dry run; it holds nothing after the job. Like the
+      # pinned base images check-image already pulls, it comes from Docker Hub by digest.
       registry:
         image: registry:3@sha256:ddf754342cfc8acc51a56d5d0ab6af06826461864460636d8bd5c546dab2a7b8
         ports: ['127.0.0.1:5000:5000']
@@ -91,6 +93,10 @@ jobs:
         run: python3 scripts/production.py check-image --target "$TARGET"
       # The publish job in ci.yml pushes exactly this archive; it never rebuilds (scripts/publish_images.py).
       - name: Export the tested image and publish it to a local registry as a dry run
+        # Pull requests prove the publication path before merge; a main push exports what it
+        # publishes. Merge queue runs and baselines of another revision (which may predate
+        # scripts/publish_images.py) publish nothing and skip it.
+        if: ${{ github.event_name == 'pull_request' || (github.event_name == 'push' && github.ref == 'refs/heads/main' && inputs.source_ref == '') }}
         env:
           TARGET: ${{ matrix.target }}
         run: |

@@ -156,9 +156,10 @@ where `<sha40>` is the full source commit. Preparation does not use them yet: it
 still builds on the host as described below, until the pull path is reviewed and
 merged (proposal ANYM-301).
 
-- **Tested bytes, no rebuild.** Each build job saves the image `check-image`
-  tested (`docker save`, a one-day artifact) and dry-runs the publication against
-  a throwaway registry on its runner, on every event. The `publish` job in
+- **Tested bytes, no rebuild.** On pull requests and `main` pushes, each build job
+  saves the image `check-image` tested (`docker save`) and dry-runs the
+  publication against a throwaway registry on its runner; only a `main` push keeps
+  the archive, as a one-day artifact. The `publish` job in
   `ci.yml` runs only on a `main` push after `CI gate`, pushes those archives with
   `skopeo` and refuses an image whose `org.opencontainers.image.revision`,
   `org.opencontainers.image.source` or `io.deedkit.production.build` label does not

@@ -29,7 +29,10 @@ class Refused(RuntimeError):
 
 
 def run(argv, *, check=True):
-    result = subprocess.run(argv, text=True, capture_output=True, timeout=1800)
+    try:
+        result = subprocess.run(argv, text=True, capture_output=True, timeout=1800)
+    except subprocess.TimeoutExpired as exc:
+        raise Refused(f"{argv[0]} {argv[1]} did not finish within 30 minutes") from exc
     if check and result.returncode:
         raise Refused(f"{argv[0]} {argv[1]} failed (exit {result.returncode}): {result.stderr.strip()[-400:]}")
     return result
@@ -107,44 +110,63 @@ class Registry:
 
 
 def attested(name, digest, sha):
-    """Whether GitHub holds a provenance attestation for this digest from main's ci.yml at this commit."""
-    return run(["gh", "attestation", "verify", f"oci://{name}@{digest}", "--repo", production.REPOSITORY,
-                "--signer-workflow", WORKFLOW, "--source-ref", "refs/heads/main", "--source-digest", sha,
-                "--deny-self-hosted-runners", "--format", "json"], check=False).returncode == 0
+    """Where a provenance attestation from main's ci.yml at this commit is stored for this digest.
+
+    "complete" when GitHub's attestation API and the registry (the bundle `push-to-registry`
+    attaches) both verify, "github" when only the API does (the attachment was interrupted),
+    "none" otherwise.
+    """
+    flags = ["--repo", production.REPOSITORY, "--signer-workflow", WORKFLOW, "--source-ref", "refs/heads/main",
+             "--source-digest", sha, "--deny-self-hosted-runners", "--format", "json"]
+    subject = f"oci://{name}@{digest}"
+    if run(["gh", "attestation", "verify", subject, *flags], check=False).returncode:
+        return "none"
+    if run(["gh", "attestation", "verify", subject, "--bundle-from-oci", *flags], check=False).returncode:
+        return "github"
+    return "complete"
 
 
-def decide(existing, existing_config, is_attested, artifact):
+def decide(existing, existing_config, attestation, artifact):
     """Write-once decision for one target: push, reuse, attest or refuse; never moves an existing tag."""
     if existing is None:
         if artifact is None:
             raise Refused("the tag is absent and the tested image artifact is missing; rebuild in a new run")
         return "push"
-    if is_attested:
+    if attestation == "complete":
         return "reuse"
+    if attestation == "github":
+        return "attest"  # provenance exists; an interrupted attempt did not attach its bundle to the registry
     if artifact is not None and existing_config == artifact["config_digest"]:
         return "attest"  # an earlier attempt pushed these tested bytes but did not attest them
     raise Refused("the tag exists without a valid attestation and does not hold this run's tested image")
 
 
+def tested_artifact(directory, target, sha):
+    """This attempt's exported archive record, checked against the archive itself, or None when absent."""
+    if not (directory / "image.json").exists():
+        return None
+    artifact = json.loads((directory / "image.json").read_text())
+    actual, config = archive_config(directory / "image.tar")
+    if (artifact.get("target"), artifact.get("sha"), artifact.get("config_digest")) != (target, sha, actual):
+        raise Refused(f"exported image for {target} does not match its record")
+    check_labels(config, target, sha, "exported image")
+    return artifact
+
+
 def publish_one(registry, target, sha, images, verify=attested):
     name = registry.name(target)
     reference = f"{name}:{sha}"
-    artifact = None
     directory = images / f"image-{target}"
-    if (directory / "image.json").exists():
-        artifact = json.loads((directory / "image.json").read_text())
-        actual, config = archive_config(directory / "image.tar")
-        if (artifact.get("target"), artifact.get("sha"), artifact.get("config_digest")) != (target, sha, actual):
-            raise Refused(f"exported image for {target} does not match its record")
-        check_labels(config, target, sha, "exported image")
     found = registry.manifest(reference)
-    existing_config = is_attested = None
+    existing_config = attestation = None
     if found:
         digest, manifest = found
         check_labels(registry.config(f"{name}@{digest}", manifest), target, sha, "published image")
-        existing_config, is_attested = manifest["config"]["digest"], verify(name, digest, sha)
-    action = decide(found, existing_config, is_attested, artifact)
-    if action == "push":
+        existing_config, attestation = manifest["config"]["digest"], verify(name, digest, sha)
+    # An attested tag needs no archive, so a damaged or expired download cannot fail its reuse.
+    artifact = None if attestation in {"complete", "github"} else tested_artifact(directory, target, sha)
+    action = decide(found, existing_config, attestation, artifact)
+    if action == "push" and artifact is not None:  # decide() pushes only with an artifact
         registry.push(directory / "image.tar", reference)
         found = registry.manifest(reference)
         if not found or found[1]["config"]["digest"] != artifact["config_digest"]:
@@ -171,11 +193,11 @@ def publish(registry, sha, images, outputs, verify=attested, targets=TARGETS):
 
 
 def confirm(registry, sha, verify=attested):
-    """After attestation: every tag names an attested image of this commit."""
+    """After attestation: every tag names an image of this commit attested in GitHub and in the registry."""
     published = {}
     for target in TARGETS:
         found = registry.manifest(f"{registry.name(target)}:{sha}")
-        if not found or not verify(registry.name(target), found[0], sha):
+        if not found or verify(registry.name(target), found[0], sha) != "complete":
             raise Refused(f"{target} is not published with a valid attestation")
         published[target] = f"{registry.name(target)}@{found[0]}"
     return published
@@ -197,12 +219,14 @@ def main(argv=None):
         if args.local_dry_run and not args.registry.startswith("localhost:"):
             raise Refused("the dry run publishes only to a localhost registry")
         registry = Registry(args.registry, insecure=args.local_dry_run)
-        verify = (lambda *_: False) if args.local_dry_run else attested
+        verify = (lambda *_: "none") if args.local_dry_run else attested
         if args.action == "export":
             result = export(args.target, args.sha, args.directory)
         elif args.action == "publish":
             targets = (args.target,) if args.target else TARGETS
-            result = publish(registry, args.sha, args.directory, os.environ.get("GITHUB_OUTPUT"), verify, targets)
+            # A dry run leaves no step outputs that a later step could mistake for a publication.
+            outputs = None if args.local_dry_run else os.environ.get("GITHUB_OUTPUT")
+            result = publish(registry, args.sha, args.directory, outputs, verify, targets)
         else:
             result = confirm(registry, args.sha, verify)
         print(json.dumps(result, indent=2))
