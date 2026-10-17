@@ -100,7 +100,7 @@ starting it.
    A wave takes current breakages (defects, unresolved production incidents) and
    hard deadlines first. The rest of the wave is about 70% product (feature,
    improvement) and 30% engineering (infra, refactor), counted by Effort, and
-   always holds a refactoring slot. Within each share, order by Score, highest
+   holds at least one refactor card when one is ready. Within each share, order by Score, highest
    first. When a feature needs a refactor or an enabler, create a separate
    refactor or infra card and link it as the feature's dependency. A research card
    counts toward the category of the work it unblocks. Deferred work
@@ -136,7 +136,7 @@ category of the work it accepts.
 
 Value is the benefit to the owner. Effort is agent work: 1 is about an hour, 3
 about a day, 8 a week or more. Tiden's priority field keeps its meaning (High,
-Medium, Low) and still raises review levels; the queue order comes from Score.
+Medium, Low) and still raises review levels; the order within a share comes from Score.
 
 ## Working loop
 
