@@ -187,8 +187,12 @@ merged (proposal ANYM-301).
   for `publish`. Publishing is not a required check.
 
 Owner actions, not performed by agents: the first publication creates the eight
-packages as private, linked to this repository. Set them public, or give the host
-a read-only token, before preparation pulls them; keep Actions allowed to create
+packages as private, linked to this repository. The owner decided (2026-10-17)
+that they become public and the host gets no GitHub token, so after the first
+publication the owner changes each package's visibility to public once, in the
+package settings on GitHub (an organization owner can do this whatever the
+member package-creation setting allows). Do this only after the image secret scan
+runs in CI (follow-up to ANYM-300). Keep Actions allowed to create
 repository-linked packages in the organization's package settings. Deleting a
 package version is the owner's.
 
