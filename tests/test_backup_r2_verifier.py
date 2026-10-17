@@ -341,8 +341,9 @@ def test_runtime_layout_changes_block_helper_before_ciphertext_input(tmp_path,at
 def test_cold_archive_state_and_objects_do_not_block_backup_verification(operator):
     v,config,receiver,cloud,engine,_=operator
     state=Path(receiver['state_directory'])
-    (state/'.cold.lock').write_bytes(b'');(state/'.cold.lock').chmod(0o600)
-    (state/('c'*64+'.cold.json')).write_text('{"v":1}');(state/('c'*64+'.cold.json')).chmod(0o600)
+    cold_dir=state/'cold';cold_dir.mkdir(mode=0o700)
+    for name in ('.cold.lock','c'*64+'.json','.'+'c'*64+'.json-'+'0'*32):  # lock, journal, journal temp
+        (cold_dir/name).write_text('{"v":1}');(cold_dir/name).chmod(0o600)
     cloud.objects[receiver['prefix']+'/cold/'+'c'*64+'.age']=r2.AGE_HEADER+b'synthetic cold copy'
     assert v.run(config,client=cloud,engine=engine)['status']=='verified'
     assert receiver['prefix']+'/cold/'+'c'*64+'.age' in cloud.objects

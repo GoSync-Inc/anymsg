@@ -426,12 +426,15 @@ The `cold` mode reads one request line and accepts only `put` or `get` of a
 64-hex digest. It derives the key itself; a request cannot name a path, prefix
 or other verb. It never lists, deletes or overwrites: a `put` for an existing
 key reports `exists` without reading the new ciphertext, and a single-request
-write is conditional (`If-None-Match: *`). Writes are serialized by a separate
-`.cold.lock` in upload state, so a long backup upload does not block them. A
-multipart write keeps a `<digest>.cold.json` journal there; the next attempt
-for that key first aborts the journaled upload, so an interrupted earlier
-completion can never replace a later object. The verifier ignores the cold
-lock and journals.
+write is conditional (`If-None-Match: *`). Cold state lives in a private
+`cold/` subdirectory of upload state: a separate `.cold.lock`, so a long backup
+upload does not block cold writes, and one `<digest>.json` journal per
+multipart write. The next attempt for that key settles the journal first: an
+upload whose completion was never sent is aborted; a sent completion is
+settled only by its object (`exists`), by aborting the still-open upload, or
+after 24 hours without either. Until then the key answers
+`completion_outcome_unknown`, so an earlier completion can never replace a
+later object. Backup admission and the verifier ignore the `cold/` directory.
 Objects must be age ciphertext; the optional `cold_max_bytes` (default 5 GiB)
 bounds each one and must exceed the archiver's `max_object_bytes` plus age
 overhead. Larger objects use the configured multipart part size.

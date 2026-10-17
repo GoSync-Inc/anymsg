@@ -648,7 +648,7 @@ def test_backup_prune_ignores_cold_prefix(operator):
 
 def test_interrupted_cold_multipart_attempt_is_neutralized_before_a_retry(config):
     cloud=Cloud();data=r2.AGE_HEADER+b'n'*(6*1024**2);key=config['prefix']+'/cold/'+COLD+'.age'
-    journal=Path(config['state_directory'])/(COLD+'.cold.json')
+    journal=Path(config['state_directory'])/'cold'/(COLD+'.json')
     # 1. A lost create response: the unknown upload can never complete.
     cloud.fail['created_response']=True
     with pytest.raises(RuntimeError,match='storage_unavailable'):cold(config,cloud,'put',data=data)
@@ -669,10 +669,24 @@ def test_interrupted_cold_multipart_attempt_is_neutralized_before_a_retry(config
 
 def test_failed_cold_abort_keeps_the_journal_for_reconciliation(config):
     cloud=Cloud();data=r2.AGE_HEADER+b'n'*(6*1024**2)
-    journal=Path(config['state_directory'])/(COLD+'.cold.json')
+    journal=Path(config['state_directory'])/'cold'/(COLD+'.json')
     cloud.fail['complete_multipart_upload']=CloudError(500);cloud.fail['abort_multipart_upload']=CloudError(500)
     with pytest.raises(RuntimeError,match='completion_outcome_unknown'):cold(config,cloud,'put',data=data)
     with pytest.raises(RuntimeError,match='storage_unavailable'):cold(config,cloud,'put',data=data)
     assert json.loads(journal.read_text())['phase']=='completing' and cloud.objects=={}
     # Backup admission ignores cold journals.
     assert receive(config,cloud)['status']=='stored'
+
+@pytest.mark.parametrize('age_seconds,settled',[(60,False),(2*86400,True)])
+def test_sent_cold_completion_blocks_replacement_until_it_is_settled(config,age_seconds,settled):
+    cloud=Cloud();data=r2.AGE_HEADER+b'synthetic cold ciphertext'*8;key=config['prefix']+'/cold/'+COLD+'.age'
+    cold_dir=Path(config['state_directory'])/'cold';cold_dir.mkdir(mode=0o700);journal=cold_dir/(COLD+'.json')
+    # The completion was sent and its upload is already gone, but no object is visible yet.
+    write_json(journal,{'v':1,'key':key,'phase':'completing','upload_id':'consumed-upload',
+                        'at':datetime.now(timezone.utc).timestamp()-age_seconds})
+    if not settled:
+        with pytest.raises(RuntimeError,match='completion_outcome_unknown'):cold(config,cloud,'put',data=data)
+        assert journal.exists() and cloud.objects=={}
+    else:
+        responses,_=cold(config,cloud,'put',data=data)
+        assert responses[-1]['status']=='stored' and cloud.objects[key]==data and not journal.exists()

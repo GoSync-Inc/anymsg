@@ -387,6 +387,20 @@ def test_existing_object_without_recorded_provenance_is_never_verified(env,archi
     row=copy(s,blob.digest)
     assert row['state']=='failed' and row['error_code']=='cold_object_unattested' and row['verified_at'] is None
     assert 'put_object' not in calls(cloud)
+    # The object exists in R2, so it keeps its share of the total budget.
+    with s.pool.connection() as c:assert archiver().used_bytes(c)==blob.bytes
+
+
+def test_new_originals_are_archived_before_failed_retries(env,archive):
+    s,cloud,archiver,_=env
+    stuck=idle(archive,mid='cold-stuck',payload=b'Synthetic original that keeps failing',days=28)
+    with s.pool.connection() as c:
+        c.execute('''INSERT INTO attachment_cold_copies(digest,bytes,state,object_key,error_code)
+            VALUES(%s,%s,'failed',%s,'original_integrity')''',(stuck.digest,stuck.bytes,'synthetic-owner/v1/cold/'+stuck.digest+'.age'))
+    fresh=idle(archive,mid='cold-new',payload=b'Synthetic original never attempted')
+    report=archiver().run_once(apply=True,limit=1)
+    assert report['archived']==1 and copy(s,fresh.digest)['state']=='verified'
+    assert copy(s,stuck.digest)['state']=='failed'
 
 
 def test_failed_read_back_keeps_the_stored_object_in_budget(env,archive):

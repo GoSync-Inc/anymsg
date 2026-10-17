@@ -199,13 +199,13 @@ class ColdArchiver:
                 WHERE r.state='resident' AND NOT r.pinned
                   AND r.last_accessed_at<=clock_timestamp()-make_interval(days=>%s)
                   AND (cc.digest IS NULL OR cc.state<>'verified' OR cc.bytes<>r.bytes)
-                ORDER BY cc.state='failed',r.last_accessed_at,r.digest LIMIT %s''',(self.config['archive_after_days'],limit)).fetchall()
+                ORDER BY coalesce(cc.state='failed',false),r.last_accessed_at,r.digest LIMIT %s''',(self.config['archive_after_days'],limit)).fetchall()
 
     def used_bytes(self,c):
-        # Any copy whose ciphertext was offered for commit may exist in R2, even
-        # after a failed read-back; it stays budgeted until it is reconciled.
+        # Any copy whose ciphertext was offered for commit, or that was seen in
+        # R2, may exist there even after a failed read-back; it stays budgeted.
         return c.execute("""SELECT coalesce(sum(bytes),0)::bigint AS used FROM attachment_cold_copies
-            WHERE state IN ('verified','pending') OR ciphertext_sha256 IS NOT NULL""").fetchone()['used']
+            WHERE state IN ('verified','pending') OR ciphertext_bytes IS NOT NULL""").fetchone()['used']
 
     def _open_original(self,digest,size):
         root=os.open(self.store.files,os.O_RDONLY|os.O_DIRECTORY|os.O_NOFOLLOW)
@@ -341,8 +341,10 @@ class ColdArchiver:
             else:
                 # The recorded ciphertext expectation survives: an object this
                 # attempt did commit is recognized on the next pass, never replaced.
+                # An object seen in R2 keeps its size, so it stays budgeted.
                 c.execute('''UPDATE attachment_cold_copies SET state='failed',error_code=%s,verified_at=NULL,
-                    updated_at=clock_timestamp() WHERE digest=%s AND state<>'verified' ''',(fields['error_code'],digest))
+                    ciphertext_bytes=coalesce(ciphertext_bytes,%s),updated_at=clock_timestamp()
+                    WHERE digest=%s AND state<>'verified' ''',(fields['error_code'],fields.get('ciphertext_bytes'),digest))
             return True
 
     def _archive_one(self,row):
@@ -367,7 +369,7 @@ class ColdArchiver:
             else:expected={'bytes':stored['bytes'],'sha256':stored['sha256']}
             observed=self.verify(digest,size,expected)
         except ColdVerifyFailed as error:
-            self._record(digest,size,state='failed',object_key=stored.get('key'),
+            self._record(digest,size,state='failed',object_key=stored.get('key'),ciphertext_bytes=stored.get('bytes'),
                          error_code=str(error) if re.fullmatch('[a-z_]{1,64}',str(error)) else VERIFY_FAILED)
             return VERIFY_FAILED
         except ColdUnavailable:
@@ -396,7 +398,7 @@ class ColdArchiver:
         # Rows already budgeted in `used` add no new bytes.
         files=0;spent=0;stopped=False
         for row in rows:
-            new=0 if row['cold_state']=='pending' or row['ciphertext_sha256'] else row['bytes']
+            new=0 if row['cold_state']=='pending' or row['ciphertext_bytes'] is not None else row['bytes']
             if stopped:blocked(UNAVAILABLE);continue
             if (files>=self.config['pass_files'] or spent+row['bytes']>self.config['pass_bytes'] or
                     used+new>self.config['total_bytes'] or row['bytes']>self.config['max_object_bytes']):

@@ -797,41 +797,61 @@ def cold_key(config, digest):
 
 @contextmanager
 def cold_lock(config):
-    """Cold copies serialize among themselves, never against backup uploads."""
+    """Cold copies serialize among themselves, never against backup uploads.
+
+    Their lock and journals live in a private `cold/` subdirectory of upload
+    state, which backup admission and the verifier never read.
+    """
     with directory_handle(Path(config['state_directory'])) as state_fd:
-        fd = os.open('.cold.lock', os.O_RDWR | os.O_CREAT | os.O_NOFOLLOW, 0o600, dir_fd=state_fd)
         try:
-            info = os.fstat(fd)
-            if (not stat.S_ISREG(info.st_mode) or info.st_nlink != 1 or info.st_mode & 0o077 or
-                    info.st_uid != os.geteuid()):
-                raise ValueError('invalid_receiver_lock')
+            os.mkdir('cold', 0o700, dir_fd=state_fd)
+        except FileExistsError:
+            pass
+        cold_fd = os.open('cold', os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW, dir_fd=state_fd)
+        try:
+            info = os.fstat(cold_fd)
+            if info.st_mode & 0o077 or info.st_uid != os.geteuid():
+                raise ValueError('private_receiver_directory_required')
+            fd = os.open('.cold.lock', os.O_RDWR | os.O_CREAT | os.O_NOFOLLOW, 0o600, dir_fd=cold_fd)
             try:
-                fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
-            except BlockingIOError:
-                raise RuntimeError('receiver_busy') from None
-            yield state_fd
+                info = os.fstat(fd)
+                if (not stat.S_ISREG(info.st_mode) or info.st_nlink != 1 or info.st_mode & 0o077 or
+                        info.st_uid != os.geteuid()):
+                    raise ValueError('invalid_receiver_lock')
+                try:
+                    fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+                except BlockingIOError:
+                    raise RuntimeError('receiver_busy') from None
+                yield cold_fd
+            finally:
+                os.close(fd)
         finally:
-            os.close(fd)
+            os.close(cold_fd)
 
 
 def cold_attempt_name(key):
-    # Not `.attempt.json`: backup admission treats those names as backup IDs.
-    return key.rsplit('/', 1)[1][:-len('.age')] + '.cold.json'
+    return key.rsplit('/', 1)[1][:-len('.age')] + '.json'
 
 
-def cold_reconcile(config, client, key, state_fd):
-    """Neutralize an earlier interrupted multipart attempt for this key.
+# No single storage request outlives this; an unseen completion after it is settled.
+COLD_COMPLETION_SETTLE_SECONDS = 86400
 
-    Aborting the journaled upload makes any delayed completion fail, so a new
-    attempt can never be replaced by an older one. A create whose response was
-    lost left an upload ID nobody holds; it can never complete.
+
+def cold_reconcile(config, client, key, cold_fd):
+    """Settle an earlier interrupted multipart attempt for this key first.
+
+    Before completion was sent, aborting the journaled upload is enough. A sent
+    completion is settled only by its object (then `exists`), by aborting the
+    still-open upload, or by the settle window passing with neither, so an
+    older completion can never replace a newer object.
     """
     name = cold_attempt_name(key)
-    attempt = state_read(state_fd, name)
+    attempt = state_read(cold_fd, name)
     if attempt is None:
         return
-    if (not isinstance(attempt, dict) or set(attempt) != {'v', 'key', 'phase', 'upload_id'} or
+    if (not isinstance(attempt, dict) or set(attempt) != {'v', 'key', 'phase', 'upload_id', 'at'} or
             attempt['v'] != 1 or attempt['key'] != key or attempt['phase'] not in {'creating', 'uploading', 'completing'} or
+            type(attempt['at']) not in (int, float) or
             (attempt['phase'] != 'creating' and
              (not isinstance(attempt['upload_id'], str) or not 1 <= len(attempt['upload_id']) <= 1024))):
         raise ValueError('invalid_attempt_journal')
@@ -841,7 +861,11 @@ def cold_reconcile(config, client, key, state_fd):
         except Exception as exc:
             if code(exc) != 'NoSuchUpload':
                 raise RuntimeError('storage_unavailable') from None
-    os.unlink(name, dir_fd=state_fd); local.fsync_dir(state_fd)
+            # The upload is gone. A sent completion may still publish it.
+            if (attempt['phase'] == 'completing' and cold_head(config, client, key) is None and
+                    datetime.now(timezone.utc).timestamp() - attempt['at'] < COLD_COMPLETION_SETTLE_SECONDS):
+                raise RuntimeError('completion_outcome_unknown') from None
+    os.unlink(name, dir_fd=cold_fd); local.fsync_dir(cold_fd)
 
 
 def cold_head(config, client, key):
@@ -862,7 +886,8 @@ def cold_put(config, client, key, source, respond, state_fd):
     cold_reconcile(config, client, key, state_fd)
     journal = cold_attempt_name(key)
     def phase(name, upload):
-        state_write(state_fd, journal, {'v': 1, 'key': key, 'phase': name, 'upload_id': upload})
+        state_write(state_fd, journal, {'v': 1, 'key': key, 'phase': name, 'upload_id': upload,
+                                        'at': datetime.now(timezone.utc).timestamp()})
     existing = cold_head(config, client, key)
     if existing is not None:
         respond({'v': 1, 'status': 'exists', 'key': key, 'bytes': existing})

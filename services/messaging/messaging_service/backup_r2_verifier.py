@@ -314,9 +314,10 @@ def select_candidate(receiver,client,state_fd,marker):
     # candidate authority comes from immutable cloud receipt plus full GET hash.
     for name in os.listdir(state_fd):
         if name=='.receiver.lock':continue
-        # Cold-copy lock and journals (ANYM-297) address only <prefix>/cold/,
-        # which backup inventory, verification and rotation never touch.
-        if name=='.cold.lock' or re.fullmatch(r'[a-f0-9]{64}\.cold\.json',name):continue
+        # The cold-copy subdirectory (ANYM-297: its lock, journals and their
+        # temporary files) addresses only <prefix>/cold/, which backup
+        # inventory, verification and rotation never touch.
+        if name=='cold' and stat.S_ISDIR(os.stat(name,dir_fd=state_fd,follow_symlinks=False).st_mode):continue
         if not name.endswith('.attempt.json'):raise ValueError('unresolved_upload_required')
         bid=name[:-len('.attempt.json')];r2.valid_id(bid)
         attempt=r2.validate_attempt(receiver,r2.state_read(state_fd,name),bid)
