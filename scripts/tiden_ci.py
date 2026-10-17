@@ -27,6 +27,14 @@ MODULE_REPORTS = {
     "calls_frontend": ("calls-frontend.xml", "node", "services/calls/frontend"),
     "backup_restore": ("backup-restore.xml", "python", ""),
 }
+_VERIFY_MODULES = tuple(name for name in MODULE_REPORTS if name != "load")
+# Each parallel test job uploads one `ci-evidence-<job>` fragment: the module checks it runs and the files it
+# produces (verify's seven checks travel in its metadata.json), besides the `source-sha` and `attempt` it ran.
+FRAGMENTS = {
+    "verify": (_VERIFY_MODULES, ("metadata.json", *REPORTS.values(), *(MODULE_REPORTS[name][0] for name in _VERIFY_MODULES))),
+    "load": (("load",), ("outcomes.json", MODULE_REPORTS["load"][0], "load.json")),
+}
+CONTROL_FILES = {"source-sha", "attempt", "metadata.json", "outcomes.json"}
 MAX_BYTES = 20 * 1024 * 1024
 # Tiden branch names: lowercase letters, digits, slashes, underscores and hyphens.
 TIDEN_BRANCH_NAME = re.compile(r"[a-z0-9]+(?:[/_-][a-z0-9]+)*")
@@ -40,6 +48,7 @@ MERGE_QUEUE_SKIP = "merge queue run of a temporary group commit"
 # Tiden creates an environment for any unknown slug, so only these two may receive a release record.
 RELEASE_ENVIRONMENTS = ("github-actions-synthetic", "production")
 RUN_URL = re.compile(r"https://github\.com/[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+/actions/runs/[0-9]+(?:/attempts/[0-9]+)?")
+RUN_ATTEMPT_URL = re.compile(r"https://github\.com/[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+/actions/runs/[0-9]+/attempts/([0-9]+)")
 RELEASED_AT = re.compile(r"[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}Z")
 # A reporting job completes its run within its 6-minute timeout.
 RUN_WINDOW = timedelta(minutes=10)
@@ -143,6 +152,94 @@ def prepare(root: Path, directory: Path, metadata: dict) -> dict:
                 "test_counts": dict(counts), "check_counts": dict(Counter(r["execution"]["status"] for r in rows))}
     (directory / "manifest.json").write_text(json.dumps(manifest, indent=2))
     return manifest
+
+
+def control_file(fragment: Path, name: str) -> str:
+    path = fragment / name
+    if path.is_symlink() or not path.is_file():
+        raise ValueError(f"evidence fragment file {name} is missing or not a regular file")
+    return path.read_text().strip()
+
+
+def fresh_fragment(fragment: Path, root: Path, job: str, result: str, attempt: str) -> bool:
+    """Whether `fragment` holds this job's evidence to merge: False when it is absent, or when a job that did
+    not succeed in this attempt left only an earlier attempt's fragment behind."""
+    if not fragment.exists() and not fragment.is_symlink():
+        return False
+    if fragment.is_symlink() or not fragment.is_dir() or fragment.resolve().parent != root:
+        raise ValueError(f"the {job} fragment is not a plain directory of the download")
+    allowed = FRAGMENTS[job][1] + ("source-sha", "attempt")
+    if any(path.name not in allowed or path.is_symlink() or not path.is_file() for path in fragment.iterdir()):
+        raise ValueError(f"the {job} fragment holds a file its job does not produce")
+    return result == "success" or control_file(fragment, "attempt") == attempt
+
+
+def assemble(directory: Path, fragments: Path, ci_url: str, producers: dict) -> dict:
+    """Merge the evidence fragments that the parallel test jobs uploaded into the directory `prepare` reads.
+
+    `producers` maps each job of FRAGMENTS to its job result and the checkout SHA its job output captured. A
+    fragment holds only its own files and checks and must name verify's tested SHA, which is the SHA its job
+    captured. A job without a fresh fragment contributes no reports, and its checks take its job result
+    (`skipped` when it succeeded), so it never reads as passed; such jobs are returned in `missing`. A stale
+    verify fragment still supplies the run's routing metadata (SHA, Git and Tiden branch), never its outcomes.
+    `ci_url` names this assembly's run attempt, which reruns with every producer; `producers` in the metadata
+    keeps each job's own result, captured SHA and the attempt its merged fragment came from. `directory` must
+    be new or empty, so no earlier assembly's report survives.
+    """
+    attempt = RUN_ATTEMPT_URL.fullmatch(ci_url or "")
+    if not attempt or set(producers) != set(FRAGMENTS):
+        raise ValueError("the assembling run's attempt URL and every producer's result are required")
+    root = fragments.resolve()
+    verify = fragments / "ci-evidence-verify"
+    if not fresh_fragment(verify, root, "verify", "success", ""):
+        raise ValueError("the verify fragment with the run metadata is missing")
+    try:
+        metadata = json.loads(control_file(verify, "metadata.json"))
+        sha = metadata["sha"]
+    except (ValueError, KeyError, TypeError):
+        raise ValueError("the verify fragment with the run metadata is missing") from None
+    if not re.fullmatch(r"[a-f0-9]{40}", str(sha)) or set(metadata.get("checks") or {}) != set(CHECKS):
+        raise ValueError("the verify fragment does not name its tested source SHA and its seven checks")
+    if directory.exists() and any(directory.iterdir()):
+        raise ValueError("the evidence directory must be new or empty")
+    checks, module_checks, provenance = dict(metadata["checks"]), {}, {}
+    directory.mkdir(parents=True, exist_ok=True)
+    present, missing = [], []
+    for job, (names, files) in FRAGMENTS.items():
+        result, captured = producers[job]
+        # A job's own captured checkout always has to agree with verify's, whatever its fragment.
+        if captured and captured != sha:
+            raise ValueError(f"the {job} job captured another source than verify")
+        fragment = fragments / f"ci-evidence-{job}"
+        provenance[job] = {"result": result, "sha": captured, "attempt": None}
+        if not fresh_fragment(fragment, root, job, result, attempt.group(1)):
+            missing.append(job)
+            state = result if result in {"failure", "cancelled"} else "skipped"
+            module_checks.update(dict.fromkeys(names, state))
+            if job == "verify":
+                checks = dict.fromkeys(CHECKS, state)
+            continue
+        if control_file(fragment, "source-sha") != sha or captured != sha:
+            raise ValueError(f"the {job} fragment tested another source than verify")
+        provenance[job]["attempt"] = control_file(fragment, "attempt")
+        if not provenance[job]["attempt"].isdigit():
+            raise ValueError(f"the {job} fragment does not name its run attempt")
+        try:
+            reported = (metadata if job == "verify" else json.loads(control_file(fragment, "outcomes.json")))["module_checks"]
+        except (ValueError, KeyError, TypeError):
+            reported = None
+        if not isinstance(reported, dict) or set(reported) != set(names):
+            raise ValueError(f"the {job} fragment may report only its own checks")
+        module_checks.update(reported)
+        for path in fragment.iterdir():
+            if path.name not in CONTROL_FILES:
+                (directory / path.name).write_bytes(path.read_bytes())
+        present.append(job)
+    (directory / "source-sha").write_text(sha + "\n")
+    metadata.update({"ci_url": ci_url, "checks": checks, "module_checks": module_checks, "fragments": present,
+                     "producers": provenance})
+    (directory / "metadata.json").write_text(json.dumps(metadata))
+    return {**metadata, "missing": missing}
 
 
 def resolve_branch(manifest: dict, mapping: dict) -> str:
@@ -428,8 +525,10 @@ def record_release(directory: Path, sha: str, environment: str, url: str, releas
 
 def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("command", choices=["prepare", "publish", "release"])
+    parser.add_argument("command", choices=["assemble", "prepare", "publish", "release"])
     parser.add_argument("--directory", type=Path, required=True)
+    parser.add_argument("--fragments", type=Path)
+    parser.add_argument("--producer", action="append", default=[], help="<job>:<job result>:<captured source SHA>")
     parser.add_argument("--source-root", type=Path, default=Path.cwd())
     parser.add_argument("--environment", choices=RELEASE_ENVIRONMENTS)
     parser.add_argument("--sha")
@@ -439,6 +538,14 @@ def main() -> int:
     directory = args.directory.resolve()
     if args.command == "release":
         return release(args, directory)
+    if args.command == "assemble":
+        ci_url = "https://github.com/{}/actions/runs/{}/attempts/{}".format(*(
+            os.environ.get(name, "") for name in ("GITHUB_REPOSITORY", "GITHUB_RUN_ID", "GITHUB_RUN_ATTEMPT")))
+        producers = {job: (result, sha) for job, result, sha in (value.split(":", 2) for value in args.producer)}
+        merged = assemble(directory, args.fragments, ci_url, producers)
+        print(json.dumps({"fragments": merged["fragments"], "missing": merged["missing"]}))
+        # The evidence is written either way, so a run without every fresh fragment is recorded and still fails.
+        return 1 if merged["missing"] else 0
     if args.command == "prepare":
         metadata = json.loads((directory / "metadata.json").read_text())
         metadata["pr_tiden_links"] = intent_links(pull_request_body(os.environ.get("GITHUB_EVENT_PATH")))

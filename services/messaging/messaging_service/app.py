@@ -530,6 +530,9 @@ def create_app(store: Store, allowed_hosts: list[str]):
         parameters: dict[StrictStr, Any]={}) -> dict[str, Any]:
         """Validate an allowlisted intent without queueing or contacting a provider.
 
+        Call list_messenger_operations(account) first for each operation's
+        parameters_schema and ID formats; rejected parameters return
+        invalid_operation_parameters with field_errors naming each field.
         Inputs are archive IDs and strict operation-specific parameters, never paths,
         URLs, raw RPC names or caller-supplied provider payloads. A mutation preview
         returns exact targets/effects/warnings and a payload-bound preview_digest;

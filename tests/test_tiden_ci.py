@@ -3,6 +3,7 @@ from collections import Counter
 from datetime import datetime, timedelta, timezone
 import json
 from pathlib import Path
+import sys
 import xml.etree.ElementTree as ET
 
 import pytest
@@ -1072,3 +1073,246 @@ def test_release_workflows_record_only_verified_main_commits(tmp_path):
     assert steps[publish]["env"]["TIDEN_API_TOKEN"] == "${{ secrets.TIDEN_API_TOKEN }}"
     assert steps[publish]["env"]["ENVIRONMENT"] == "${{ inputs.environment }}"
     assert "${{" not in steps[verify]["run"] and "${{" not in steps[publish]["run"]
+
+
+ATTEMPT_URL = "https://github.com/example/repo/actions/runs/1/attempts/2"
+LOAD_REPORT = '<testsuite><testcase name="budgets" file="tests/platform/benchmarks/gateway_read_load.py"/></testsuite>'
+PASSED = {"verify": ("success", "a" * 40), "load": ("success", "a" * 40)}
+
+
+def evidence_fragments(tmp_path, *, load_sha="a" * 40, load_outcomes=None, load=True, load_attempt="2",
+                       verify_modules=None, verify_files=(), load_files=()):
+    fragments = tmp_path / "fragments"
+    verify = fragments / "ci-evidence-verify"
+    verify.mkdir(parents=True)
+    (verify / "source-sha").write_text("a" * 40 + "\n")
+    (verify / "attempt").write_text("2\n")
+    modules = verify_modules or {name: "success" for name in ("gateway", "calendar", "calls", "calls_frontend", "backup_restore")}
+    (verify / "metadata.json").write_text(json.dumps({**metadata(), "tiden_branch": "", "module_checks": modules}))
+    for name in ("python.xml", *verify_files):
+        (verify / name).write_text('<testsuite><testcase name="x" file="tests/x.py"/></testsuite>')
+    if load:
+        fragment = fragments / "ci-evidence-load"
+        fragment.mkdir()
+        (fragment / "source-sha").write_text(load_sha + "\n")
+        (fragment / "attempt").write_text(load_attempt + "\n")
+        for name in ("load.xml", *load_files):
+            (fragment / name).write_text(LOAD_REPORT)
+        (fragment / "load.json").write_text('{"status": "passed"}')
+        (fragment / "outcomes.json").write_text(json.dumps(load_outcomes or {"module_checks": {"load": "success"}}))
+    return fragments
+
+
+def assembled_rows(tmp_path, merged):
+    out = tmp_path / "ci-evidence"
+    prepare(tmp_path, out, json.loads((out / "metadata.json").read_text()))
+    return {row["signature"]: row["execution"]["status"] for row in json.loads((out / "ci-checks.json").read_text())}
+
+
+def test_parallel_load_fragment_is_assembled_with_verify_evidence_of_the_same_commit(tmp_path):
+    from scripts.tiden_ci import assemble
+    out = tmp_path / "ci-evidence"
+    merged = assemble(out, evidence_fragments(tmp_path), ATTEMPT_URL, PASSED)
+    # The assembling attempt names the evidence, so a rerun of one test job publishes under new row identities.
+    assert merged["ci_url"] == ATTEMPT_URL and merged["fragments"] == ["verify", "load"] and merged["missing"] == []
+    assert merged["module_checks"]["load"] == "success" and set(merged["module_checks"]) == {
+        "gateway", "calendar", "calls", "calls_frontend", "load", "backup_restore"}
+    assert {path.name for path in out.iterdir()} == {"metadata.json", "source-sha", "python.xml", "load.xml", "load.json"}
+    rows = assembled_rows(tmp_path, merged)
+    assert rows["deedkit-ci::load"] == rows["anymsg-ci::python"] == "passed"
+    # A job that succeeded and was not rerun keeps its earlier attempt's fragment, and the evidence says so.
+    earlier = assemble(tmp_path / "earlier", evidence_fragments(tmp_path / "e", load_attempt="1"), ATTEMPT_URL, PASSED)
+    assert earlier["fragments"] == ["verify", "load"]
+    assert earlier["producers"] == {"verify": {"result": "success", "sha": "a" * 40, "attempt": "2"},
+                                    "load": {"result": "success", "sha": "a" * 40, "attempt": "1"}}
+    # Assembling again into a used directory could keep a report the new fragments no longer supply.
+    with pytest.raises(ValueError, match="new or empty"):
+        assemble(out, evidence_fragments(tmp_path / "again", load=False), ATTEMPT_URL, PASSED)
+
+
+def test_assembly_refuses_a_fragment_of_another_commit_or_of_foreign_checks(tmp_path):
+    from scripts.tiden_ci import assemble
+    with pytest.raises(ValueError, match="another source"):
+        assemble(tmp_path / "a", evidence_fragments(tmp_path / "sha", load_sha="b" * 40), ATTEMPT_URL, PASSED)
+    with pytest.raises(ValueError, match="another source"):  # the job's captured checkout must be verify's too
+        assemble(tmp_path / "b", evidence_fragments(tmp_path / "captured"), ATTEMPT_URL,
+                 {**PASSED, "load": ("success", "b" * 40)})
+    foreign = {"module_checks": {"load": "success", "gateway": "success"}}
+    with pytest.raises(ValueError, match="only its own"):
+        assemble(tmp_path / "c", evidence_fragments(tmp_path / "foreign", load_outcomes=foreign), ATTEMPT_URL, PASSED)
+    with pytest.raises(ValueError, match="only its own"):
+        assemble(tmp_path / "d", evidence_fragments(tmp_path / "python", load_outcomes={"checks": {"python": "success"}}),
+                 ATTEMPT_URL, PASSED)
+    # Neither job can supply the other's checks or reports: verify claiming the load gate, load supplying pytest.
+    claimed = {name: "success" for name in ("gateway", "calendar", "calls", "calls_frontend", "backup_restore", "load")}
+    with pytest.raises(ValueError, match="only its own"):
+        assemble(tmp_path / "e", evidence_fragments(tmp_path / "claim", load=False, verify_modules=claimed), ATTEMPT_URL, PASSED)
+    with pytest.raises(ValueError, match="does not produce"):
+        assemble(tmp_path / "f", evidence_fragments(tmp_path / "vload", load=False, verify_files=("load.xml",)), ATTEMPT_URL, PASSED)
+    with pytest.raises(ValueError, match="does not produce"):
+        assemble(tmp_path / "g", evidence_fragments(tmp_path / "lpy", load_files=("python.xml",)), ATTEMPT_URL, PASSED)
+    without_verify = evidence_fragments(tmp_path / "verify")
+    for path in (without_verify / "ci-evidence-verify").iterdir():
+        path.unlink()
+    with pytest.raises(ValueError, match="verify fragment"):
+        assemble(tmp_path / "h", without_verify, ATTEMPT_URL, PASSED)
+    with pytest.raises(ValueError, match="attempt URL"):
+        assemble(tmp_path / "i", evidence_fragments(tmp_path / "url"), "https://github.com/example/repo/actions/runs/1", PASSED)
+    # Symlinked fragment directories and control files are refused before anything is read.
+    linked = evidence_fragments(tmp_path / "link")
+    (linked / "ci-evidence-load" / "source-sha").unlink()
+    (linked / "ci-evidence-load" / "source-sha").symlink_to(linked / "ci-evidence-verify" / "source-sha")
+    with pytest.raises(ValueError, match="does not produce"):
+        assemble(tmp_path / "j", linked, ATTEMPT_URL, PASSED)
+    elsewhere = evidence_fragments(tmp_path / "dir")
+    moved = tmp_path / "outside-load"
+    (elsewhere / "ci-evidence-load").rename(moved)
+    (elsewhere / "ci-evidence-load").symlink_to(moved, target_is_directory=True)
+    with pytest.raises(ValueError, match="plain directory"):
+        assemble(tmp_path / "k", elsewhere, ATTEMPT_URL, PASSED)
+
+
+def test_missing_load_fragment_is_recorded_as_an_unrun_check(tmp_path):
+    from scripts.tiden_ci import assemble
+    merged = assemble(tmp_path / "ci-evidence", evidence_fragments(tmp_path, load=False), ATTEMPT_URL, PASSED)
+    assert merged["fragments"] == ["verify"] and merged["missing"] == ["load"] and merged["module_checks"]["load"] == "skipped"
+    assert assembled_rows(tmp_path, merged)["deedkit-ci::load"] == "blocked"
+
+
+def test_failed_rerun_never_publishes_an_earlier_attempts_passing_fragment(tmp_path):
+    from scripts.tiden_ci import assemble
+    # The load job passed in attempt 1, then failed in attempt 2 before uploading: its attempt-1 fragment remains.
+    out = tmp_path / "ci-evidence"
+    merged = assemble(out, evidence_fragments(tmp_path, load_attempt="1"), ATTEMPT_URL,
+                      {**PASSED, "load": ("failure", "a" * 40)})
+    assert merged["missing"] == ["load"] and merged["module_checks"]["load"] == "failure"
+    assert not (out / "load.xml").exists()
+    assert assembled_rows(tmp_path, merged)["deedkit-ci::load"] == "blocked"  # failed without a report: never passed
+    # A failed verify without a fresh fragment turns all seven checks red, not passed.
+    stale_verify = evidence_fragments(tmp_path / "v")
+    (stale_verify / "ci-evidence-verify" / "attempt").write_text("1\n")
+    merged = assemble(tmp_path / "v" / "ci-evidence", stale_verify, ATTEMPT_URL, {**PASSED, "verify": ("cancelled", "")})
+    assert set(merged["checks"].values()) == {"cancelled"} and not (tmp_path / "v" / "ci-evidence" / "python.xml").exists()
+    # A stale verify fragment never hides that the failed verify job captured another checkout.
+    with pytest.raises(ValueError, match="captured another source"):
+        assemble(tmp_path / "v" / "other", stale_verify, ATTEMPT_URL, {**PASSED, "verify": ("failure", "b" * 40)})
+    # A fragment must name the attempt it was uploaded in.
+    unnamed = evidence_fragments(tmp_path / "unnamed")
+    (unnamed / "ci-evidence-load" / "attempt").unlink()
+    with pytest.raises(ValueError, match="attempt"):
+        assemble(tmp_path / "unnamed" / "ci-evidence", unnamed, ATTEMPT_URL, PASSED)
+
+
+def test_evidence_step_records_and_then_fails_a_run_without_every_fragment(tmp_path):
+    import subprocess
+    import yaml
+    root = Path(__file__).resolve().parents[1]
+    evidence = yaml.safe_load((root / ".github/workflows/checks.yml").read_text())["jobs"]["evidence"]
+    step = next(s for s in evidence["steps"] if s.get("name") == "Merge the fragments of the tested commit and record every check outcome")
+    assert step["env"] == {"VERIFY": "verify:${{ needs.verify.result }}:${{ needs.verify.outputs.source_sha }}",
+                           "LOAD": "load:${{ needs.load.result }}:${{ needs.load.outputs.source_sha }}"}
+    work = tmp_path / "work"
+    work.mkdir()
+    (work / "ci-tools").symlink_to(root, target_is_directory=True)
+    temp = tmp_path / "runner"
+    temp.mkdir()
+    evidence_fragments(temp, load=False)  # both jobs report success, the load artifact is gone, Tiden is unconfigured
+    env = {"PATH": f"{Path(sys.executable).parent}:/usr/bin:/bin", "RUNNER_TEMP": str(temp), "GITHUB_REPOSITORY": "example/repo",
+           "GITHUB_RUN_ID": "1", "GITHUB_RUN_ATTEMPT": "2", "VERIFY": "verify:success:" + "a" * 40,
+           "LOAD": "load:success:" + "a" * 40}
+    result = subprocess.run(["bash", "-e", "-c", step["run"]], cwd=work, capture_output=True, text=True, env=env)
+    assert result.returncode != 0, result.stderr
+    rows = json.loads((temp / "ci-evidence" / "ci-checks.json").read_text())  # the evidence still exists for upload
+    assert next(r for r in rows if r["signature"] == "deedkit-ci::load")["execution"]["status"] == "blocked"
+    load = temp / "fragments" / "ci-evidence-load"
+    load.mkdir()
+    for name, value in {"source-sha": "a" * 40, "attempt": "2", "load.xml": LOAD_REPORT, "load.json": "{}",
+                        "outcomes.json": json.dumps({"module_checks": {"load": "success"}})}.items():
+        (load / name).write_text(value)
+    for path in (temp / "ci-evidence").iterdir():
+        path.unlink()
+    assert subprocess.run(["bash", "-e", "-c", step["run"]], cwd=work, capture_output=True, env=env).returncode == 0
+
+
+def test_load_gate_runs_in_its_own_parallel_job_and_every_test_job_gates_the_evidence():
+    import subprocess
+    import yaml
+    root = Path(__file__).resolve().parents[1]
+    jobs = yaml.safe_load((root / ".github/workflows/checks.yml").read_text())["jobs"]
+    load = jobs["load"]
+    # Its own runner, in parallel with verify, bounded, with the unchanged command and budgets.
+    assert "needs" not in load and "if" not in load and load["timeout-minutes"] == 10
+    gate = next(step for step in load["steps"] if step.get("id") == "load")
+    assert gate["name"] == "Paired gateway load and isolation budgets" and "if" not in gate
+    assert "gateway_read_load.py --config tests/platform/benchmarks/budgets.json" in gate["run"]
+    assert all(step.get("id") != "load" for step in jobs["verify"]["steps"])
+    assert set(CHECKS) <= {step.get("id") for step in jobs["verify"]["steps"]} and "if" not in jobs["verify"]
+    uploads = {job: next(step for step in jobs[job]["steps"] if step.get("uses", "").startswith("actions/upload-artifact")
+                         and step["with"]["name"].startswith("ci-evidence")) for job in ("verify", "load")}
+    for job, upload in uploads.items():
+        assert upload["with"]["name"] == f"ci-evidence-{job}" and upload["if"] == "${{ always() }}"
+        assert upload["with"]["overwrite"] is True
+    evidence = jobs["evidence"]
+    assert evidence["needs"] == ["verify", "load"] and evidence["if"] == "${{ always() }}"
+    assert jobs["tiden"]["needs"] == "evidence"
+    steps = {step.get("name") or step["uses"].split("@")[0]: step for step in evidence["steps"]}
+    assert steps["actions/download-artifact"]["with"]["pattern"] == "ci-evidence-*"
+    assert "tiden_ci.py assemble" in steps["Merge the fragments of the tested commit and record every check outcome"]["run"]
+    retained = steps["Retain test evidence even when a check fails"]["with"]
+    assert retained["name"] == "ci-evidence" and retained["overwrite"] is True  # a rerun attempt replaces it
+    require = steps["Require every test job to have succeeded"]
+    assert require["if"] == "${{ always() }}"
+    assert require["env"] == {"VERIFY_RESULT": "${{ needs.verify.result }}", "LOAD_RESULT": "${{ needs.load.result }}"}
+    for verify, load_result in [("success", "success"), ("success", "failure"), ("success", "cancelled"),
+                                ("success", "skipped"), ("failure", "success"), ("skipped", "success")]:
+        result = subprocess.run(["bash", "-e", "-c", require["run"]], capture_output=True,
+                                env={"VERIFY_RESULT": verify, "LOAD_RESULT": load_result})
+        assert (result.returncode == 0) == (verify == load_result == "success"), (verify, load_result)
+
+
+def test_python_suite_reports_its_slowest_tests_and_waits_for_its_background_images(tmp_path):
+    import subprocess
+    import yaml
+    root = Path(__file__).resolve().parents[1]
+    steps = yaml.safe_load((root / ".github/workflows/checks.yml").read_text())["jobs"]["verify"]["steps"]
+    names = [step.get("name", "") for step in steps]
+    start = names.index("Start the release router image build and the Python image pull in the background")
+    wait = names.index("Wait for the background router image and Python image")
+    python = next(i for i, step in enumerate(steps) if step.get("id") == "python")
+    # The image preparation starts before the module test steps and is awaited right before the suite.
+    assert start < names.index("Gateway isolated package and transport tests") and wait == python - 1
+    assert "docker build --file services/release-router/Dockerfile" in steps[start]["run"]
+    assert "docker build" not in steps[python]["run"] and "docker pull" not in steps[python]["run"]
+    assert "--durations=25" in steps[python]["run"]
+    background = tmp_path / "background"
+
+    def waits(**exits):
+        background.mkdir(exist_ok=True)
+        for path in background.iterdir():
+            path.unlink()
+        for name, code in exits.items():
+            (background / f"{name.replace('_', '-')}.exit").write_text(code + "\n")
+        return subprocess.run(["bash", "-e", "-c", steps[wait]["run"]], capture_output=True,
+                              env={"PATH": "/usr/bin:/bin", "RUNNER_TEMP": str(tmp_path), "BACKGROUND_WAIT_SECONDS": "1"})
+
+    assert waits(router="0", python_image="0").returncode == 0
+    assert waits(router="1", python_image="0").returncode != 0
+    assert waits(router="0", python_image="1").returncode != 0
+    assert waits(router="0").returncode != 0  # a preparation that never finished fails too
+    # The real start step returns before its background jobs finish, and the wait step then sees their results.
+    import time
+    for path in background.iterdir():
+        path.unlink()
+    tools = tmp_path / "bin"
+    tools.mkdir()
+    (tools / "docker").write_text('#!/bin/sh\nsleep 5\ntest "$1" = build\n')  # the pull fails, the build succeeds
+    (tools / "docker").chmod(0o755)
+    env = {"PATH": f"{tools}:/usr/bin:/bin", "RUNNER_TEMP": str(tmp_path), "DEEDKIT_TEST_PYTHON_IMAGE": "synthetic"}
+    began = time.monotonic()
+    started = subprocess.run(["bash", "-e", "-o", "pipefail", "-c", steps[start]["run"]], cwd=root, capture_output=True,
+                             env=env, timeout=10)
+    assert started.returncode == 0 and time.monotonic() - began < 4
+    waited = subprocess.run(["bash", "-e", "-c", steps[wait]["run"]], capture_output=True, timeout=30,
+                            env={**env, "BACKGROUND_WAIT_SECONDS": "20"})
+    assert waited.returncode != 0 and b"python-image" in waited.stdout
+    assert (background / "router.exit").read_text().strip() == "0"

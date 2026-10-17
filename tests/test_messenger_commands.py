@@ -461,3 +461,19 @@ def test_send_file_revalidates_registered_content_without_accepting_paths(operat
     with s.pool.connection() as c:
         assert c.execute('SELECT status FROM messenger_commands WHERE id=%s',
                          (queued['operation_id'],)).fetchone()['status']=='cancelled'
+
+
+def test_send_file_mode_mismatch_names_field(operator):
+    s,_,key,_=operator
+    content=b'Synthetic text original';sha=hashlib.sha256(content).hexdigest()
+    s.files.mkdir(parents=True,exist_ok=True);(s.files/sha).write_bytes(content)
+    aid=stable_id('att','command-fixture','100','1','synthetic-mode')
+    with s.pool.connection() as c:
+        c.execute('INSERT INTO attachments(id,message,digest,filename,mime,bytes) VALUES(%s,%s,%s,%s,%s,%s)',
+            (aid,stable_id('msg','command-fixture','100','1'),sha,'synthetic.txt','text/plain',len(content)))
+    with pytest.raises(APIError,match='^invalid_operation_parameters$') as failure:
+        s.preview_messenger_operation(key,account='command-fixture',operation='send_file',
+            chat_id=stable_id('chat','command-fixture','200'),parameters={'attachment_id':aid,'sha256':sha,'mode':'photo'})
+    assert failure.value.field_errors==[{'field':'mode','reason':'format','expected':
+        'a mode matching the original MIME family: photo and sticker image/*, video and video_note video/*, '
+        'audio and voice audio/*; document for any file'}]
