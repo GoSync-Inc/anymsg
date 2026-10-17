@@ -206,11 +206,21 @@ merged (proposal ANYM-301).
   `.gitleaks-images.toml`, without the default global path allowlist that exempts
   whole trees such as `lib/python3.x` and `node_modules`. The image cannot change
   the policy: `.gitleaks.toml`, `.gitleaksignore` and inline `gitleaks:allow` in an
-  image are ignored. A false positive in third-party content gets an
-  `[[allowlists]]` entry at the end of `.gitleaks-images.toml` with a `description`
-  naming the package and why the match is not a secret, scoped by `paths` (one
-  file or directory of that package) and `targetRules`; never a whole tree. Such a
-  change is reviewed like any CI change and rebuilds every image.
+  image are ignored. Every specific rule (private keys, provider tokens) covers
+  the whole image. The two heuristic rules, `generic-api-key` and `jwt`, match
+  ordinary code in hash-locked third-party packages, so they are not applied
+  inside installed third-party distributions (`site-packages`, `dist-packages`)
+  and system files (`/usr/lib`, `/usr/share`, `/usr/include`); they still apply to
+  our own packages wherever they are installed (`OWN_PACKAGES` in
+  `scripts/scan_image.py`, kept complete by a test) and to everything else. Any
+  other false positive gets an `[[allowlists]]` entry at the end of
+  `.gitleaks-images.toml` with a `description` naming the package and why the
+  match is not a secret, its `targetRules`, and an exact file `paths` regex (or an
+  exact value); never a whole tree. Current entries: the Python base image's
+  public `GPG_KEY` fingerprint, python-rsa's PEM marker template, and the Debian
+  snakeoil key in the postgres base image of the backup target (owner risk
+  acceptance 2026-10-17). Such a change is reviewed like any CI change and
+  rebuilds every image.
 
 Owner actions, not performed by agents: the first publication creates the eight
 packages as private, linked to this repository. The owner decided (2026-10-17)

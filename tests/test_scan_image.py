@@ -126,11 +126,12 @@ def test_image_config_keeps_the_pinned_default_rules_without_global_path_exempti
     upstream = tomllib.loads(UPSTREAM.read_text())
     ours = tomllib.loads(si.CONFIG.read_text())
     assert ours["rules"] == upstream["rules"]
-    assert "paths" not in ours["allowlist"] and upstream["allowlist"]["paths"]
-    assert {k: v for k, v in ours["allowlist"].items() if k != "paths"} == \
-        {k: v for k, v in upstream["allowlist"].items() if k != "paths"}
+    # The upstream global allowlist becomes the first [[allowlists]] entry, without its paths.
+    assert "allowlist" not in ours and upstream["allowlist"]["paths"]
+    assert ours["allowlists"][0] == {k: v for k, v in upstream["allowlist"].items() if k != "paths"}
     assert "extend" not in ours and "disabledRules" not in json.dumps(ours)
-    for entry in ours.get("allowlists", []):
+    for entry in ours["allowlists"][1:]:
+        assert entry.get("targetRules"), entry  # a project entry never silences every rule
         assert entry.get("description", "").strip(), entry
         assert entry.get("paths") or entry.get("regexes") or entry.get("commits"), entry
         assert not any(re.fullmatch(r"\(\?:\^\|/\)[^()]*\(\?:/\.\*\)\?\$", p) for p in entry.get("paths", [])), entry
@@ -277,3 +278,67 @@ def test_a_scan_only_change_still_builds_and_scans_every_image(tmp_path, path):
         (root / path).write_text("changed\n")
     checkout, head = pull_request_checkout(tmp_path, change)
     assert image_decision(checkout, tmp_path, "pull_request", head)[0] == ["build=true"]
+
+
+# Narrowing (ANYM-303 C3): heuristic rules skip third-party distributions, never our own code.
+
+@pytest.mark.parametrize("rule, path, dropped", [
+    ("generic-api-key", "usr/local/lib/python3.13/site-packages/oauthlib/oauth1/rfc5849/parameters.py", True),
+    ("generic-api-key", "app/.venv/lib/python3.13/site-packages/google/api_core/page_iterator.py", True),
+    ("jwt", "usr/local/lib/python3.13/site-packages/pyjwt-2.15.1.dist-info/METADATA", True),
+    ("generic-api-key", "usr/lib/x86_64-linux-gnu/perl/5.36.0/CORE/cop.h", True),
+    ("generic-api-key", "usr/lib/python3/dist-packages/apt/package.py", True),
+    ("generic-api-key", "app/services/gateway/.venv/lib/python3.13/site-packages/agent_gateway/app.py", False),
+    ("generic-api-key", "app/.venv/lib/python3.13/site-packages/family_calendar/google_api.py", False),
+    ("jwt", "app/.venv/lib/python3.13/site-packages/family_calendar_service-0.1.0.dist-info/METADATA", False),
+    ("generic-api-key", "app/messaging_service/app.py", False),
+    ("generic-api-key", "app/settings.py", False),
+    ("private-key", "usr/local/lib/python3.13/site-packages/somepkg/key.pem", False),
+    ("aws-access-token", "usr/local/lib/python3.13/site-packages/somepkg/config.py", False),
+])
+def test_heuristic_rules_skip_only_third_party_distributions(rule, path, dropped):
+    assert si.third_party(rule, path) is dropped
+
+
+def test_own_package_list_covers_every_project_installed_into_an_image():
+    names = set()
+    for pyproject in ("services/gateway", "services/calendar", "services/calls", "packages/platform-contracts",
+                      "services/messaging"):
+        project = tomllib.loads((ROOT / pyproject / "pyproject.toml").read_text())
+        names.add(project["project"]["name"].replace("-", "_").replace(".", "_").lower())
+        for wheel in project.get("tool", {}).get("hatch", {}).get("build", {}).get("targets", {}).get("wheel", {}).get("packages", []):
+            names.add(Path(wheel).name)
+    # Only these are installed into site-packages; other app code lives under /app and is never narrowed.
+    names |= {path.name for path in (ROOT / "services/gateway/src").iterdir() if path.is_dir() and not path.name.startswith(".")}
+    assert names <= si.OWN_PACKAGES, names - si.OWN_PACKAGES
+
+
+@needs_gitleaks
+def test_a_heuristic_finding_in_our_own_installed_package_still_fails(tmp_path):
+    own = "app/services/gateway/.venv/lib/python3.13/site-packages/agent_gateway/settings.py"
+    third = "app/services/gateway/.venv/lib/python3.13/site-packages/somelib/settings.py"
+    alphabet = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789"
+    rng = random.Random(7)
+    secret = 'service_api_key = "' + "".join(rng.choice(alphabet) for _ in range(40)) + '"\n'
+    found = findings(tmp_path, layers=[{own: secret, third: secret}])
+    assert [f[2] for f in found] == [own]
+
+
+@needs_gitleaks
+@pytest.mark.parametrize("env, allowed", [("GPG_KEY=7169605F62C751356D054A26A821E680E5FA6305", True),
+                                         ("GPG_KEY=0123456789ABCDEF0123456789ABCDEF01234567", False)])
+def test_only_the_base_image_signing_key_fingerprint_is_allowed_in_the_config(tmp_path, env, allowed):
+    found = findings(tmp_path, layers=[{"app/clean.txt": "clean"}], env=[env], history=["ENV " + env])
+    assert (found == []) is allowed
+
+
+@needs_gitleaks
+@pytest.mark.parametrize("path, allowed", [("etc/ssl/private/ssl-cert-snakeoil.key", True),
+                                          ("etc/ssl/private/server.key", False),
+                                          ("usr/local/lib/python3.13/site-packages/rsa/pem.py", True),
+                                          ("usr/local/lib/python3.13/site-packages/rsa/key.py", False)])
+def test_private_key_allowlists_are_exact_files(tmp_path, path, allowed):
+    found = findings(tmp_path, layers=[{path: made_up_private_key(path)}])
+    assert (found == []) is allowed
+    if not allowed:
+        assert [(f[0], f[2]) for f in found] == [("private-key", path)]

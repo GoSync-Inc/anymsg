@@ -8,6 +8,7 @@ import hashlib
 import json
 import os
 from pathlib import Path
+import re
 import shutil
 import subprocess
 import sys
@@ -22,6 +23,17 @@ GZIP, ZSTD = b"\x1f\x8b", b"\x28\xb5\x2f\xfd"
 FINDINGS = 2  # gitleaks --exit-code for findings; every other non-zero exit is a scanner error
 CHUNK = 1024 * 1024
 EXPECTED_SKIP = "WRN skipping archive: exceeds max archive depth max_archive_depth=1 path="
+# The two heuristic rules match ordinary code in hash-locked third-party packages (OAuth helpers,
+# test vectors, API docs), so they do not apply inside installed third-party distributions and
+# system files; every specific rule (private keys, provider tokens) still covers the whole image.
+# This is code rather than a gitleaks allowlist because its RE2 paths cannot exclude our own
+# packages, which uv installs into site-packages (agent_gateway, family_calendar). ANYM-303 C3.
+HEURISTIC_RULES = frozenset({"generic-api-key", "jwt"})
+THIRD_PARTY = re.compile(r"(?:^|/)(?:site|dist)-packages/(?P<top>[^/]+)/|^usr/(?:lib|share|include)/")
+OWN_PACKAGES = frozenset({"agent_gateway", "anymsg", "deedkit_gateway", "deedkit_platform_contracts",
+                          "family_calendar", "family_calendar_service", "messaging_service",
+                          "personal_os_voice_service", "platform_contracts", "telegram_broker",
+                          "telegram_session_owner"})
 
 
 class Refused(RuntimeError):
@@ -84,6 +96,16 @@ def prepare(archive_path, directory):
     return len(diff_ids)
 
 
+def third_party(rule, path):
+    """Whether a heuristic finding lies inside an installed third-party distribution or system file."""
+    match = THIRD_PARTY.search(path)
+    if rule not in HEURISTIC_RULES or not match:
+        return False
+    top = match.group("top")
+    # A distribution's metadata directory is named <distribution>-<version>.dist-info.
+    return top is None or re.split(r"-\d", top)[0].replace("-", "_").replace(".", "_").lower() not in OWN_PACKAGES
+
+
 def gitleaks():
     binary = os.environ.get("GITLEAKS") or shutil.which("gitleaks")
     if not binary:
@@ -122,7 +144,7 @@ def scan(archive_path, *, config=CONFIG, binary=None):
             findings.append((finding["RuleID"], Path(outer).name.removesuffix(".tar"), inner, finding["StartLine"]))
         if (result.returncode == FINDINGS) != bool(findings):
             raise Refused("gitleaks exit code and report disagree")
-        return layers, sorted(findings)
+        return layers, sorted(finding for finding in findings if not third_party(finding[0], finding[2]))
 
 
 def main(argv=None):

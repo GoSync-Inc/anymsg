@@ -3,14 +3,18 @@
 # kept verbatim) with one change: the global allowlist keeps its regexes and stopwords but not
 # its paths, which exempt whole trees such as lib/python3.x, node_modules and *.dist-info that
 # images ship. tests/test_scan_image.py checks the rules stay equal to the pinned upstream file.
-# A false positive in third-party content gets its own [[allowlists]] entry at the end with a
-# description naming the package and why it is not a secret, scoped by paths and targetRules;
-# never an allowlist for a whole tree. No --max-target-megabytes limit is used.
+# The heuristic rules generic-api-key and jwt are not applied inside installed third-party
+# distributions and system files (scripts/scan_image.py, third_party()); every other rule covers
+# the whole image. Any other false positive gets its own [[allowlists]] entry at the end with a
+# description naming the package and why it is not a secret, its targetRules and an exact file
+# path or value; never an allowlist for a whole tree. No --max-target-megabytes limit is used.
 
 title = "deedkit image secret scan (gitleaks 8.30.1 default rules)"
 minVersion = "v8.25.0"
 
-[allowlist]
+# gitleaks refuses the deprecated [allowlist] table next to [[allowlists]], so the upstream global
+# allowlist (without its paths) is the first [[allowlists]] entry, unchanged otherwise.
+[[allowlists]]
 description = "global allow lists"
 regexes = [
     '''(?i)^true|false|null$''',
@@ -3171,3 +3175,23 @@ description = "Detected a Zendesk Secret Key, risking unauthorized access to cus
 regex = '''(?i)[\w.-]{0,50}?(?:zendesk)(?:[ \t\w.-]{0,20})[\s'"]{0,3}(?:=|>|:{1,3}=|\|\||:|=>|\?=|,)[\x60'"\s=]{0,5}([a-z0-9]{40})(?:[\x60'"\s;]|\\[nr]|$)'''
 keywords = ["zendesk"]
 
+
+# Project allowlists (ANYM-303 C3). Each names the package and why the match is not a secret.
+
+[[allowlists]]
+description = "python:3.13-slim-bookworm base image: ENV GPG_KEY (also in its history) is the public fingerprint of the CPython release manager's signing key, used to verify the Python download; not a secret. Pinned to the exact value."
+condition = "AND"
+targetRules = ["generic-api-key"]
+paths = ['''(?:^|/)config\.json$''']
+regexTarget = "match"
+regexes = ['''GPG_KEY=7169605F62C751356D054A26A821E680E5FA6305''']
+
+[[allowlists]]
+description = "python-rsa (rsa/pem.py): the match is the PEM marker template in its encoder code, not a key."
+targetRules = ["private-key"]
+paths = ['''(?:^|/)site-packages/rsa/pem\.py$''']
+
+[[allowlists]]
+description = "postgres:18-bookworm base image (backup target): Debian ssl-cert's generated snakeoil key ships in the official public image; the backup worker serves no TLS and never reads it, and a later layer cannot remove it from the published base layer. Owner risk acceptance 2026-10-17, relayed by the orchestrator: 'Allow this file'."
+targetRules = ["private-key"]
+paths = ['''\.tar!etc/ssl/private/ssl-cert-snakeoil\.key$''']
