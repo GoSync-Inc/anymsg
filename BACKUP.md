@@ -3,7 +3,7 @@
 An operator mechanism, not available through MCP/REST. It does not preserve the personal Core,
 other applications or provider history that has not been received yet. The automatic job,
 encrypted delivery to a second VM and retention are configured on a synthetic deployment.
-Both VMs belong to the same provider account; a separate copy of the recovery key and
+Both VMs belong to the same provider account; a copy of the recovery key separate from it and
 independent cloud storage remain open items until final acceptance.
 
 ## Contents and consistency
@@ -74,7 +74,7 @@ Since 0.9.4 the operator worker enables `consume_staged_blobs=True`: after the
 full snapshot check it deletes only its own temporary copy of each
 original right after it has been read into the tar/age. The ciphertext takes the freed space,
 so two full copies of the originals do not have to be held at once. The source volume is
-mounted read-only. On a staging error it may already be partly consumed:
+mounted read-only. On failure the staging may already be partly consumed:
 the runner deletes only that job's directory and starts a new capture. A capture interrupted before
 delivery (timeout, SIGTERM, Docker error) is deleted entirely, including a
 partial `.encrypt-*` and an unsent `bundle.tar.age`; directories with `delivery.json`
@@ -85,7 +85,7 @@ by hand only directories without `delivery.json` whose ID is not listed in `jour
 and rejects hardlinks in staging before encryption starts.
 
 Free space must be enough for the full snapshot, the largest original,
-metadata and uploads that continue after the cold capture. The receiver additionally
+metadata and downloads that continue after the cold capture. The receiver additionally
 needs space for the new ciphertext **before** the old confirmed copies are deleted.
 Before the archive grows, the operator explicitly raises `--max-bytes`/`--quota-bytes` in the
 restricted forced command, keeping the disk reserve and the ban on shell/read/delete.

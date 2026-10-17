@@ -78,7 +78,7 @@ to the Core. Free text of a summary is not stored in this table.
 
 ## Storage and verification
 
-Migration 006 adds `reviews`, `review_sources`, `review_counter` and preserves
+Migration 006 adds `reviews`, `review_sources`, `review_counter` and stores
 the missing current revisions of early synthetic fixtures. Earlier revisions,
 keys, consumers and ACKs are not rewritten. The gateway has append-only rights
 on marks and sources; arbitrary change/deletion is forbidden by the DB role.

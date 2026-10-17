@@ -38,7 +38,7 @@ Expanding a result:
 4. Next pages — `after=next_cursor` with the same order. `after` and `before`
    together are forbidden. Identical timestamps are separated by a stable ID.
 5. `get_attachment(attachment_id)` returns details and a temporary link to the
-   original; pending/unavailable are not replaced with a preview. A file does not fit in JSON.
+   original; pending/unavailable are not replaced with a preview. A file is not embedded in the JSON.
 
 Search, context and history do not call Telegram/WhatsApp and do not move the ACK.
 MCP and REST use one Store/policy layer. For a name, first call
