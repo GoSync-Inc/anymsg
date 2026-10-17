@@ -1,10 +1,12 @@
 """Durable ingestion and worker leases. Used only by operator/collector DB roles."""
+from contextlib import contextmanager
 from datetime import datetime
 import hashlib
 import os
 import stat
 import re
 import secrets
+from time import monotonic
 
 from psycopg.types.json import Jsonb
 
@@ -12,9 +14,13 @@ from .envelope import canonical, fingerprint, stable_id, validate
 from .store import serial
 from .incoming_formatting import known as known_formatting, unknown as unknown_formatting
 
+# The retry-exhausted sweep has no selective index: one Archive (a collector)
+# runs it on its first media claim for an account, then at most once per this.
+MEDIA_SWEEP_SECONDS = 60
+
 
 class Archive:
-    def __init__(self,store): self.store=store
+    def __init__(self,store): self.store=store; self._media_sweeps={}
 
     def set_sending(self,account,enabled):
         """Operator-only opt-in; never changes account discovery or agent scopes."""
@@ -255,37 +261,60 @@ class Archive:
                 type(live_window_seconds) is not int or not 600<=live_window_seconds<=7*86400):
             raise ValueError('invalid_live_media_policy')
         live_max=live_writer.max_bytes if live_writer is not None else None
-        with self.store.pool.connection() as c:
+        with self._media_sweep(account) as sweep, self.store.pool.connection() as c:
             from .file_lifecycle import lifecycle_lock
             lifecycle_lock(c)
             StorageAdmission.lock_and_reap(c)
             if collector_lease is not None:
                 if account is None: raise ValueError('collector_account_required')
                 self.fence(c,account,collector_lease)
-            c.execute("""UPDATE media_jobs SET state='failed',error_code='retry_exhausted',lease_until=NULL
-                WHERE state='leased' AND attempts>=5 AND lease_until<clock_timestamp()
-                AND (%s::text IS NULL OR account=%s)""",(account,account))
+            if sweep:
+                # Attachment status already reports an expired fifth lease as
+                # retry_exhausted until this sweep rewrites it.
+                c.execute("""UPDATE media_jobs SET state='failed',error_code='retry_exhausted',lease_until=NULL
+                    WHERE state='leased' AND attempts>=5 AND lease_until<clock_timestamp()
+                    AND (%s::text IS NULL OR account=%s)""",(account,account))
+            # One fresh time, taken after the lock waits, bounds the prefetch and live
+            # windows; unlike per-row clock_timestamp() it can bound an index range.
+            now=c.execute('SELECT clock_timestamp() AS at').fetchone()['at']
+            candidates=''
+            if media_prefetch_days is not None:
+                # Dormant out-of-window jobs stay queued for explicit requests. Reach only
+                # jobs that can be claimable now: unexpired requests (media_requested) and
+                # messages inside the window (message_scope_date, or message_live_date
+                # without an account, then media_message). Each ARRAY is an InitPlan, so
+                # the job, message and chat joins start from these ids, never a backlog scan.
+                arms=['SELECT r.id FROM media_jobs r WHERE r.requested_until>%(now)s'
+                    +('' if account is None else ' AND r.account=%(account)s')]
+                if media_prefetch_days>0:arms.append('''SELECT w.id FROM media_jobs w WHERE w.message=ANY(ARRAY(
+                    SELECT wm.id FROM messages wm WHERE wm.sent_at<=%(now)s+interval '5 minutes'
+                    AND wm.sent_at>=greatest(%(now)s-%(days)s::integer*interval '1 day',
+                        coalesce(%(since)s::timestamptz,'-infinity'))'''
+                    +(' AND NOT wm.deleted' if account is None else ' AND wm.account=%(account)s')+'))')
+                candidates=' AND j.id=ANY(ARRAY('+' UNION ALL '.join(arms)+'))'
+            # A cached generic plan of this repeated statement would not see the window bounds.
+            c.execute("SET LOCAL plan_cache_mode=force_custom_plan")
             job=c.execute('''SELECT j.*,priority.live_media AS _live_media FROM media_jobs j JOIN account_policies p ON p.account=j.account
                 JOIN messages m ON m.id=j.message AND m.account=j.account
                 JOIN chats ch ON ch.id=m.chat AND ch.account=j.account
-                CROSS JOIN LATERAL (SELECT COALESCE(%s::bigint IS NOT NULL AND
-                    (j.descriptor->>'bytes')::bigint BETWEEN 0 AND %s::bigint AND
-                    m.sent_at>=clock_timestamp()-%s*interval '1 second' AND
-                    m.sent_at<=clock_timestamp()+interval '5 minutes',false) AS live_media) priority
-                WHERE p.enabled AND (%s::text IS NULL OR j.account=%s) AND j.attempts<5 AND
+                CROSS JOIN LATERAL (SELECT COALESCE(%(live_max)s::bigint IS NOT NULL AND
+                    (j.descriptor->>'bytes')::bigint BETWEEN 0 AND %(live_max)s::bigint AND
+                    m.sent_at>=%(now)s-%(live_window)s*interval '1 second' AND
+                    m.sent_at<=%(now)s+interval '5 minutes',false) AS live_media) priority
+                WHERE p.enabled AND (%(account)s::text IS NULL OR j.account=%(account)s) AND j.attempts<5 AND
                 NOT m.deleted AND NOT(ch.provider_chat=ANY(p.exclude_chats)) AND
                 (p.discover_chats OR ch.provider_chat=ANY(p.include_chats)) AND
-                (%s::timestamptz IS NULL OR m.sent_at>=%s) AND
-                (%s::integer IS NULL OR j.requested_until>clock_timestamp() OR
-                    (%s::integer>0 AND m.sent_at>=clock_timestamp()-%s*interval '1 day'
-                        AND m.sent_at<=clock_timestamp()+interval '5 minutes')) AND
+                (%(since)s::timestamptz IS NULL OR m.sent_at>=%(since)s) AND
+                (%(days)s::integer IS NULL OR j.requested_until>clock_timestamp() OR
+                    (%(days)s::integer>0 AND m.sent_at>=%(now)s-%(days)s*interval '1 day'
+                        AND m.sent_at<=%(now)s+interval '5 minutes')) AND
                 ((j.state='queued' AND j.next_due<=clock_timestamp()) OR
-                 (j.state='leased' AND j.lease_until<clock_timestamp()))
+                 (j.state='leased' AND j.lease_until<clock_timestamp()))'''+candidates+'''
                 ORDER BY COALESCE(j.requested_until>clock_timestamp(),false) DESC,priority.live_media DESC,
                     CASE WHEN priority.live_media THEN m.sent_at END DESC,j.next_due,j.id
                 FOR UPDATE OF j SKIP LOCKED LIMIT 1''',
-                (live_max,live_max,live_window_seconds,account,account,since,since,
-                    media_prefetch_days,media_prefetch_days,media_prefetch_days)).fetchone()
+                {'live_max':live_max,'live_window':live_window_seconds,'account':account,'since':since,
+                    'days':media_prefetch_days,'now':now}).fetchone()
             if not job: return None
             expires=c.execute("SELECT clock_timestamp()+%s*interval '1 second' AS at",(ttl,)).fetchone()['at']
             reservation=None
@@ -307,6 +336,14 @@ class Archive:
             claimed['_live_media']=job['_live_media']
             if reservation is not None:claimed['_storage_reservation']=reservation
             return claimed
+
+    @contextmanager
+    def _media_sweep(self,account):
+        # A due sweep counts only after its claim transaction has committed.
+        at=monotonic(); last=self._media_sweeps.get(account)
+        due=last is None or at-last>=MEDIA_SWEEP_SECONDS
+        yield due
+        if due:self._media_sweeps[account]=at
 
     @staticmethod
     def job_fence(c,job):
