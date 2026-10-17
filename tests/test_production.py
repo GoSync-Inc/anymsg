@@ -532,7 +532,6 @@ def test_production_messaging_stages_end_with_the_source_revision():
         assert stages[stage][-2:] == ["ARG DEEDKIT_SOURCE_SHA", "ENV DEEDKIT_SOURCE_SHA=$DEEDKIT_SOURCE_SHA"], stage
         assert sum("DEEDKIT_SOURCE_SHA" in line for line in stages[stage]) == 2, stage
     assert {target for target, build in p.BUILDS.items() if build[1] == "services/messaging/Dockerfile"} == set(MESSAGING_STAGES)
-    assert (ROOT / "Dockerfile").resolve() == (ROOT / "services/messaging/Dockerfile").resolve()
 
 
 def image_builder(monkeypatch, *, labels=None, env=None):

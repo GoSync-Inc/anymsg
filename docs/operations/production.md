@@ -253,16 +253,20 @@ gh workflow run production-release.yml --ref main \
 ```
 
 Use the UTC time `apply` finished. The workflow runs only from `main`. It
-repeats `production.py verify` for the SHA, so run it before the next merge
-reaches `main`, then records `deedkit@<sha>` in environment `production` with
-name `DeedKit <sha12>`, the main push CI run URL and that time. Tiden captures a
-release's gate from the current main gate when the release is first created, so
-the workflow also refuses unless that SHA's passed run is the latest completed
-`main` run in Tiden. A repeated dispatch updates the record but keeps its first
-gate. A release that telemetry created before the dispatch may have no captured
-gate; the workflow warns and its `tiden-release-receipt` artifact records the
-gate status. Recording a release changes nothing in production, and its gate is
-one input to the readiness decision, not live acceptance.
+repeats `production.py verify` for the SHA, then records `deedkit@<sha>` in
+environment `production` with name `DeedKit <sha12>`, the main push CI run URL
+and that time. Tiden captures a release's gate from the current main gate when
+the release is first created and keeps it on a repeated dispatch, so the
+workflow records only while that SHA's passed run is the latest completed `main`
+run in Tiden, and fails if the main run completed last before the release's
+creation belongs to another commit. Dispatch it before the next merge reaches
+`main`; if a merge lands first, the deployed revision gets no production release
+record, and the readiness review treats its release gate as unknown
+([tiden-product-workflow.md](tiden-product-workflow.md)). A release that
+telemetry created before the dispatch may have no captured gate; the workflow
+warns, and its `tiden-release-receipt` artifact records the gate status.
+Recording a release changes nothing in production, and its gate is one input to
+the readiness decision, not live acceptance.
 
 GitHub documents [required checks and administrator enforcement](https://docs.github.com/en/repositories/configuring-branches-and-merges-in-your-repository/managing-protected-branches/about-protected-branches)
 and [failure/skip handling for dependent jobs](https://docs.github.com/en/actions/how-tos/write-workflows/choose-what-workflows-do/use-jobs).

@@ -31,6 +31,11 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 5
     steps:
+      # Expression comparisons ignore case; this one does not, and runs before any repository code.
+      - name: Require the main branch exactly
+        env:
+          REF: ${{ github.ref }}
+        run: test "$REF" = refs/heads/main
       - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6.1.0
         with:
           persist-credentials: false
@@ -58,9 +63,10 @@ jobs:
           SHA: ${{ inputs.sha }}
           RUN_URL: ${{ steps.verify.outputs.url }}
           RELEASED_AT: ${{ inputs.released_at }}
+          ENVIRONMENT: ${{ inputs.environment }}
         run: |
           mkdir "$RUNNER_TEMP/release"
-          python scripts/tiden_ci.py release --directory "$RUNNER_TEMP/release" --environment production \
+          python scripts/tiden_ci.py release --directory "$RUNNER_TEMP/release" --environment "$ENVIRONMENT" \
             --sha "$SHA" --url "$RUN_URL" --released-at "$RELEASED_AT"
       - name: Retain the release receipt
         if: ${{ always() }}

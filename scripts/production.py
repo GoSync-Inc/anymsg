@@ -353,7 +353,7 @@ def build_image(source, sha, target):
         if ((built.get("Labels") or {}).get("org.opencontainers.image.revision") != sha
                 or "DEEDKIT_SOURCE_SHA=" + sha not in (built.get("Env") or [])):
             raise Refused("built image does not name the candidate source revision")
-    name =f"deedkit-smoke-{target}-{uuid.uuid4().hex[:12]}"
+    name = f"deedkit-smoke-{target}-{uuid.uuid4().hex[:12]}"
     try:
         isolated = ["docker", "run", "--name", name, "--rm", "--network", "none", "--read-only", "--cap-drop", "ALL",
                     "--security-opt", "no-new-privileges", "--entrypoint"]
