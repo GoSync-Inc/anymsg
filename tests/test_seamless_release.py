@@ -779,40 +779,44 @@ def test_promotion_preserves_every_fenced_issuer_tombstone(tmp_path, monkeypatch
     assert persisted['generations'][old_generation]['admit_files'] is False
 
 
+
 def test_prepare_after_plan_a_reuses_its_images_for_the_schema_probe(tmp_path, monkeypatch):
     from tests.test_production import ImageStore
+    monkeypatch.setattr(s.p, 'IMAGE_LOCK', tmp_path / 'absent' / 'image-build.lock')
     cfg = settings(tmp_path)
     release = Path(cfg['state_directory']) / SHA
     release.mkdir()
+    store = ImageStore()
+    probed = []
+    def run(command, **kwargs):
+        if command[:2] == ['docker', 'compose']:
+            return json.dumps(s.p.read(command[command.index('-f')+1])).replace('$$', '$')
+        result = store.run(command, **kwargs)  # a missing image fails like Docker: "No such image"
+        if s.SCHEMA_READER in command:
+            probed.append(command[command.index('--entrypoint') + 2])
+            return json.dumps({'schema.sql': '1'*64, 'migrations/002_archive.sql': '2'*64})
+        return result
+    monkeypatch.setattr(s.p, 'run', run)
+    # Plan A (production.py prepare and apply) builds both HTTP images; its containers run on them.
+    plan_a = {target: s.p.build_image(tmp_path, SHA, target) for target in ('runtime', 'gateway')}
     docs = documents(cfg)
     baseline = []
     for project in cfg['projects']:
         name = project['name']
+        service, target = next(iter(project['services'].items()))
         s.p.write(release / (name+'.json'), s.p.escaped(docs[name]))
-        baseline.append({'name': name, 'before_digest': s.p.digest(docs[name]), 'running': {next(iter(project['services'])): {'container': 'plan-a-'+name, 'image': OLD}}})
-    store = ImageStore()
-    store.images[OLD] = {'Id': OLD}  # the image the running baseline uses
-    def run(command, **kwargs):
-        if command[:2] == ['docker', 'compose']:
-            return json.dumps(s.p.read(command[command.index('-f')+1])).replace('$$', '$')
-        return store.run(command, **kwargs)
-    monkeypatch.setattr(s.p, 'run', run)
-    # Plan A (production.py prepare) builds both HTTP images first; seamless preparation then builds the same targets.
-    plan_a = {target: s.p.build_image(tmp_path, SHA, target) for target in ('runtime', 'gateway')}
+        baseline.append({'name': name, 'before_digest': s.p.digest(docs[name]),
+                         'running': {service: {'container': 'plan-a-'+name, 'image': plan_a[target]}}})
+    # Seamless preparation then builds the same targets through production.py.
     monkeypatch.setattr(s.p, 'prepare', lambda *a: {'images': {target: s.p.build_image(tmp_path, SHA, target) for target in ('runtime', 'gateway')},
                                                      'projects': baseline, 'ci': {'sha': SHA}})
     live = s.route_document(cfg)
     s.p.write(Path(cfg['http_release']['router']['config_file']), live)
     monkeypatch.setattr(s, 'router_identity', lambda *a: None)
     monkeypatch.setattr(s, 'router_get', lambda *a: (live, '"etag"'))
-    probed = []
-    def schema(image):
-        assert image in store.images, 'the schema probe must use an image that still exists'
-        probed.append(image)
-        return {'schema.sql': '1'*64, 'migrations/002_archive.sql': '2'*64}
-    monkeypatch.setattr(s, 'schema_inventory', schema)
     monkeypatch.setattr(s.p, 'verify', lambda *a: {'sha': SHA})
     assert s.prepare(cfg, SHA)['images'] == plan_a
     assert len(store.built()) == 2 and set(plan_a.values()) <= set(store.images)
-    assert probed and set(probed) <= {plan_a['runtime'], OLD}
+    # The receipt schema, the candidate and the running plan A API image are all probed, on plan A's image.
+    assert probed == [plan_a['runtime']] * 3
     assert s.p.read(release / 'http-prepared.json')['images'] == plan_a

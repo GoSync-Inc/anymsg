@@ -590,6 +590,7 @@ def test_apply_still_accepts_prepared_images_built_before_the_source_revision(tm
     assert p.apply(settings, SHA)["status"] == "applied"
 
 
+
 class ImageStore:
     """Synthetic Docker image store: a tag names one image; a rebuild moves the tag and drops the old image."""
 
@@ -599,8 +600,12 @@ class ImageStore:
         self.calls = []
 
     @staticmethod
-    def image(seed, *, revision=SHA, source=SHA):
-        return {"Id": "sha256:" + seed * 64, "Config": {"Labels": {"org.opencontainers.image.revision": revision},
+    def image(seed, target="runtime", *, revision=SHA, source=SHA, labels=None):
+        """An image as production.py builds it for `target`, unless `labels` overrides its labels."""
+        value = {"org.opencontainers.image.revision": revision,
+                 "org.opencontainers.image.source": "https://github.com/" + p.REPOSITORY,
+                 "io.deedkit.production.build": p.build_recipe(target, revision)[1]}
+        return {"Id": "sha256:" + seed * 64, "Config": {"Labels": value if labels is None else labels,
                                                        "Env": ["PATH=/usr/local/bin", "DEEDKIT_SOURCE_SHA=" + source]}}
 
     def run(self, argv, **kwargs):
@@ -609,25 +614,31 @@ class ImageStore:
             return self.tags[argv[-1]]["Id"] + "\n" if argv[-1] in self.tags else ""
         if argv[:2] == ["docker", "build"]:
             tag = argv[argv.index("--tag") + 1]
-            sha = argv[argv.index("--label") + 1].split("=", 1)[1]
-            fresh = self.image("f", revision=sha, source=sha)
-            fresh["Id"] = "sha256:" + format(len(self.calls), "x").rjust(64, "f")
+            labels = dict(argv[i + 1].split("=", 1) for i, value in enumerate(argv) if value == "--label")
+            env = [argv[i + 1] for i, value in enumerate(argv) if value == "--build-arg" and argv[i + 1].startswith("DEEDKIT_")]
+            fresh = {"Id": "sha256:" + format(len(self.calls), "x").rjust(64, "f"), "Config": {"Labels": labels, "Env": env}}
             self.images.pop(self.tags.get(tag, {}).get("Id"), None)
             self.tags[tag] = self.images[fresh["Id"]] = fresh
             return ""
         if argv[:3] == ["docker", "image", "inspect"]:
-            reference = argv[-1]
-            value = self.tags.get(reference) or self.images[reference]
+            value = self.tags.get(argv[-1]) or self.images[argv[-1]]
             return value["Id"] if "--format" in argv else json.dumps([value])
+        if argv[:2] == ["docker", "run"] and not any(image in argv for image in self.images):
+            raise p.Refused("docker failed (exit 125)")  # No such image
         return ""
 
     def built(self):
         return [call for call in self.calls if call[:2] == ["docker", "build"]]
 
 
+@pytest.fixture
+def no_host_lock(tmp_path, monkeypatch):
+    monkeypatch.setattr(p, "IMAGE_LOCK", tmp_path / "absent" / "image-build.lock")
+
+
 @pytest.mark.parametrize("target", sorted(p.BUILDS))
-def test_existing_tag_naming_the_revision_is_reused_without_a_rebuild(tmp_path, monkeypatch, target):
-    existing = ImageStore.image("e")
+def test_existing_tag_naming_the_revision_is_reused_without_a_rebuild(tmp_path, monkeypatch, no_host_lock, target):
+    existing = ImageStore.image("e", target)
     store = ImageStore({f"deedkit-production-{target}:{SHA}": existing})
     monkeypatch.setattr(p, "run", store.run)
     assert p.build_image(tmp_path, SHA, target) == existing["Id"]
@@ -638,13 +649,13 @@ def test_existing_tag_naming_the_revision_is_reused_without_a_rebuild(tmp_path, 
 
 @pytest.mark.parametrize("target, existing", [
     ("runtime", ImageStore.image("e", revision="c" * 40, source="c" * 40)),
-    ("gateway", ImageStore.image("e", revision="c" * 40)),
+    ("gateway", ImageStore.image("e", "gateway", revision="c" * 40)),
     # An image of this revision built before DEEDKIT_SOURCE_SHA existed, or naming another source.
     ("runtime", {"Id": "sha256:" + "e" * 64, "Config": {"Labels": {"org.opencontainers.image.revision": SHA}}}),
-    ("backup", ImageStore.image("e", source="c" * 40)),
+    ("backup", ImageStore.image("e", "backup", source="c" * 40)),
 ])
-def test_existing_tag_that_does_not_name_the_revision_is_refused_without_a_rebuild(tmp_path, monkeypatch, target,
-                                                                                    existing):
+def test_existing_tag_that_does_not_name_the_revision_is_refused_without_a_rebuild(tmp_path, monkeypatch, no_host_lock,
+                                                                                    target, existing):
     tag = f"deedkit-production-{target}:{SHA}"
     store = ImageStore({tag: existing})
     monkeypatch.setattr(p, "run", store.run)
@@ -655,7 +666,30 @@ def test_existing_tag_that_does_not_name_the_revision_is_refused_without_a_rebui
     assert not any(call[:2] == ["docker", "run"] for call in store.calls)
 
 
-def test_ambiguous_existing_tag_is_refused_without_a_rebuild(tmp_path, monkeypatch):
+def recipe_labels(target, **change):
+    labels = ImageStore.image("e", target)["Config"]["Labels"]
+    return {key: value for key, value in {**labels, **change}.items() if value is not None}
+
+
+@pytest.mark.parametrize("target, labels", [
+    # Built by another tool or for another target, stage or build arguments, or from another source.
+    ("gateway", recipe_labels("gateway", **{"io.deedkit.production.build": None})),
+    ("runtime", recipe_labels("runtime", **{"io.deedkit.production.build": p.build_recipe("indexer", SHA)[1]})),
+    ("calendar", recipe_labels("calendar", **{"io.deedkit.production.build": "0" * 64})),
+    ("http-router", recipe_labels("http-router", **{"org.opencontainers.image.source": None})),
+])
+def test_existing_tag_from_another_build_recipe_is_refused_without_a_rebuild(tmp_path, monkeypatch, no_host_lock,
+                                                                             target, labels):
+    tag = f"deedkit-production-{target}:{SHA}"
+    existing = ImageStore.image("e", target, labels=labels)
+    store = ImageStore({tag: existing})
+    monkeypatch.setattr(p, "run", store.run)
+    with pytest.raises(p.Refused, match="does not name the candidate"):
+        p.build_image(tmp_path, SHA, target)
+    assert store.built() == [] and store.tags[tag] is existing
+
+
+def test_ambiguous_existing_tag_is_refused_without_a_rebuild(tmp_path, monkeypatch, no_host_lock):
     store = ImageStore()
     def listing(argv, **kwargs):
         if argv[:3] == ["docker", "image", "ls"]:
@@ -667,9 +701,48 @@ def test_ambiguous_existing_tag_is_refused_without_a_rebuild(tmp_path, monkeypat
     assert store.built() == []
 
 
-def test_second_preparation_of_a_revision_keeps_the_image_the_first_one_built(tmp_path, monkeypatch):
+@pytest.mark.parametrize("target", sorted(p.BUILDS))
+def test_second_preparation_of_a_revision_keeps_the_image_the_first_one_built(tmp_path, monkeypatch, no_host_lock, target):
     store = ImageStore()
     monkeypatch.setattr(p, "run", store.run)
-    first = p.build_image(tmp_path, SHA, "runtime")
-    assert p.build_image(tmp_path, SHA, "runtime") == first
+    first = p.build_image(tmp_path, SHA, target)
+    assert p.build_image(tmp_path, SHA, target) == first
     assert len(store.built()) == 1 and first in store.images
+
+
+def test_image_lookup_and_build_hold_the_host_image_lock(tmp_path, monkeypatch):
+    import fcntl
+    monkeypatch.setattr(p, "IMAGE_LOCK", tmp_path / "image-build.lock")
+    store = ImageStore()
+    held = []
+    def run(argv, **kwargs):
+        if argv[:2] == ["docker", "build"] or argv[:3] == ["docker", "image", "ls"]:
+            with (tmp_path / "image-build.lock").open("a") as probe:
+                try:
+                    fcntl.flock(probe, fcntl.LOCK_EX | fcntl.LOCK_NB)
+                    held.append(False)
+                except BlockingIOError:
+                    held.append(True)
+        return store.run(argv, **kwargs)
+    monkeypatch.setattr(p, "run", run)
+    p.build_image(tmp_path, SHA, "runtime")
+    assert held == [True, True]
+    # A concurrent preparation (another tool or state directory) is refused before its lookup.
+    with (tmp_path / "image-build.lock").open("a") as other:
+        fcntl.flock(other, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        calls = len(store.calls)
+        with pytest.raises(p.Refused, match="image lock"):
+            p.build_image(tmp_path, "c" * 40, "runtime")
+        assert len(store.calls) == calls
+
+
+def test_container_check_builds_the_working_tree_without_touching_production_tags(tmp_path, monkeypatch, no_host_lock):
+    production = ImageStore.image("e")
+    store = ImageStore({f"deedkit-production-runtime:{SHA}": production})
+    monkeypatch.setattr(p, "run", store.run)
+    checked = p.build_image(tmp_path, SHA, "runtime", check=True)
+    assert checked != production["Id"] and store.tags[f"deedkit-production-runtime:{SHA}"] is production
+    assert [call[call.index("--tag") + 1] for call in store.built()] == [f"deedkit-check-runtime:{SHA}"]
+    assert not any(call[:3] == ["docker", "image", "ls"] for call in store.calls)
+    p.build_image(tmp_path, SHA, "runtime", check=True)
+    assert len(store.built()) == 2
