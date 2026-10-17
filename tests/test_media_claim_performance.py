@@ -377,3 +377,20 @@ def test_concurrent_claims_do_not_repeat_a_due_sweep(backlog):
         with ar._media_sweep('archive-other') as due:
             assert due; raise RuntimeError('rolled_back')
     with ar._media_sweep('archive-other') as due: assert due
+
+
+def test_exhausted_lease_is_marked_within_one_interval_and_one_claim_cycle(backlog, monkeypatch):
+    ar,s,claim,_=backlog
+    cycle=1.3  # the collector's 1 s idle sleep plus claim time
+    clock=[1000.0]; monkeypatch.setattr(archive_module,'monotonic',lambda:clock[0])
+    assert claim() is None
+    # Worst case: the lease expires right after a sweep.
+    exhausted,*_=housekeeping(ar,s); expired_at=clock[0]
+    while True:
+        clock[0]+=cycle
+        assert claim() is None
+        with s.pool.connection() as c:
+            state=c.execute('SELECT state FROM media_jobs WHERE message=%s',(exhausted,)).fetchone()['state']
+        if state=='failed': break
+        assert clock[0]-expired_at<archive_module.MEDIA_SWEEP_SECONDS
+    assert clock[0]-expired_at<=archive_module.MEDIA_SWEEP_SECONDS+cycle
