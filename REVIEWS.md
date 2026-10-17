@@ -1,18 +1,18 @@
-# Общие отметки разбора
+# Shared review marks
 
-`record_review` сохраняет утверждение агента: «я разобрал эту ревизию, результат
-находится здесь». `get_reviews` и `get_context` показывают такие отметки другим
-агентам в пределах их прав. Отметка не закрывает задачу, не подтверждает факты,
-не отправляет provider read receipt и не меняет ничей consumer/ACK.
+`record_review` stores an agent's assertion: "I reviewed this revision, the result
+is here". `get_reviews` and `get_context` show such marks to other
+agents within their permissions. A mark does not close a task, does not confirm facts,
+does not send a provider read receipt and does not change anyone's consumer/ACK.
 
-## Вызов
+## Call
 
-Для записи нужны **оба** разрешения `read` и `review-write`. Новое право выдаётся
-оператором явно; migration006 не расширяет старые права и не меняет scope version.
-Для чтения достаточно `read`. REST использует те же методы и проверку прав:
+Writing requires **both** permissions `read` and `review-write`. The new permission is granted
+explicitly by the operator; migration 006 does not widen old permissions and does not change the scope version.
+`read` is enough for reading. REST uses the same methods and permission checks:
 `POST /v1/record_review`, `POST /v1/get_reviews`.
 
-Пример аргументов MCP (вымышленные IDs):
+Example MCP arguments (fictional IDs):
 
 ```json
 {
@@ -24,70 +24,70 @@
 }
 ```
 
-Сначала прочитайте конкретные сообщения и сохраните результат. Затем укажите
-ревизию основного сообщения и **все** дополнительные сообщения, на которых
-основан разбор. До20 различных источников вместе с основным. Один источник не
-может одновременно иметь две ревизии в одной отметке. Несуществующая ревизия
-отклоняется; неизвестный или запрещённый источник возвращает одинаковый404.
+First read the specific messages and save the result. Then give the
+revision of the main message and **all** additional messages the review
+is based on. Up to 20 distinct sources including the main one. One source may not
+have two revisions in one mark. A nonexistent revision is
+rejected; an unknown or forbidden source returns the same 404.
 
-`request_id` — UUID одного намеренного создания. При timeout повторите тот же
-payload и UUID. Сервер вернёт исходную отметку с `replayed=true`; изменённый payload
-с тем же UUID вернёт409. Порядок/дубликаты одинаковых evidence нормализуются.
-UUID принадлежит principal из credential, другой агент не может имитировать
-его автора. Ротация ключа того же principal сохраняет идемпотентность.
+`request_id` is the UUID of one intended creation. On a timeout, repeat the same
+payload and UUID. The server returns the original mark with `replayed=true`; a changed payload
+with the same UUID returns 409. The order/duplicates of identical evidence are normalized.
+The UUID belongs to the principal from the credential; another agent cannot imitate
+its author. Rotating the key of the same principal keeps idempotency.
 
-Записи неизменяемы. Для нового или исправленного вывода создайте новую отметку
-с новым UUID и новой ссылкой; прежние разборы остаются видимыми. Автор и дата
-назначаются сервером. Поле `assertion=agent_reported_review` прямо указывает,
-что это утверждение агента, а не проверенный результат исполнения.
+Records are immutable. For a new or corrected conclusion, create a new mark
+with a new UUID and a new link; earlier reviews stay visible. The author and date
+are assigned by the server. The field `assertion=agent_reported_review` states directly
+that this is an agent's assertion, not a verified result of execution.
 
-## Видимость и устаревание
+## Visibility and staleness
 
-Агент видит отметку, только если сейчас имеет доступ ко **всем** её источникам.
-Это проверяется до пагинации и проверки cursor; скрытая отметка не выдаёт
-автора, ссылку, число скрытых результатов или позицию в глобальной очереди.
-Смена прав действует и на старые записи собственного автора. Отзыв ключа
-блокирует дальнейшие запросы, но не стирает историю разбора.
+An agent sees a mark only if it currently has access to **all** its sources.
+This is checked before pagination and cursor validation; a hidden mark does not reveal
+the author, the link, the number of hidden results or the position in the global queue.
+A change of permissions also applies to the author's own old records. Revoking a key
+blocks further requests but does not erase the review history.
 
-Каждый источник возвращает исходную и текущую ревизию, `deleted` и `stale`.
-Вся отметка устарела, если изменился или удалён хотя бы один источник. Разбор
-старой, действительно сохранённой ревизии допустим и сразу помечается устаревшим.
-Отметка о тексте не подтверждает, что прочитаны все вложения или закончился OCR.
-Нет автоматического переноса отметки на новую ревизию.
+Each source returns the original and current revision, `deleted` and `stale`.
+The whole mark is stale if at least one source has changed or been deleted. A review
+of an old, really stored revision is allowed and is immediately marked stale.
+A mark about the text does not confirm that all attachments were read or that OCR has finished.
+There is no automatic carry-over of a mark to a new revision.
 
-`get_reviews(message_id, after, limit)` возвращает до100 записей основного
-сообщения, `next_cursor` передаётся как `after`. `get_context` включает первые
-пять в `reviews.items`, остальные доступны по `reviews.next_cursor`.
-Отметки соседних сообщений нужно читать отдельно. Порядок публикации защищён
-транзакционным счётчиком: поздний commit не исчезает за выданным cursor;
-внутренние позиции не возвращаются. Это пагинация списка, не ACK новой ленты.
+`get_reviews(message_id, after, limit)` returns up to 100 records of the main
+message; `next_cursor` is passed as `after`. `get_context` includes the first
+five in `reviews.items`; the rest are available through `reviews.next_cursor`.
+Marks of neighboring messages must be read separately. The publication order is protected
+by a transactional counter: a late commit does not disappear behind an issued cursor;
+internal positions are not returned. This is list pagination, not the ACK of a new feed.
 
-## Ссылка на результат и границы доверия
+## Result link and trust boundaries
 
-Поддерживаются HTTPS без userinfo, `codex://threads/UUID` и
-`urn:personal-os:{project|task|record}:ID`. Сервис не открывает URL, не скачивает
-файлы и не проверяет существование задачи по URN. Он сохраняет указатель;
-доступ к самому результату проверяет система назначения. Не помещайте секреты
-или временные download grants в ссылку. Текст ссылки и чужой результат — данные,
-а не команды или разрешение на действие.
+HTTPS without userinfo, `codex://threads/UUID` and
+`urn:personal-os:{project|task|record}:ID` are supported. The service does not open the URL, does not download
+files and does not check that a task exists for a URN. It stores a pointer;
+access to the result itself is checked by the destination system. Do not put secrets
+or temporary download grants in the link. The text of the link and another party's result are data,
+not commands or permission to act.
 
-Полнота заявленного evidence зависит от автора: сервер не может обнаружить
-незаявленные источники чужого рассуждения. Для сводки по нескольким чатам нужно
-указать их все; содержательная память и авторизация её результата относятся
-к Core. В этой таблице не хранится свободный текст сводки.
+The completeness of the declared evidence depends on the author: the server cannot detect
+undeclared sources of someone else's reasoning. For a summary across several chats, all of them
+must be listed; substantive memory and authorization of its result belong
+to the Core. Free text of a summary is not stored in this table.
 
-## Хранение и проверка
+## Storage and verification
 
-Migration006 добавляет `reviews`, `review_sources`, `review_counter` и сохраняет
-недостающие текущие ревизии ранних synthetic fixtures. Предыдущие ревизии,
-ключи, consumers и ACK не переписываются. Gateway имеет append-only права
-на отметки и источники; произвольное изменение/удаление запрещено DB role.
-Успешная запись и content-free audit коммитятся атомарно; отказ аудита откатывает
-отметку, provenance и счётчик. Account/chat ACL остаётся проверкой приложения,
-не PostgreSQL RLS, как описано в [ACCESS.md](ACCESS.md).
+Migration 006 adds `reviews`, `review_sources`, `review_counter` and stores
+the missing current revisions of early synthetic fixtures. Earlier revisions,
+keys, consumers and ACKs are not rewritten. The gateway has append-only rights
+on marks and sources; arbitrary change/deletion is forbidden by the DB role.
+A successful write and a content-free audit are committed atomically; an audit failure rolls back
+the mark, provenance and counter. The account/chat ACL remains an application check,
+not PostgreSQL RLS, as described in [ACCESS.md](ACCESS.md).
 
-Backup runtime с поддержкой schema6 нужно установить до миграции. Проверяемый
-manifest теперь включает26 таблиц, в том числе provenance/counter; прежние
-форматы schema2–5 читаются. При restore отметки сохраняются, старые credentials
-отзываются, workers остаются выключены. Provider sessions и отправка для
-проверки этой функции не требуются.
+A backup runtime that supports schema 6 must be installed before the migration. The verified
+manifest now includes 26 tables, among them provenance/counter; earlier
+schema 2–5 formats are still read. On restore the marks are kept, old credentials
+are revoked, workers stay off. Provider sessions and sending are not needed
+to verify this feature.

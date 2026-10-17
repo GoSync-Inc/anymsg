@@ -1,28 +1,28 @@
-# Поиск людей
+# People search
 
-`search_people(query, accounts, chats, after, limit)` ищет по наблюдённому имени,
-username (с `@` или без) и provider sender ID. Поиск нечувствителен к регистру,
-сопоставляет буквальный фрагмент; `%` и `_` не являются шаблонами. Для фрагментов
-от трёх символов используется PostgreSQL trigram GIN. Лимит страницы —100.
+`search_people(query, accounts, chats, after, limit)` searches by observed name,
+username (with or without `@`) and provider sender ID. The search is case-insensitive
+and matches a literal fragment; `%` and `_` are not wildcards. For fragments
+of three or more characters a PostgreSQL trigram GIN is used. The page limit is 100.
 
-Результат содержит `account`, `chat`, `sender_id`, `display_name`, `username`,
-`source_message`, дату сообщения и время наблюдения. Один отправитель может
-встречаться в нескольких чатах отдельными строками. Это подсказки провайдера,
-не подтверждение личности; одинаковые имена/ID разных аккаунтов не объединяются.
+The result contains `account`, `chat`, `sender_id`, `display_name`, `username`,
+`source_message`, the message date and the observation time. One sender may
+appear in several chats as separate rows. These are provider hints,
+not confirmation of identity; identical names/IDs of different accounts are not merged.
 
-Для следующего шага передайте `account` + `sender_id` в `search` (при необходимости
-также `chat`), либо `source_message` в `get_context`. `next_cursor` используется
-как `after`. Права account/chat/read проверяются при каждом вызове, включая cursor.
-Имя из закрытого чата не попадает в выдачу открытого. Если сообщение-источник
-имени удалено, соответствующее наблюдение скрывается до следующего подходящего.
+For the next step, pass `account` + `sender_id` to `search` (also `chat` if needed),
+or `source_message` to `get_context`. `next_cursor` is used
+as `after`. Account/chat/read permissions are checked on every call, including the cursor.
+A name from a closed chat does not appear in the results of an open one. If the message that was the source
+of a name is deleted, the corresponding observation is hidden until the next suitable one.
 
-Telegram использует cached sender entity из полученного сообщения, WhatsApp —
-имя из payload сообщения, если оно доступно. Capture не делает дополнительного
-сетевого lookup и не импортирует всю адресную книгу. Поэтому старые записи без
-этих метаданных, неизвестные usernames или недоступные контакты не находятся по
-имени; используйте точный sender ID в `search`. Проверка полноты каталога на
-рабочих аккаунтах остаётся частью живой приёмки.
+Telegram uses the cached sender entity from the received message, WhatsApp uses the
+name from the message payload, if available. Capture makes no extra
+network lookup and does not import the whole address book. Therefore old records without
+this metadata, unknown usernames or unavailable contacts cannot be found by
+name; use the exact sender ID in `search`. Checking the completeness of the catalog on
+working accounts remains part of live acceptance.
 
-Обновление имени не создаёт новую ревизию текста сообщения. Старый backfill,
-конфликтующее событие или удаление не заменяют последнее наблюдение имени.
-Операция читает архив без provider read receipts и без продвижения agent ACK.
+A name update does not create a new revision of the message text. An old backfill,
+a conflicting event or a deletion does not replace the latest name observation.
+The operation reads the archive without provider read receipts and without advancing the agent ACK.
