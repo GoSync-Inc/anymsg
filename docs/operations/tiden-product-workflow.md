@@ -46,14 +46,7 @@ stories describe independently reviewable behavior with acceptance criteria.
 Use existing parents/components and stable identities. Keep operational acceptance
 separate when merged source cannot establish the property of a real installation.
 
-Every queued item must record:
-
-- Desired behavior and concrete acceptance criteria.
-- The boundary already implemented and the remaining work.
-- Priority, dependencies, and whether the item is committed, conditional or a
-  decision requiring triage.
-- Historical `DK-*` identity, related specs, source/PR links and an as-of revision.
-- Evidence needed to close it, including any separately authorized live action.
+Every queued item follows the card template under Card intake.
 
 `High`, `Medium`, `Low` retain the old P1, P2, P3 ordering. Optional work stays
 explicitly conditional; importing it does not authorize provider mutations,
@@ -80,6 +73,51 @@ release scope and actual evidence, separately from this whole-product plan.
 An old `Active` baseline is not evidence of a currently running task. Do not
 mass-convert legacy statuses without reviewing both implementation and how the
 server includes that status in traceability/gates.
+
+## Card intake
+
+New work reaches Tiden from four sources: the owner; agent feedback recorded
+through DeedKit `submit_feedback` (read with `list_feedback`, SUBSCRIPTIONS.md);
+production issue triage (`triage-issues`); and audits. A worker that finds work
+outside its task reports it to the orchestrator instead of starting it.
+
+1. **Triage.** Search Tiden main and open branches (`product-context`,
+   `tiden spec list`). A match, merged or not, is updated rather than duplicated.
+   Decide whether the work is worth doing; a declined candidate gets its reason at
+   its source and no card.
+2. **Write.** Opus or Fable at high effort writes the card from the template
+   below: on a proposal branch for a future-only requirement, on main for a
+   current defect (Current truth and future proposals).
+3. **Review.** Astra and Fable review every new card and every spec edit
+   (`AGENTS.md`); the card text goes to them as a file.
+4. **Accept.** The owner accepts the card, or the orchestrator does so relaying
+   the owner's quoted words. Record it on the card.
+5. **Queue.** Accepted cards with a lane and expected paths form the ready queue,
+   ordered by Score, highest first. A current breakage (a defect or an unresolved
+   production incident) and a hard deadline go ahead of the order. Deferred work
+   stays on main as planned `Backlog` work: it is not cancelled, moved or copied.
+
+```text
+Title: <plain words: what changes for the owner>
+Problem: <what is wrong or missing today and the desired behavior; evidence, source>
+Acceptance criteria:
+- <observable, testable criterion>
+Kind: defect | feature | operational acceptance | chore
+Lane: <lane>   Expected paths: <paths>
+Depends on: <ANYM-n, or none>
+Commitment: committed | conditional | needs a triage decision
+Boundary: <what is already implemented; what remains>
+Evidence to close: <tests and checks; any separately authorized live action>
+Value: <1|2|3|5|8>   Effort: <1|2|3|5|8>   Score: <Value / Effort, two decimals>
+History: <DK-* identity, related specs, source/PR links, as-of SHA>
+How others solve it: <concrete open-source projects or standards; adopt | adapt | build, and why>
+Research: <large items only, by the research rule in AGENTS.md>
+Accepted: <date>, <owner | orchestrator relaying the owner>
+```
+
+Value is the benefit to the owner. Effort is agent work: 1 is about an hour, 3
+about a day, 8 a week or more. Tiden's priority field keeps its meaning (High,
+Medium, Low) and still raises review levels; the queue order comes from Score.
 
 ## Working loop
 
@@ -169,10 +207,18 @@ display text can use DeedKit immediately.
    (TIDEN-CI.md). Never rename old
    tests or the seven `anymsg-ci::*` checks. Review assertions before proposing
    links: even an exact source-file match does not prove a whole specification.
+   Build the `Spec impact:` list (`AGENTS.md`): match
+   `git diff --name-only <merge-base>..HEAD` against the `repo_file` anchors in
+   `tiden spec list --branch main --include-sources --format json`, let an anchor
+   from before the move into `services/messaging/` match without that prefix,
+   leave out the `BACKLOG.md` hub, and add the session delta from
+   `tiden intent progress`. A delta spec cannot be dropped from the session;
+   `tiden intent radius drop` with a reason is for radius specs outside the delta.
 5. Review the Tiden merge preview, conflicts and link proposals. Record a Git PR
    and Tiden branch together. A closed intent session or merged Git PR does not
-   merge its Tiden branch. Merge reviewed spec changes under the review levels in
-   `AGENTS.md`; never blanket-merge unrelated open branches.
+   merge its Tiden branch: merge both in the same step. Merge reviewed spec
+   changes under the review levels in `AGENTS.md`; never blanket-merge unrelated
+   open branches.
 6. Read back actual Tiden main IDs, sources, links, gate and GitHub drift after
    merging. A green branch projection is not a main result. `no_test`, `not_run`
    and failed executions remain visible. Do not create passing evidence or
@@ -209,11 +255,15 @@ merge. This is explicit provenance preservation, not permission to drop metadata
 or to change specification, test or accepted-link identities. Do not overwrite
 an existing provenance receipt during later updates.
 
-Drift compares Git main with a reviewed spec-sync watermark. Advance it only
-through a genuinely reviewed synchronization covering the named revision range;
-do not use an empty sync/bootstrap to dismiss behavioral changes. A new commit
-after the audited target is fresh drift, not a reason to claim the old review
-covered it.
+Drift compares Git main with a reviewed spec-sync watermark. Re-anchoring, PR
+links and component changes are bookkeeping, not verification: they do not make
+spec text current. Advance the watermark (`tiden drift advance`) only after a
+delta audit has checked every spec anchored to files changed since the previous
+watermark against the code, and its edits are merged on Tiden main; never use
+`empty_sync` or `bootstrap` to clear a delta that was not audited. Record the
+audited SHA, the spec count and the findings in the audit artifact, outside Git.
+A new commit after the audited target is fresh drift, not a reason to claim the
+old review covered it.
 
 Useful read-only commands (pass the existing product/workspace explicitly when
 the worktree is not bound):
