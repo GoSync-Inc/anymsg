@@ -92,6 +92,36 @@ through the main push run. Each queue run has its own concurrency group and
 cancels no other run. Queue runs take their workflow files from the group commit,
 so review workflow changes in a fork's pull request before queuing it.
 
+The queue run is the authoritative test run of a merged SHA; the main push run
+of that SHA validates and publishes it instead of testing the commit again
+(ANYM-322). Its first job, `Reuse the merge queue verification`, the only CI job
+with `actions: read`, finds the latest merge queue run of the exact commit by the
+rules `production.py verify` applies (ANYM-321), waits up to five minutes for it
+to complete, and pins its latest attempt and the one `ci-evidence` artifact
+created during that attempt. Without them, or on any lookup error, the push run
+verifies in full. After that choice the job downloads the pinned artifact by ID
+and digest as data, extracts exactly the expected files within size limits, and
+validates them: every SHA field names the commit, the pinned attempt of a main
+queue run assembled the evidence, all thirteen checks passed, and every report
+holds passing executions that match the recorded counts. It reads the queue run
+and the artifact again, then uploads the evidence unchanged as this run's
+`ci-evidence` with a `publication.json` record that names this push run as
+publisher and the queue run attempt and artifact as producer. A failure there
+fails the push run: `checks` is skipped and `CI gate` turns red. On a validated
+reuse `checks / verify`, `checks / load` and `checks / evidence` are skipped;
+`native / synthetic`, the image builds, `publish` and the release record run as on
+every push. `CI gate` accepts a skipped `checks / verify` only for a validated
+reuse of this commit; otherwise `checks / verify` must have tested this commit.
+`tiden_ci.py publish` and `release` accept the record only when it names their
+own job's repository, run, attempt and commit. The Tiden run on `main`, its
+thirteen check row IDs and the release then carry this push run's attempt URL,
+with `tested_in`, also kept in the route receipt, naming the queue run attempt,
+while executions and outcomes stay the queue run's. Queue evidence without a valid record still publishes and
+records nothing. After a reuse, rerun a failed `checks / tiden` or `Tiden release
+record` with **Re-run all jobs**: a partial rerun has an attempt the record does
+not name. Validating the artifact does not replace reviewing a fork's workflow
+changes before queuing.
+
 For an explicit baseline rerun, dispatch `CI` on the reporting-code branch with
 `source_ref` set to the exact source revision and `tiden_branch` to the matching
 existing spec branch. The checkout SHA, rather than the workflow SHA, is recorded.

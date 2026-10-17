@@ -533,12 +533,18 @@ def test_ci_reports_required_checks_for_merge_queue_runs_without_cancelling_them
     trigger = ci.get("on", ci.get(True))
     assert "merge_group" in trigger and trigger["push"] == {"branches": ["main"]}
     assert "pull_request" in trigger and "workflow_dispatch" in trigger
-    # The required `CI gate` and `checks / verify` run for every trigger, the queue included.
+    # The required `CI gate` runs for every trigger, the queue included, and so does `checks / verify`, except
+    # on a main push whose reuse job validated the merge queue's verification of that commit (ANYM-322).
     assert ci["jobs"]["gate"]["name"] == "CI gate" and ci["jobs"]["gate"]["if"] == "${{ always() }}"
-    assert set(ci["jobs"]["gate"]["needs"]) == {"checks", "native", "images"}
+    assert set(ci["jobs"]["gate"]["needs"]) == {"reuse", "checks", "native", "images"}
     assert ci["jobs"]["checks"]["uses"] == "./.github/workflows/checks.yml"
-    assert not any("if" in ci["jobs"][job] for job in ("checks", "native", "images"))
-    assert "if" not in checks["jobs"]["verify"]
+    assert not any("if" in ci["jobs"][job] for job in ("native", "images"))
+    assert ci["jobs"]["reuse"]["if"] == "github.event_name == 'push' && github.ref == 'refs/heads/main'"
+    assert ci["jobs"]["checks"]["if"] == ("${{ !cancelled() && (needs.reuse.outputs.decision != 'reuse' "
+                                          "|| needs.reuse.result == 'success') }}")
+    assert ci["jobs"]["checks"]["with"]["reuse_queue_evidence"] == "${{ needs.reuse.outputs.decision == 'reuse' }}"
+    assert checks.get("on", checks.get(True))["workflow_call"]["inputs"]["reuse_queue_evidence"]["default"] is False
+    assert checks["jobs"]["verify"]["if"] == "${{ !inputs.reuse_queue_evidence }}"
     step_ids = {step.get("id") for step in checks["jobs"]["verify"]["steps"]}
     assert set(CHECKS) <= step_ids
     # A queue run gets its own group and cancels nothing; so does a main push run.
@@ -1241,19 +1247,21 @@ def test_load_gate_runs_in_its_own_parallel_job_and_every_test_job_gates_the_evi
     jobs = yaml.safe_load((root / ".github/workflows/checks.yml").read_text())["jobs"]
     load = jobs["load"]
     # Its own runner, in parallel with verify, bounded, with the unchanged command and budgets.
-    assert "needs" not in load and "if" not in load and load["timeout-minutes"] == 10
+    # Skipped, like verify, only on a main push that reuses the merge queue's verification (ANYM-322).
+    assert "needs" not in load and load["if"] == jobs["verify"]["if"] == "${{ !inputs.reuse_queue_evidence }}"
+    assert load["timeout-minutes"] == 10
     gate = next(step for step in load["steps"] if step.get("id") == "load")
     assert gate["name"] == "Paired gateway load and isolation budgets" and "if" not in gate
     assert "gateway_read_load.py --config tests/platform/benchmarks/budgets.json" in gate["run"]
     assert all(step.get("id") != "load" for step in jobs["verify"]["steps"])
-    assert set(CHECKS) <= {step.get("id") for step in jobs["verify"]["steps"]} and "if" not in jobs["verify"]
+    assert set(CHECKS) <= {step.get("id") for step in jobs["verify"]["steps"]}
     uploads = {job: next(step for step in jobs[job]["steps"] if step.get("uses", "").startswith("actions/upload-artifact")
                          and step["with"]["name"].startswith("ci-evidence")) for job in ("verify", "load")}
     for job, upload in uploads.items():
         assert upload["with"]["name"] == f"ci-evidence-{job}" and upload["if"] == "${{ always() }}"
         assert upload["with"]["overwrite"] is True
     evidence = jobs["evidence"]
-    assert evidence["needs"] == ["verify", "load"] and evidence["if"] == "${{ always() }}"
+    assert evidence["needs"] == ["verify", "load"] and evidence["if"] == "${{ always() && !inputs.reuse_queue_evidence }}"
     assert jobs["tiden"]["needs"] == "evidence"
     steps = {step.get("name") or step["uses"].split("@")[0]: step for step in evidence["steps"]}
     assert steps["actions/download-artifact"]["with"]["pattern"] == "ci-evidence-*"

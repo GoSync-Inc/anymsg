@@ -134,6 +134,12 @@ at least important (`AGENTS.md`). Prefer splitting it.
 - `main` push runs are never cancelled (`ci.yml` concurrency, since PR #60), so
   every merged SHA keeps a complete result. Promote only a SHA whose own push run
   succeeded.
+- The merge queue run is the authoritative test run of a merged SHA. Its `main`
+  push run validates that run's evidence and publishes it to Tiden instead of
+  running the test suite again, and still builds and publishes the images and
+  records the release; without a valid queue run it verifies in full
+  ([TIDEN-CI.md](../../TIDEN-CI.md), ANYM-322). `production.py verify` accepts the
+  queue's verification only in place of `checks / verify` (ANYM-321).
 - The release owner keeps one release in flight, from prepare to acceptance. The
   host deployment lock only stops two deployment commands from running at once.
 - Release often; the target is several times a day. Once automatic deployment
