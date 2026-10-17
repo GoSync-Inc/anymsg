@@ -921,3 +921,18 @@ def test_after_a_reset_the_newest_push_run_of_the_commit_decides_whether_the_que
             path = path.replace("runs/50/", "runs/20/")
         return response(path, [push, newest_ran])
     assert p.verify(SHA, own)["verify_run_id"] == 50
+
+
+def test_a_truncated_push_job_listing_never_hides_a_failed_required_job():
+    get, _, _ = github()
+    passed = [{"id": n, "name": name, "status": "completed", "conclusion": "success"}
+              for n, name in enumerate(sorted(p.REQUIRED_JOBS))]
+    hidden = {"id": 99, "name": "native / synthetic", "status": "completed", "conclusion": "failure"}
+    for second_page in ([], [hidden]):
+        def response(path, second_page=second_page):
+            if "runs/12/attempts/2/jobs?" in path:
+                total = len(passed) + 1
+                return {"jobs": passed, "total_count": total} if path.endswith("&page=1") else {"jobs": second_page, "total_count": total}
+            return get(path)
+        with pytest.raises(p.Refused):
+            p.verify(SHA, response)
