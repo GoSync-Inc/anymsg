@@ -187,15 +187,54 @@ merged (proposal ANYM-301).
   `production.py verify` refuses that commit, and the Tiden release record waits
   for `publish`. Publishing is not a required check.
 
+- **Secret scan.** Before the archive is kept, each build job scans it with
+  `scripts/scan_image.py` and the gitleaks 8.30.1 binary pinned by SHA-256 as in
+  `security.yml` (ANYM-303). Every layer is written as its own validated
+  `layer-<n>.tar` (layer count and SHA-256 must match the config's `diff_ids`, the
+  tar is read to its end, gzip is decompressed, other encodings are refused) and
+  scanned with the image config (`Env`, labels, history). Nothing is merged or
+  extracted, so a file deleted, overwritten or hidden by a later layer is still
+  scanned: a public image ships every layer. A finding, any other gitleaks error
+  or any gitleaks log line fails the job, so the commit is not published. Each job
+  first scans the committed canary (`tests/fixtures/gitleaks-canary/`) and fails
+  if it is not detected. Supported content: text files in every layer and the
+  config; files gitleaks classifies as binary are not scanned, and archives inside
+  a layer (`.gz`, `.whl`, `.zip`, `.jar`) are not opened. The job log names only the
+  rule, layer, path and line, never the secret.
+- **Scan policy.** The rules are gitleaks 8.30.1's defaults
+  (`config/gitleaks/gitleaks-8.30.1-default.toml`, kept verbatim) in
+  `.gitleaks-images.toml`, without the default global path allowlist that exempts
+  whole trees such as `lib/python3.x` and `node_modules`. The image cannot change
+  the policy: `.gitleaks.toml`, `.gitleaksignore` and inline `gitleaks:allow` in an
+  image are ignored. A false positive in third-party content gets an
+  `[[allowlists]]` entry at the end of `.gitleaks-images.toml` with a `description`
+  naming the package and why the match is not a secret, scoped by `paths` (one
+  file or directory of that package) and `targetRules`; never a whole tree. Such a
+  change is reviewed like any CI change and rebuilds every image.
+
 Owner actions, not performed by agents: the first publication creates the eight
 packages as private, linked to this repository. The owner decided (2026-10-17)
-that they become public and the host gets no GitHub token, so after the first
-publication the owner changes each package's visibility to public once, in the
-package settings on GitHub (an organization owner can do this whatever the
-member package-creation setting allows). Do this only after the image secret scan
-runs in CI (follow-up to ANYM-300). Keep Actions allowed to create
-repository-linked packages in the organization's package settings. Deleting a
-package version is the owner's.
+that they become public and the host gets no GitHub token. Package visibility is
+package-wide, so the owner's one-time cutover is:
+
+1. Let every `main` push run of a commit that does not contain the secret scan
+   finish, and never rerun such a run afterwards: a rerun keeps its original
+   commit and would publish without the scan. CI cannot enforce this.
+2. Keep only image digests whose own publication run scanned them: the tag's
+   commit contains the scan (`git merge-base --is-ancestor <scan merge SHA>
+   <sha40 tag>`) and that run's `Scan every layer ...` step passed. Delete every
+   other version, together with its attestation referrer versions (untagged, or
+   tagged `sha256-<digest>`), and keep the referrers of every kept digest
+   (deleting them breaks attestation verification).
+3. Confirm that the first `main` run after the scan merged published all eight
+   targets with a passing scan, then set each of the eight packages public once
+   in its package settings on GitHub (an organization owner can do this whatever
+   the member package-creation setting allows).
+
+If a pre-scan rerun publishes after the cutover, delete that version and its
+referrers again. Keep Actions allowed to create repository-linked packages in the
+organization's package settings. Deleting a package version or changing its
+visibility is the owner's.
 
 ## Prepare and inspect
 
