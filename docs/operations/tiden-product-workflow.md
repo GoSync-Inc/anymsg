@@ -156,7 +156,8 @@ are size signals only (21 is much larger): such a card becomes a parent (Feature
 or Epic for 21) that keeps the overall estimate, with child Stories of at most 8,
 each an independent increment and one PR. Steps inside a story are the worker's
 plan, not cards. Ready cards are at most 8, and every 8 is checked for a split. Score stays Value / Effort. When a card's work merges,
-the worker records the actual time on the card in hours: intent rounds from
+the worker records the actual time on the card in hours, as one total from
+first start to merge (the parts overlap; never sum them), with the parts: intent rounds from
 `tiden intent journal --format json` (StartedAt to ClosedAt) and the PR's
 open-to-merge time; a recorded skip has the PR times only. The orchestrator keeps
 the velocity ledger across cards; the weekly review reports points per hour from
