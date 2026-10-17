@@ -135,7 +135,7 @@ History: <DK-* identity, related specs, source/PR links, as-of SHA>
 How others solve it: <concrete open-source projects or standards; adopt | adapt | build, and why>
 Research: <large items only, by the research rule in AGENTS.md>
 Accepted: <date>, <owner | orchestrator | orchestrator relaying the owner>
-Actual: <hours from start to merge; recorded when the work merges>
+Actual: <h> h (intent rounds <h> h; PR #<n> open→merge <h> h), added when the work merges
 ```
 
 Category: defect = current behavior breaks a contract or spec; feature = a new
@@ -156,9 +156,11 @@ are size signals only (21 is much larger): such a card becomes a parent (Feature
 or Epic for 21) that keeps the overall estimate, with child Stories of at most 8,
 each an independent increment and one PR. Steps inside a story are the worker's
 plan, not cards. Ready cards are at most 8, and every 8 is checked for a split. Score stays Value / Effort. When a card's work merges,
-record the actual time on the card; the weekly review computes points per day
-per worker from these pairs, uses it for wave planning and revises the reference
-stories. Tiden's priority field keeps its meaning (High,
+the worker records the actual time on the card in hours: intent rounds from
+`tiden intent journal --format json` (StartedAt to ClosedAt) and the PR's
+open-to-merge time; a recorded skip has the PR times only. The orchestrator keeps
+the velocity ledger across cards; the weekly review reports points per hour from
+these pairs, uses it for wave planning and revises the reference stories. Tiden's priority field keeps its meaning (High,
 Medium, Low) and still raises review levels; the order within a share comes from Score.
 
 ## Working loop
