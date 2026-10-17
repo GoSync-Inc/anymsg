@@ -139,10 +139,11 @@ at least important (`AGENTS.md`). Prefer splitting it.
 
 ## Orchestrator loop
 
-1. Read Tiden main and open proposal branches; list ready stories by Score,
-   current breakages and hard deadlines first.
+1. Read Tiden main and open proposal branches; list ready stories.
 2. List open pull requests and intent branches; compute busy lanes.
-3. Dispatch every story whose paths fit a free lane; there is no fixed number of
+3. Select the wave by the Queue rule in the card intake
+   ([tiden-product-workflow.md](tiden-product-workflow.md)) and dispatch every
+   selected story whose paths fit a free lane; there is no fixed number of
    workers. The real limits are file overlap (lanes), the GitHub CI queue and the
    owner's attention for owner-level decisions; the orchestrator watches them.
 4. Each brief names: story link or goal, lane, expected paths, review level,

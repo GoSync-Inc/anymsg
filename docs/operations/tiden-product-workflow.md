@@ -96,9 +96,14 @@ starting it.
    (`AGENTS.md`); the card text goes to them as a file.
 4. **Accept.** The owner accepts the card, or the orchestrator does so relaying
    the owner's quoted words. Record it on the card.
-5. **Queue.** Accepted cards with a lane and expected paths form the ready queue,
-   ordered by Score, highest first. A current breakage (a defect or an unresolved
-   production incident) and a hard deadline go ahead of the order. Deferred work
+5. **Queue.** Accepted cards with a lane and expected paths form the ready queue.
+   A wave takes current breakages (defects, unresolved production incidents) and
+   hard deadlines first. The rest of the wave is about 70% product (feature,
+   improvement) and 30% engineering (infra, refactor), counted by Effort, and
+   always holds a refactoring slot. Within each share, order by Score, highest
+   first. When a feature needs a refactor or an enabler, create a separate
+   refactor or infra card and link it as the feature's dependency. A research card
+   counts toward the category of the work it unblocks. Deferred work
    stays on main as planned `Backlog` work: it is not cancelled, moved or copied.
    An existing card becomes ready through a spec edit that adds the template
    fields, reviewed like any spec edit, and its acceptance; it is never recreated.
@@ -108,7 +113,7 @@ Title: <plain words: what changes for the owner>
 Problem: <what is wrong or missing today and the desired behavior; evidence, source>
 Acceptance criteria:
 - <observable, testable criterion>
-Kind: defect | feature | operational acceptance | chore
+Category: defect | feature | improvement | infra | refactor | research
 Lane: <lane>   Expected paths: <paths>
 Depends on: <ANYM-n, or none>
 Priority: High | Medium | Low (Tiden's priority field)
@@ -121,6 +126,13 @@ How others solve it: <concrete open-source projects or standards; adopt | adapt 
 Research: <large items only, by the research rule in AGENTS.md>
 Accepted: <date>, <owner | orchestrator relaying the owner>
 ```
+
+Category: defect = current behavior breaks a contract or spec; feature = a new
+owner-visible capability; improvement = a better existing capability; infra = CI,
+release, deploy, observability, operations; refactor = code structure without
+behavior change, including enablers a feature needs; research = a time-boxed
+investigation whose output is a decision or cards. An acceptance card takes the
+category of the work it accepts.
 
 Value is the benefit to the owner. Effort is agent work: 1 is about an hour, 3
 about a day, 8 a week or more. Tiden's priority field keeps its meaning (High,
