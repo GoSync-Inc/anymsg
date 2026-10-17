@@ -184,6 +184,27 @@ The previous snapshot pins each selected container's actual image ID, including
 when the old configuration used a mutable tag; it does not depend on the tag
 continuing to reference the previous image.
 
+Each target is tagged `deedkit-production-<target>:<sha>`, and a tag is never
+rebuilt. Builds are not reproducible, and with the containerd image store a
+rebuild that moves the tag can remove the image that running containers use.
+Every build labels the image with its revision, the source repository and an
+`io.deedkit.production.build` digest of its Dockerfile, stage and build
+arguments. If the tag already exists and these labels (and, for a messaging
+image, its `DEEDKIT_SOURCE_SHA`) match the candidate, preparation reuses that
+image and smoke-tests it again. So `seamless_release.py prepare` after
+`production.py prepare` of the same SHA gets the same image IDs. If the tag
+exists but does not match, for example another revision, an image built by an
+older tool without that digest, or a messaging image without
+`DEEDKIT_SOURCE_SHA`, preparation refuses and changes no tag. Removing such a
+stale tag is a separate operator step, taken only after `docker ps --all` shows
+that no container uses its image. Lookups and builds take
+`/var/lib/deedkit-production/image-build.lock`, so two preparations on a host set
+up by this guide, from either tool or any state directory, never build the same
+tag at once; the second is refused. Without that directory, for example on a CI
+runner, no image lock is taken. `check-image` builds the working tree under
+`deedkit-check-<target>:<sha>`, always fresh, and never reuses or touches a
+production tag.
+
 Before applying, follow [backup/migration and rollback](platform-cutover.md).
 This tool does not run migrations, prove data compatibility, authorize external
 actions, or perform provider readback. A schema change needs the module's explicit
