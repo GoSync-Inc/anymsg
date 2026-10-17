@@ -182,7 +182,9 @@ def assemble(directory: Path, fragments: Path, ci_url: str, producers: dict) -> 
     captured. A job without a fresh fragment contributes no reports, and its checks take its job result
     (`skipped` when it succeeded), so it never reads as passed; such jobs are returned in `missing`. A stale
     verify fragment still supplies the run's routing metadata (SHA, Git and Tiden branch), never its outcomes.
-    `ci_url` names this assembly's run attempt, which reruns with every producer.
+    `ci_url` names this assembly's run attempt, which reruns with every producer; `producers` in the metadata
+    keeps each job's own result, captured SHA and the attempt its merged fragment came from. `directory` must
+    be new or empty, so no earlier assembly's report survives.
     """
     attempt = RUN_ATTEMPT_URL.fullmatch(ci_url or "")
     if not attempt or set(producers) != set(FRAGMENTS):
@@ -198,12 +200,18 @@ def assemble(directory: Path, fragments: Path, ci_url: str, producers: dict) -> 
         raise ValueError("the verify fragment with the run metadata is missing") from None
     if not re.fullmatch(r"[a-f0-9]{40}", str(sha)) or set(metadata.get("checks") or {}) != set(CHECKS):
         raise ValueError("the verify fragment does not name its tested source SHA and its seven checks")
-    checks, module_checks = dict(metadata["checks"]), {}
+    if directory.exists() and any(directory.iterdir()):
+        raise ValueError("the evidence directory must be new or empty")
+    checks, module_checks, provenance = dict(metadata["checks"]), {}, {}
     directory.mkdir(parents=True, exist_ok=True)
     present, missing = [], []
     for job, (names, files) in FRAGMENTS.items():
         result, captured = producers[job]
+        # A job's own captured checkout always has to agree with verify's, whatever its fragment.
+        if captured and captured != sha:
+            raise ValueError(f"the {job} job captured another source than verify")
         fragment = fragments / f"ci-evidence-{job}"
+        provenance[job] = {"result": result, "sha": captured, "attempt": None}
         if not fresh_fragment(fragment, root, job, result, attempt.group(1)):
             missing.append(job)
             state = result if result in {"failure", "cancelled"} else "skipped"
@@ -213,6 +221,9 @@ def assemble(directory: Path, fragments: Path, ci_url: str, producers: dict) -> 
             continue
         if control_file(fragment, "source-sha") != sha or captured != sha:
             raise ValueError(f"the {job} fragment tested another source than verify")
+        provenance[job]["attempt"] = control_file(fragment, "attempt")
+        if not provenance[job]["attempt"].isdigit():
+            raise ValueError(f"the {job} fragment does not name its run attempt")
         try:
             reported = (metadata if job == "verify" else json.loads(control_file(fragment, "outcomes.json")))["module_checks"]
         except (ValueError, KeyError, TypeError):
@@ -225,7 +236,8 @@ def assemble(directory: Path, fragments: Path, ci_url: str, producers: dict) -> 
                 (directory / path.name).write_bytes(path.read_bytes())
         present.append(job)
     (directory / "source-sha").write_text(sha + "\n")
-    metadata.update({"ci_url": ci_url, "checks": checks, "module_checks": module_checks, "fragments": present})
+    metadata.update({"ci_url": ci_url, "checks": checks, "module_checks": module_checks, "fragments": present,
+                     "producers": provenance})
     (directory / "metadata.json").write_text(json.dumps(metadata))
     return {**metadata, "missing": missing}
 

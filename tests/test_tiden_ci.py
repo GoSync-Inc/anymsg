@@ -1120,9 +1120,14 @@ def test_parallel_load_fragment_is_assembled_with_verify_evidence_of_the_same_co
     assert {path.name for path in out.iterdir()} == {"metadata.json", "source-sha", "python.xml", "load.xml", "load.json"}
     rows = assembled_rows(tmp_path, merged)
     assert rows["deedkit-ci::load"] == rows["anymsg-ci::python"] == "passed"
-    # A job that succeeded and was not rerun keeps its earlier attempt's fragment.
+    # A job that succeeded and was not rerun keeps its earlier attempt's fragment, and the evidence says so.
     earlier = assemble(tmp_path / "earlier", evidence_fragments(tmp_path / "e", load_attempt="1"), ATTEMPT_URL, PASSED)
     assert earlier["fragments"] == ["verify", "load"]
+    assert earlier["producers"] == {"verify": {"result": "success", "sha": "a" * 40, "attempt": "2"},
+                                    "load": {"result": "success", "sha": "a" * 40, "attempt": "1"}}
+    # Assembling again into a used directory could keep a report the new fragments no longer supply.
+    with pytest.raises(ValueError, match="new or empty"):
+        assemble(out, evidence_fragments(tmp_path / "again", load=False), ATTEMPT_URL, PASSED)
 
 
 def test_assembly_refuses_a_fragment_of_another_commit_or_of_foreign_checks(tmp_path):
@@ -1188,6 +1193,14 @@ def test_failed_rerun_never_publishes_an_earlier_attempts_passing_fragment(tmp_p
     (stale_verify / "ci-evidence-verify" / "attempt").write_text("1\n")
     merged = assemble(tmp_path / "v" / "ci-evidence", stale_verify, ATTEMPT_URL, {**PASSED, "verify": ("cancelled", "")})
     assert set(merged["checks"].values()) == {"cancelled"} and not (tmp_path / "v" / "ci-evidence" / "python.xml").exists()
+    # A stale verify fragment never hides that the failed verify job captured another checkout.
+    with pytest.raises(ValueError, match="captured another source"):
+        assemble(tmp_path / "v" / "other", stale_verify, ATTEMPT_URL, {**PASSED, "verify": ("failure", "b" * 40)})
+    # A fragment must name the attempt it was uploaded in.
+    unnamed = evidence_fragments(tmp_path / "unnamed")
+    (unnamed / "ci-evidence-load" / "attempt").unlink()
+    with pytest.raises(ValueError, match="attempt"):
+        assemble(tmp_path / "unnamed" / "ci-evidence", unnamed, ATTEMPT_URL, PASSED)
 
 
 def test_evidence_step_records_and_then_fails_a_run_without_every_fragment(tmp_path):
