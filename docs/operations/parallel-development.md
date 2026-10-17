@@ -117,7 +117,9 @@ at least important (`AGENTS.md`). Prefer splitting it.
   never implies a deploy. A release in flight holds merges from prepare to apply,
   because apply checks again that its SHA is the current `main`
   ([production.md](production.md)). The release owner tells the orchestrator
-  before prepare and after apply, and the orchestrator gives no "ok" in between.
+  before prepare and after apply, and the orchestrator gives no "ok" in between;
+  it lets already enqueued pull requests merge or dequeues them before the release
+  SHA is chosen.
 - The release owner promotes the exact current `main` SHA by
   [production.md](production.md), after that SHA's own push run succeeds; never
   an earlier SHA. The readiness decision in the Tiden workflow is recorded for
@@ -162,7 +164,8 @@ the handoff file and the list of live sessions.
 Questions to the owner use plain names, never internal codes alone. Each states
 what it is, why it matters to the owner, what it costs, the options with their
 consequences and a recommendation. There is no limit on how many are asked; "да на
-всё" accepts every recommendation.
+всё" accepts every recommendation except an owner-level merge, which still needs
+an explicit "merge <n>".
 
 The orchestrator keeps a log of the owner's decisions: its recommendation, the
 owner's choice and whether they matched, so autonomy grows on facts. At the end
