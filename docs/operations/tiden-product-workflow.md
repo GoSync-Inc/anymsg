@@ -103,18 +103,18 @@ starting it.
    the orchestrator relaying the owner's quoted words. Cards in defect, infra,
    refactor and research are accepted by the orchestrator once Astra and Fable
    both approve with no open findings, necessity check included. The orchestrator
-   brings such a card to the owner when the reviewers disagree, it changes
-   product behavior beyond restoring the contract or an escalation condition in `AGENTS.md` applies. Record who
-   accepted on the card.
+   brings such a card to the owner when the reviewers disagree, when it changes
+   product behavior beyond restoring the contract, or when an escalation
+   condition in `AGENTS.md` applies. Record who accepted on the card.
 5. **Queue.** Accepted cards with a lane and expected paths form the ready queue.
    A wave takes current breakages (defects, unresolved production incidents) and
    hard deadlines first. The rest of the wave is about 70% product (feature,
    improvement) and 30% engineering (infra, refactor), counted by Effort, and
-   holds at least one refactor card when one is ready. Within each share, order by Score, highest
-   first. When a feature needs a refactor or an enabler, create a separate
+   holds at least one refactor card when one is ready. Within each share, order
+   by Score, highest first. When a feature needs a refactor or an enabler, create a separate
    refactor or infra card and link it as the feature's dependency. A research card
-   counts toward the category of the work it unblocks. Deferred work
-   stays on main as planned `Backlog` work: it is not cancelled, moved or copied.
+   counts toward the category of the work it unblocks, or engineering when that
+   is unknown. Deferred work stays on main as planned `Backlog` work: it is not cancelled, moved or copied.
    An existing card becomes ready through a spec edit that adds the template
    fields, reviewed like any spec edit, and its acceptance; it is never recreated.
 
@@ -140,7 +140,7 @@ Actual: <h> h (intent rounds <h> h; PR #<n> open→merge <h> h), added when the 
 
 Category: defect = current behavior breaks a contract or spec; feature = a new
 owner-visible capability; improvement = a better existing capability; infra = CI,
-release, deploy, observability, operations; refactor = code structure without
+release, deploy, observability, operations, dependency updates; refactor = code structure without
 behavior change, including enablers a feature needs; research = a time-boxed
 investigation whose output is a decision or cards. An acceptance card takes the
 category of the work it accepts.
@@ -151,18 +151,24 @@ uncertainty or risk, estimated by comparison with the reference stories below,
 not in hours and not from human-team experience. Reference stories (merged PRs):
 1 = #59 (one-line-scope release fix); 2 = #66 (small release fix with test);
 3 = #52 (expire unprocessed originals by policy); 5 = #68 (exact source SHA in
-images and release record); 8 = #40 (blue-green HTTP releases). 13 and 21
-are size signals only (21 is much larger): such a card becomes a parent (Feature,
-or Epic for 21) that keeps the overall estimate, with child Stories of at most 8,
-each an independent increment and one PR. Steps inside a story are the worker's
-plan, not cards. Ready cards are at most 8, and every 8 is checked for a split. Score stays Value / Effort. When a card's work merges,
-the worker records the actual time on the card in hours, as one total from
-first start to merge (the parts overlap; never sum them), with the parts: intent rounds from
-`tiden intent journal --format json` (StartedAt to ClosedAt) and the PR's
-open-to-merge time; a recorded skip has the PR times only. The orchestrator keeps
-the velocity ledger across cards; the weekly review reports points per hour from
-these pairs, uses it for wave planning and revises the reference stories. Tiden's priority field keeps its meaning (High,
-Medium, Low) and still raises review levels; the order within a share comes from Score.
+images and release record); 8 = #40 (blue-green HTTP releases). Score stays
+Value / Effort. Tiden's priority field keeps its meaning (High, Medium, Low) and
+still raises review levels; the order within a share comes from Score.
+
+13 and 21 are size signals only (21 is much larger): such a card becomes a parent
+(Feature, or Epic for 21) that keeps the overall estimate, with child Stories of
+at most 8, each an independent increment and one PR. Steps inside a story are the
+worker's plan, not cards. Ready cards are at most 8; the card review checks every
+8 for a split.
+
+When a card's work merges, the worker records the actual time on the card in
+hours, as one total from first start to merge (the parts overlap; never sum
+them), with the parts: intent rounds from `tiden intent journal --format json`
+(StartedAt to ClosedAt) and the PR's open-to-merge time; a recorded skip has the
+PR times only. The orchestrator keeps the velocity ledger across cards; the weekly
+review ([parallel-development.md](parallel-development.md)) reports points per
+hour from these pairs, uses it for wave planning and revises the reference
+stories.
 
 ## Working loop
 
