@@ -1,5 +1,6 @@
 """Reporting tests use synthetic JUnit and never call Tiden."""
 from collections import Counter
+from datetime import datetime, timedelta, timezone
 import json
 from pathlib import Path
 import xml.etree.ElementTree as ET
@@ -777,3 +778,294 @@ def test_image_inputs_cover_every_source_the_image_targets_build_from(tmp_path):
                                          "COPY --from=2 /s /s\n")
     assert sorted(dockerfile_sources(tmp_path / "Dockerfile", "final")) == ["a", "b", "c", "d"]
     assert dockerfile_sources(tmp_path / "Dockerfile", "") == dockerfile_sources(tmp_path / "Dockerfile", "final")
+
+
+
+RELEASE_SHA = "a" * 40
+RUN_URL = "https://github.com/example/repo/actions/runs/7/attempts/1"
+CREATED = "2026-01-01T00:10:00.000000Z"
+
+
+def main_run(run_id="run-a", sha=RELEASE_SHA, status="passed", created="2026-01-01T00:00:00.000000Z",
+             completed="2026-01-01T00:00:05.000000Z"):
+    return {"id": run_id, "buildSha": sha, "status": status, "createdAt": created, "completedAt": completed}
+
+
+def release_cli(monkeypatch, runs=None, *, created=CREATED, release=None,
+                gate=(3, {"status": "VERDICT_STATUS_BLOCKED", "computedAt": "2026-01-01T00:10:01Z"})):
+    """A synthetic Tiden: runs are listed newest-created first in pages; a release keeps its first creation time."""
+    import subprocess
+    runs = [main_run()] if runs is None else runs
+    calls = []
+    def run(args, **kwargs):
+        calls.append(args)
+        command, code = args[1:3], 0
+        if command == ["run", "list"]:
+            size = int(args[args.index("--page-size") + 1])
+            start = int(args[args.index("--page-token") + 1]) if "--page-token" in args else 0
+            ordered = sorted(runs, key=lambda value: value["createdAt"], reverse=True)
+            following = str(start + size) if start + size < len(ordered) else ""
+            value = {"runs": ordered[start:start + size], "pagination": {"nextPageToken": following}}
+        elif command == ["release", "create"]:
+            version, environment = args[args.index("--version") + 1], args[args.index("--environment") + 1]
+            value = release or {"id": "release-id", "version": version, "environmentSlug": environment,
+                                "url": args[args.index("--url") + 1], "createdAt": created}
+        elif command == ["gate", "check"]:
+            code, value = gate
+        else:
+            raise AssertionError(args)
+        return subprocess.CompletedProcess(args, code, stdout=json.dumps(value) if value else "", stderr="")
+    monkeypatch.setattr(subprocess, "run", run)
+    return calls
+
+
+def run_release(monkeypatch, tmp_path, *arguments):
+    import sys
+    from scripts import tiden_ci
+    monkeypatch.setenv("TIDEN_PRODUCT_ID", PRODUCT)
+    monkeypatch.setattr(sys, "argv", ["tiden_ci.py", "release", "--directory", str(tmp_path), *arguments])
+    return tiden_ci.main()
+
+
+PRODUCTION = ("--environment", "production", "--sha", RELEASE_SHA, "--url", RUN_URL,
+              "--released-at", "2026-01-01T00:20:00Z")
+
+
+def main_push_manifest(tmp_path, **change):
+    manifest = {**metadata(), "git_branch": "main", "event": "push", "tiden_branch": "", "ci_url": RUN_URL,
+                "schema": 1, **change}
+    (tmp_path / "manifest.json").write_text(json.dumps(manifest))
+
+
+def receipt(tmp_path):
+    return json.loads((tmp_path / "tiden-release-receipt.json").read_text())
+
+
+def test_main_push_run_records_its_exact_commit_release_after_publication(tmp_path, monkeypatch):
+    calls = release_cli(monkeypatch, [main_run("run-old", "c" * 40, created="2025-12-31T23:00:00.000000Z",
+                                               completed="2025-12-31T23:00:05.000000Z"), main_run()])
+    main_push_manifest(tmp_path)
+    assert run_release(monkeypatch, tmp_path, "--environment", "github-actions-synthetic") == 0
+    lists = [call for call in calls if call[1:3] == ["run", "list"]]
+    assert lists and all(call[call.index("--branch") + 1] == "main" and
+                         call[call.index("--environment") + 1] == "github-actions-synthetic" for call in lists)
+    create = next(call for call in calls if call[1:3] == ["release", "create"])
+    # The gate is captured from main at creation, so creation follows the main-run check.
+    assert calls[0][1:3] == ["run", "list"] and calls.index(create) > 0
+    assert create[create.index("--version") + 1] == "deedkit@" + RELEASE_SHA
+    assert create[create.index("--environment") + 1] == "github-actions-synthetic"
+    assert create[create.index("--name") + 1] == "DeedKit " + RELEASE_SHA[:12]
+    assert create[create.index("--url") + 1] == RUN_URL
+    assert create[create.index("--product-id") + 1] == PRODUCT
+    recorded = receipt(tmp_path)
+    assert {key: recorded[key] for key in ("releaseId", "mainRun", "gateRun", "gateFromThisCommit", "gate")} == {
+        "releaseId": "release-id", "mainRun": "run-a", "gateRun": "run-a", "gateFromThisCommit": True,
+        "gate": "VERDICT_STATUS_BLOCKED"}
+
+
+@pytest.mark.parametrize("change", [{"event": "pull_request"}, {"event": "merge_group"}, {"event": "workflow_dispatch"},
+                                    {"git_branch": "codex/feature"}, {"tiden_branch": "intent/explicit"},
+                                    {"git_branch": "Main"}])
+def test_only_a_main_push_run_records_a_ci_release(tmp_path, monkeypatch, change):
+    calls = release_cli(monkeypatch)
+    main_push_manifest(tmp_path, **change)
+    with pytest.raises(ValueError, match="main push"):
+        run_release(monkeypatch, tmp_path, "--environment", "github-actions-synthetic")
+    assert calls == []
+
+
+def test_ci_release_takes_no_commit_url_or_time_from_arguments(tmp_path, monkeypatch):
+    calls = release_cli(monkeypatch)
+    main_push_manifest(tmp_path)
+    with pytest.raises(ValueError, match="published run"):
+        run_release(monkeypatch, tmp_path, "--environment", "github-actions-synthetic", "--sha", "b" * 40)
+    assert calls == []
+
+
+OTHER = "b" * 40
+
+
+@pytest.mark.parametrize("latest", [
+    [main_run(), main_run("run-b", OTHER, created="2026-01-01T00:00:01.000000Z", completed="2026-01-01T00:00:06.000000Z")],
+    [main_run(status="failed")],
+    [main_run(status="in_progress", completed=None)],
+    [],
+    # Created earlier but completed later: the latest completion, not the latest creation, decides.
+    [main_run(), main_run("run-b", OTHER, created="2025-12-31T23:59:00.000000Z", completed="2026-01-01T00:00:09.000000Z")],
+])
+def test_release_is_not_recorded_unless_this_commit_passed_the_latest_main_run(tmp_path, monkeypatch, capsys, latest):
+    calls = release_cli(monkeypatch, latest)
+    main_push_manifest(tmp_path)
+    # A newer main commit records its own CI release, so this run warns and keeps CI green.
+    assert run_release(monkeypatch, tmp_path, "--environment", "github-actions-synthetic") == 0
+    assert "Tiden release not recorded" in capsys.readouterr().out
+    assert not any(call[1:3] == ["release", "create"] for call in calls)
+    from scripts.tiden_ci import StaleRelease
+    calls = release_cli(monkeypatch, latest)
+    with pytest.raises(StaleRelease):
+        run_release(monkeypatch, tmp_path, *PRODUCTION)
+    assert not any(call[1:3] == ["release", "create"] for call in calls)
+
+
+def filler(count, start="2026-01-01T00:01:00"):
+    # Newer main runs of other commits that never completed (for example killed reporting jobs).
+    base = datetime.fromisoformat(start)
+    return [main_run(f"run-x{i}", OTHER, status="in_progress", completed=None,
+                     created=(base + timedelta(seconds=i)).isoformat() + ".000000Z") for i in range(count)]
+
+
+def test_latest_completion_is_found_beyond_the_first_page(tmp_path, monkeypatch):
+    late = main_run("run-b", OTHER, created="2025-12-31T23:59:00.000000Z", completed="2026-01-01T00:00:09.000000Z")
+    calls = release_cli(monkeypatch, [main_run(), late, *filler(60)])
+    from scripts.tiden_ci import StaleRelease
+    with pytest.raises(StaleRelease):
+        run_release(monkeypatch, tmp_path, *PRODUCTION)
+    assert any("--page-token" in call for call in calls)
+
+
+def test_unbounded_run_listing_fails_closed(tmp_path, monkeypatch):
+    from scripts import tiden_ci
+    monkeypatch.setattr(tiden_ci, "MAX_RUN_PAGES", 1)
+    calls = release_cli(monkeypatch, [main_run(), *filler(60)])
+    with pytest.raises(RuntimeError, match="too many main runs"):
+        run_release(monkeypatch, tmp_path, *PRODUCTION)
+    assert not any(call[1:3] == ["release", "create"] for call in calls)
+
+
+def test_newer_run_completed_during_creation_fails_the_release(tmp_path, monkeypatch):
+    # Another commit's run completed after the check but before the creation captured the main gate.
+    release_cli(monkeypatch, [main_run(), main_run("run-b", OTHER, created="2026-01-01T00:00:01.000000Z",
+                                                   completed="2999-01-01T00:00:00.000000Z")],
+                created="2999-01-01T00:05:00.000000Z")
+    from scripts.tiden_ci import ForeignGate, record_release
+    with pytest.raises(ForeignGate, match="run-b"):
+        record_release(tmp_path, RELEASE_SHA, "production", RUN_URL, "2026-01-01T00:20:00Z", PRODUCT)
+    assert receipt(tmp_path)["gateRun"] == "run-b" and receipt(tmp_path)["gateFromThisCommit"] is False
+
+
+@pytest.mark.parametrize("runs, created", [
+    # A rerun of this commit is latest now, but the release was first created while another run was latest.
+    ([main_run("run-a2", created="2026-01-01T01:00:00.000000Z", completed="2026-01-01T01:00:05.000000Z"),
+      main_run("run-b", OTHER, created="2026-01-01T00:00:01.000000Z", completed="2026-01-01T00:00:06.000000Z"),
+      main_run()], "2026-01-01T00:10:00.000000Z"),
+    # Created before Tiden could recompute the main gate from this run.
+    ([main_run()], "2026-01-01T00:00:20.000000Z"),
+])
+def test_release_whose_gate_came_from_another_run_is_never_reported_as_this_commit(tmp_path, monkeypatch, capsys,
+                                                                                    runs, created):
+    from scripts.tiden_ci import ForeignGate
+    monkeypatch.setattr("time.sleep", lambda seconds: None)
+    release_cli(monkeypatch, runs, created=created)
+    with pytest.raises(ForeignGate):
+        run_release(monkeypatch, tmp_path, *PRODUCTION)
+    assert receipt(tmp_path)["gateFromThisCommit"] is False
+    # A synthetic CI record is not promotion evidence: the run warns and keeps the finding in its receipt.
+    release_cli(monkeypatch, runs, created=created)
+    main_push_manifest(tmp_path)
+    assert run_release(monkeypatch, tmp_path, "--environment", "github-actions-synthetic") == 0
+    assert "gate from another run" in capsys.readouterr().out
+    assert receipt(tmp_path)["gateFromThisCommit"] is False
+
+
+def test_release_waits_for_the_main_gate_to_follow_a_just_completed_run(tmp_path, monkeypatch):
+    from scripts import tiden_ci
+    now = datetime.now(timezone.utc)
+    def stamp(value):
+        return value.strftime("%Y-%m-%dT%H:%M:%S.%fZ")
+    slept = []
+    monkeypatch.setattr(tiden_ci.time, "sleep", slept.append)
+    release_cli(monkeypatch, [main_run(created=stamp(now - timedelta(seconds=15)),
+                                       completed=stamp(now - timedelta(seconds=10)))],
+                created=stamp(now + timedelta(seconds=60)))
+    tiden_ci.record_release(tmp_path, RELEASE_SHA, "production", RUN_URL, "2026-01-01T00:20:00Z", PRODUCT)
+    assert len(slept) == 1 and 45 <= slept[0] <= 50
+
+
+def test_rewritten_release_identity_is_refused(tmp_path, monkeypatch):
+    release_cli(monkeypatch, release={"id": "release-id", "version": "anymsg@0.9.19", "environmentSlug": "production",
+                                      "url": RUN_URL, "createdAt": CREATED})
+    from scripts.tiden_ci import record_release
+    with pytest.raises(RuntimeError, match="rewrote"):
+        record_release(tmp_path, RELEASE_SHA, "production", RUN_URL, "2026-01-01T00:20:00Z", PRODUCT)
+
+
+def test_production_release_records_apply_time_and_reports_a_missing_gate(tmp_path, monkeypatch, capsys):
+    calls = release_cli(monkeypatch, gate=(1, None))
+    assert run_release(monkeypatch, tmp_path, *PRODUCTION) == 0
+    create = next(call for call in calls if call[1:3] == ["release", "create"])
+    assert create[create.index("--environment") + 1] == "production"
+    assert create[create.index("--released-at") + 1] == "2026-01-01T00:20:00Z"
+    assert "no gate was captured" in capsys.readouterr().out
+    # Without a captured gate, there is no gate whose origin could be attributed.
+    assert receipt(tmp_path)["gate"] is None and receipt(tmp_path)["gateFromThisCommit"] is None
+
+
+@pytest.mark.parametrize("sha, environment, url, released_at", [
+    ("A" * 40, "production", RUN_URL, "2026-10-17T00:00:30Z"),
+    ("a" * 12, "production", RUN_URL, "2026-10-17T00:00:30Z"),
+    (RELEASE_SHA, "staging", RUN_URL, "2026-10-17T00:00:30Z"),
+    (RELEASE_SHA, "synthetic", RUN_URL, "2026-10-17T00:00:30Z"),
+    (RELEASE_SHA, "production", "https://example.invalid/run/7", "2026-10-17T00:00:30Z"),
+    (RELEASE_SHA, "production", RUN_URL + "/../../evil", "2026-10-17T00:00:30Z"),
+    (RELEASE_SHA, "production", RUN_URL, "2026-10-17 00:00:30"),
+    (RELEASE_SHA, "production", RUN_URL, "2026-10-17T00:00:30+03:00"),
+    (RELEASE_SHA, "production", RUN_URL, "2999-01-01T00:00:00Z"),
+])
+def test_release_rejects_an_unverified_identity_before_any_tiden_call(tmp_path, monkeypatch, sha, environment, url,
+                                                                       released_at):
+    calls = release_cli(monkeypatch)
+    from scripts.tiden_ci import record_release
+    with pytest.raises(ValueError):
+        record_release(tmp_path, sha, environment, url, released_at, PRODUCT)
+    assert calls == []
+
+
+def test_release_workflows_record_only_verified_main_commits(tmp_path):
+    import subprocess
+    import yaml
+    root = Path(__file__).resolve().parents[1]
+    checks = yaml.safe_load((root / ".github/workflows/checks.yml").read_text())["jobs"]
+    # The seven Tiden check identities stay the verify job's step ids; evidence publication is unchanged.
+    ids = [step.get("id") for step in checks["verify"]["steps"]]
+    assert all(check in ids for check in CHECKS)
+    assert "tiden_ci.py release" not in json.dumps(checks)
+    ci = yaml.safe_load((root / ".github/workflows/ci.yml").read_text())
+    job = ci["jobs"]["release"]
+    # Only after the CI gate, so every verification job and the Tiden publication passed.
+    assert job["needs"] == ["gate"]
+    assert job["if"] == "github.event_name == 'push' && github.ref == 'refs/heads/main'"
+    steps = {step.get("name") or step["uses"].split("@")[0]: step for step in job["steps"]}
+    record = steps["Record the main release in Tiden"]
+    assert record["if"] == "steps.config.outputs.enabled == 'true'" and "continue-on-error" not in record
+    assert record["run"] == ('python scripts/tiden_ci.py release --directory "$RUNNER_TEMP/ci-evidence" '
+                             '--environment github-actions-synthetic')
+    assert steps["actions/download-artifact"]["with"]["name"] == "ci-evidence"
+    assert steps["actions/checkout"]["with"]["ref"] == "${{ github.sha }}"
+    assert "release" not in ci["jobs"]["gate"]["needs"]
+
+    workflow = yaml.safe_load((root / ".github/workflows/production-release.yml").read_text())
+    trigger = workflow.get("on", workflow.get(True))
+    assert list(trigger) == ["workflow_dispatch"]
+    assert trigger["workflow_dispatch"]["inputs"]["environment"]["options"] == ["production"]
+    assert workflow["permissions"] == {"contents": "read", "actions": "read"}
+    job = workflow["jobs"]["record"]
+    assert job["if"] == "github.ref == 'refs/heads/main'"
+    steps = job["steps"]
+    # The first step compares the ref with case, before any repository code runs.
+    guard = steps[0]
+    for ref, allowed in [("refs/heads/main", True), ("refs/heads/Main", False), ("refs/heads/MAIN", False),
+                         ("refs/heads/feature", False)]:
+        completed = subprocess.run(["bash", "-e", "-c", guard["run"]], env={"PATH": "/usr/bin:/bin", "REF": ref})
+        assert (completed.returncode == 0) == allowed, ref
+    assert guard["env"]["REF"] == "${{ github.ref }}"
+    verify = next(i for i, step in enumerate(steps) if "production.py verify" in step.get("run", ""))
+    publish = next(i for i, step in enumerate(steps) if "tiden_ci.py release" in step.get("run", ""))
+    assert 0 < verify < publish
+    # Every step up to the record runs only after the previous one succeeded.
+    assert not any("if" in step or "continue-on-error" in step for step in steps[:publish + 1])
+    # The Tiden token reaches only the release step, and only from GitHub secrets.
+    holders = [step for step in steps if "TIDEN_API_TOKEN" in json.dumps(step)]
+    assert holders == [steps[publish]]
+    assert steps[publish]["env"]["TIDEN_API_TOKEN"] == "${{ secrets.TIDEN_API_TOKEN }}"
+    assert steps[publish]["env"]["ENVIRONMENT"] == "${{ inputs.environment }}"
+    assert "${{" not in steps[verify]["run"] and "${{" not in steps[publish]["run"]

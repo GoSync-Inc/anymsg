@@ -1,0 +1,78 @@
+name: Production release record
+# Run by the release owner after a successful `production.py apply`
+# (docs/operations/production.md). It changes nothing on the server.
+on:
+  workflow_dispatch:
+    inputs:
+      sha:
+        description: 'Exact 40-character main commit that production.py apply promoted'
+        type: string
+        required: true
+      environment:
+        description: 'Tiden release environment'
+        type: choice
+        options: [production]
+        default: production
+      released_at:
+        description: 'Apply completion time, RFC3339 UTC (YYYY-MM-DDTHH:MM:SSZ)'
+        type: string
+        required: true
+permissions:
+  contents: read
+  actions: read  # production.py verify reads the main push CI run and its jobs
+concurrency:
+  group: production-release
+  cancel-in-progress: false
+jobs:
+  record:
+    name: Record production release
+    # Only the reviewed workflow and tools on main may use the Tiden credential.
+    if: github.ref == 'refs/heads/main'
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      # Expression comparisons ignore case; this one does not, and runs before any repository code.
+      - name: Require the main branch exactly
+        env:
+          REF: ${{ github.ref }}
+        run: test "$REF" = refs/heads/main
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6.1.0
+        with:
+          persist-credentials: false
+      - name: Require the current main commit and its green push CI
+        id: verify
+        env:
+          GH_TOKEN: ${{ github.token }}
+          SHA: ${{ inputs.sha }}
+        run: |
+          python scripts/production.py verify --sha "$SHA" > "$RUNNER_TEMP/verify.json"
+          python -c 'import json, sys; print("url=" + json.load(open(sys.argv[1]))["url"])' "$RUNNER_TEMP/verify.json" >> "$GITHUB_OUTPUT"
+      - name: Install pinned Tiden CLI with integrity check
+        run: |
+          curl --fail --silent --show-error --location https://github.com/qase-tms/homebrew-tap/releases/download/v0.33.0/tiden_linux_amd64.tar.gz -o "$RUNNER_TEMP/tiden.tar.gz"
+          echo "3f6b650c4cabd58ce4149d9106325cbd36d1472cccc9c63ca03137668b80e4a6  $RUNNER_TEMP/tiden.tar.gz" | sha256sum --check
+          mkdir "$RUNNER_TEMP/tiden-bin"
+          tar -xzf "$RUNNER_TEMP/tiden.tar.gz" -C "$RUNNER_TEMP/tiden-bin"
+          echo "$RUNNER_TEMP/tiden-bin" >> "$GITHUB_PATH"
+      - name: Record the production release in Tiden
+        env:
+          TIDEN_API_TOKEN: ${{ secrets.TIDEN_API_TOKEN }}
+          TIDEN_PRODUCT_ID: ${{ vars.TIDEN_PRODUCT_ID }}
+          TIDEN_WORKSPACE_ID: ${{ vars.TIDEN_WORKSPACE_ID }}
+          TIDEN_BASE_URL: https://app.tiden.ai
+          SHA: ${{ inputs.sha }}
+          RUN_URL: ${{ steps.verify.outputs.url }}
+          RELEASED_AT: ${{ inputs.released_at }}
+          ENVIRONMENT: ${{ inputs.environment }}
+        run: |
+          mkdir "$RUNNER_TEMP/release"
+          python scripts/tiden_ci.py release --directory "$RUNNER_TEMP/release" --environment "$ENVIRONMENT" \
+            --sha "$SHA" --url "$RUN_URL" --released-at "$RELEASED_AT"
+      - name: Retain the release receipt
+        if: ${{ always() }}
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: tiden-release-receipt
+          path: ${{ runner.temp }}/release/tiden-*.json
+          if-no-files-found: warn
+          retention-days: 90

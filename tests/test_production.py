@@ -106,7 +106,8 @@ def fixture(tmp_path, monkeypatch):
         if argv[:3] == ["docker", "image", "inspect"]:
             if "--format" in argv:
                 return IMAGE
-            return json.dumps([{"Id": IMAGE, "Config": {"Labels": {"org.opencontainers.image.revision": SHA}}}])
+            return json.dumps([{"Id": IMAGE, "Config": {"Labels": {"org.opencontainers.image.revision": SHA},
+                                                        "Env": ["PATH=/usr/local/bin", "DEEDKIT_SOURCE_SHA=" + SHA]}}])
         if argv[:2] == ["docker", "compose"] and "config" in argv:
             value = json.loads(Path(argv[argv.index("-f") + 1]).read_text())
             if "--profile" not in argv:
@@ -510,3 +511,80 @@ def test_config_rejects_a_database_as_an_application_target(tmp_path, monkeypatc
     filename.chmod(0o600)
     with pytest.raises(p.Refused, match="application"):
         p.config(filename)
+
+
+MESSAGING_STAGES = ("runtime", "indexer", "enricher-local", "whatsapp-native", "backup")
+
+
+def test_production_messaging_stages_end_with_the_source_revision():
+    # Parse instructions after folding continuations; the variable comes last so earlier layers stay cached.
+    lines = (ROOT / "services/messaging/Dockerfile").read_text().replace("\\\n", " ").splitlines()
+    stages, current = {}, None
+    for line in (value.strip() for value in lines):
+        if not line or line.startswith("#"):
+            continue
+        if line.upper().startswith("FROM "):
+            current = line.split()[-1] if " AS " in line.upper() else None
+            stages[current] = []
+        elif current:
+            stages[current].append(line)
+    for stage in MESSAGING_STAGES:
+        assert stages[stage][-2:] == ["ARG DEEDKIT_SOURCE_SHA", "ENV DEEDKIT_SOURCE_SHA=$DEEDKIT_SOURCE_SHA"], stage
+        assert sum("DEEDKIT_SOURCE_SHA" in line for line in stages[stage]) == 2, stage
+    assert {target for target, build in p.BUILDS.items() if build[1] == "services/messaging/Dockerfile"} == set(MESSAGING_STAGES)
+
+
+def image_builder(monkeypatch, *, labels=None, env=None):
+    calls = []
+    def command(argv, **kwargs):
+        calls.append(argv)
+        if argv[:3] == ["docker", "image", "inspect"]:
+            if "--format" in argv:
+                return IMAGE
+            return json.dumps([{"Id": IMAGE, "Config": {
+                "Labels": {"org.opencontainers.image.revision": SHA} if labels is None else labels,
+                "Env": ["PATH=/usr/local/bin", "DEEDKIT_SOURCE_SHA=" + SHA] if env is None else env}}])
+        return ""
+    monkeypatch.setattr(p, "run", command)
+    return calls
+
+
+@pytest.mark.parametrize("target", sorted(p.BUILDS))
+def test_every_production_build_receives_the_candidate_source_revision(tmp_path, monkeypatch, target):
+    calls = image_builder(monkeypatch)
+    assert p.build_image(tmp_path, SHA, target) == IMAGE
+    build = next(call for call in calls if call[:2] == ["docker", "build"])
+    assert build[build.index("--build-arg") + 1] == "DEEDKIT_SOURCE_SHA=" + SHA
+    assert "org.opencontainers.image.revision=" + SHA in build
+    checked = ["docker", "image", "inspect", IMAGE] in calls
+    assert checked == (target in MESSAGING_STAGES)
+    assert any(call[:2] == ["docker", "run"] for call in calls)
+
+
+@pytest.mark.parametrize("labels,env", [
+    (None, ["PATH=/usr/local/bin"]),
+    (None, ["DEEDKIT_SOURCE_SHA="]),
+    (None, ["DEEDKIT_SOURCE_SHA=" + "c" * 40]),
+    (None, []),
+    ({"org.opencontainers.image.revision": "c" * 40}, None),
+    ({}, None),
+])
+def test_new_messaging_image_without_the_candidate_revision_is_refused_before_smoke(tmp_path, monkeypatch, labels, env):
+    calls = image_builder(monkeypatch, labels=labels, env=env)
+    with pytest.raises(p.Refused, match="source revision"):
+        p.build_image(tmp_path, SHA, "runtime")
+    assert not any(call[:2] == ["docker", "run"] for call in calls)
+
+
+def test_apply_still_accepts_prepared_images_built_before_the_source_revision(tmp_path, monkeypatch):
+    settings, calls, _ = fixture(tmp_path, monkeypatch)
+    p.prepare(settings, SHA)
+    original = p.run
+    def older(argv, **kw):
+        # An image prepared before this change has the revision label but no DEEDKIT_SOURCE_SHA.
+        if argv[:3] == ["docker", "image", "inspect"] and "--format" not in argv:
+            return json.dumps([{"Id": IMAGE, "Config": {"Labels": {"org.opencontainers.image.revision": SHA},
+                                                        "Env": ["PATH=/usr/local/bin"]}}])
+        return original(argv, **kw)
+    monkeypatch.setattr(p, "run", older)
+    assert p.apply(settings, SHA)["status"] == "applied"

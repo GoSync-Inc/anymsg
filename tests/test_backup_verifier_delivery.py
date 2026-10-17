@@ -33,7 +33,13 @@ def test_backup_image_smoke_uses_native_tools_without_secrets_or_network(monkeyp
 
     def run(args, **kwargs):
         calls.append(args)
-        return image if args[:3] == ["docker", "image", "inspect"] else ""
+        if args[:3] != ["docker", "image", "inspect"]:
+            return ""
+        if "--format" in args:
+            return image
+        # A fresh messaging build names its source revision (scripts/production.py).
+        return json.dumps([{"Id": image, "Config": {"Labels": {"org.opencontainers.image.revision": "a" * 40},
+                                                    "Env": ["DEEDKIT_SOURCE_SHA=" + "a" * 40]}}])
 
     monkeypatch.setattr(promotion, "run", run)
     assert promotion.build_image(Path("/synthetic-source"), "a" * 40, "backup") == image

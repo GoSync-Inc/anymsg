@@ -7,6 +7,7 @@ from __future__ import annotations
 
 import argparse
 from collections import Counter
+from datetime import datetime, timedelta, timezone
 import json
 import os
 from pathlib import Path, PurePosixPath
@@ -36,6 +37,15 @@ TIDEN_INTENT_LINE = re.compile(
     rf"\(https://app\.tiden\.ai/({_UUID})/products/({_UUID})/branches/({_UUID})\)", re.MULTILINE)
 MAX_INTENT_LINKS = 5
 MERGE_QUEUE_SKIP = "merge queue run of a temporary group commit"
+# Tiden creates an environment for any unknown slug, so only these two may receive a release record.
+RELEASE_ENVIRONMENTS = ("github-actions-synthetic", "production")
+RUN_URL = re.compile(r"https://github\.com/[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+/actions/runs/[0-9]+(?:/attempts/[0-9]+)?")
+RELEASED_AT = re.compile(r"[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}Z")
+# A reporting job completes its run within its 6-minute timeout.
+RUN_WINDOW = timedelta(minutes=10)
+# Tiden recomputes the main gate seconds after a completed run's live-doc sync.
+GATE_SETTLE = timedelta(seconds=60)
+MAX_RUN_PAGES = 10
 
 
 def source_path(value: str, root: Path) -> str:
@@ -204,21 +214,27 @@ def routed_target(name: object, git_branch: str) -> bool:
     return isinstance(name, str) and (name == git_branch or name.startswith("intent/"))
 
 
+def tiden(cli: str, arguments: list[str], product: str, directory: Path, label: str) -> tuple[int, str]:
+    """Run one Tiden CLI command and keep its redacted JSON output as a receipt."""
+    completed = subprocess.run([cli, *arguments, "--product-id", product, "--format", "json"],
+                               capture_output=True, text=True, timeout=120)
+    token = os.environ.get("TIDEN_API_TOKEN", "")
+    output = completed.stdout.replace(token, "[redacted]") if token else completed.stdout
+    (directory / f"tiden-{label}.json").write_text(output)
+    return completed.returncode, output
+
+
 def publish(directory: Path, manifest: dict, branch: str | None, product: str, cli: str = "tiden",
             routed: bool = False, workspace: str = "") -> dict:
     if manifest.get("schema") != 1 or not re.fullmatch(r"[a-f0-9]{40}", manifest.get("sha", "")):
         raise ValueError("invalid evidence manifest")
 
     def call(arguments: list[str], label: str, allow_verdict: bool = False) -> dict:
-        completed = subprocess.run([cli, *arguments, "--product-id", product, "--format", "json"],
-                                   capture_output=True, text=True, timeout=120)
-        token = os.environ.get("TIDEN_API_TOKEN", "")
-        output = completed.stdout.replace(token, "[redacted]") if token else completed.stdout
-        (directory / f"tiden-{label}.json").write_text(output)
-        if completed.returncode and not allow_verdict:
+        returncode, output = tiden(cli, arguments, product, directory, label)
+        if returncode and not allow_verdict:
             raise RuntimeError(f"Tiden {label} failed; evidence was not verified")
         value = json.loads(output)
-        if completed.returncode and value.get("status") != "failed":
+        if returncode and value.get("status") != "failed":
             raise RuntimeError(f"Tiden {label} failed without a test verdict")
         return value
 
@@ -317,13 +333,112 @@ def publish(directory: Path, manifest: dict, branch: str | None, product: str, c
             call(["run", "abort", seq], "abort")
 
 
+class StaleRelease(RuntimeError):
+    """The latest completed main run is not this commit's, so a new release would capture another gate."""
+
+
+class ForeignGate(RuntimeError):
+    """The release exists, but the main gate it captured did not come from this commit's run."""
+
+
+def when(value: str) -> datetime:
+    return datetime.fromisoformat(value.replace("Z", "+00:00"))
+
+
+def record_release(directory: Path, sha: str, environment: str, url: str, released_at: str, product: str,
+                   cli: str = "tiden") -> dict:
+    """Record release deedkit@<sha> and prove its captured gate came from this commit's passed main run.
+
+    Tiden captures a release's gate from the current main gate when the release is first
+    created; a repeated create updates its name, URL and time but keeps that first gate.
+    The proof is stateless: the main run that completed last before the release's creation,
+    at least GATE_SETTLE earlier, must be a passed run of this commit.
+    """
+    if not re.fullmatch(r"[a-f0-9]{40}", sha):
+        raise ValueError("an exact lowercase 40-character commit SHA is required")
+    if environment not in RELEASE_ENVIRONMENTS:
+        raise ValueError("unknown release environment; Tiden would create a duplicate")
+    if not RUN_URL.fullmatch(url):
+        raise ValueError("the release URL must be a GitHub Actions run")
+    if not RELEASED_AT.fullmatch(released_at):
+        raise ValueError("the release time must be RFC3339 UTC, YYYY-MM-DDTHH:MM:SSZ")
+    if when(released_at) > datetime.now(timezone.utc) + timedelta(minutes=5):
+        raise ValueError("the release time is in the future")
+
+    def call(arguments: list[str], label: str) -> dict:
+        returncode, output = tiden(cli, arguments, product, directory, label)
+        if returncode:
+            raise RuntimeError(f"Tiden {label} failed; the release was not verified")
+        return json.loads(output)
+
+    def latest_main_run(until: datetime, label: str) -> dict:
+        """The CI main run that completed last at or before `until`, from a listing proven complete."""
+        runs, token = [], ""
+        for page in range(1, MAX_RUN_PAGES + 1):
+            arguments = ["run", "list", "--branch", "main", "--environment", "github-actions-synthetic",
+                         "--page-size", "50"]
+            value = call(arguments + (["--page-token", token] if token else []), f"{label}-{page}")
+            runs.extend(value["runs"])
+            token = (value.get("pagination") or {}).get("nextPageToken") or ""
+            done = [run for run in runs if run.get("status") in {"passed", "failed"} and run.get("completedAt")
+                    and when(run["completedAt"]) <= until]
+            latest = max(done, key=lambda run: when(run["completedAt"]), default={})
+            # Runs are listed newest first and complete inside their reporting job, so a run
+            # created before this window cannot have completed after the latest one.
+            oldest = min((when(run["createdAt"]) for run in runs), default=until)
+            if not token or (latest and oldest < when(latest["completedAt"]) - RUN_WINDOW):
+                return latest
+        raise RuntimeError("too many main runs to establish the latest completion; the release was not verified")
+
+    ours = latest_main_run(datetime.now(timezone.utc), "release-runs")
+    if ours.get("buildSha") != sha or ours.get("status") != "passed":
+        raise StaleRelease("this commit's passed run is not the latest completed main run in Tiden")
+    # Tiden recomputes the main gate only after the run's live-doc sync.
+    wait = when(ours["completedAt"]) + GATE_SETTLE - datetime.now(timezone.utc)
+    if wait > timedelta(0):
+        time.sleep(wait.total_seconds())
+    version = "deedkit@" + sha
+    release = call(["release", "create", "--version", version, "--environment", environment,
+                    "--name", "DeedKit " + sha[:12], "--url", url, "--released-at", released_at], "release")
+    if (release.get("version"), release.get("environmentSlug"), release.get("url")) != (version, environment, url):
+        raise RuntimeError("Tiden rewrote the release identity")
+    # A repeated create keeps the original creation time, and with it the original gate.
+    created = when(release["createdAt"])
+    captured = latest_main_run(created, "release-runs-captured")
+    own_gate = (captured.get("buildSha") == sha and captured.get("status") == "passed"
+                and created - when(captured["completedAt"]) >= GATE_SETTLE)
+    returncode, output = tiden(cli, ["gate", "check", "--release", release["id"]], product, directory, "release-gate")
+    try:
+        gate = json.loads(output)
+    except json.JSONDecodeError:
+        gate = {}
+    if returncode and not gate:
+        print("::warning title=Tiden release gate::no gate was captured for " + version)
+        own_gate = None
+    receipt = {"releaseId": release["id"], "version": version, "environment": environment, "url": url,
+               "releasedAt": released_at, "createdAt": release["createdAt"], "mainRun": ours["id"],
+               "gateRun": captured.get("id"), "gateFromThisCommit": own_gate,
+               "gate": gate.get("status"), "gateComputedAt": gate.get("computedAt")}
+    (directory / "tiden-release-receipt.json").write_text(json.dumps(receipt, indent=2))
+    if own_gate is False:
+        raise ForeignGate(f"release {version} captured the main gate after run {captured.get('id')} of "
+                          f"{captured.get('buildSha')}; do not use its gate for readiness")
+    return receipt
+
+
 def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("command", choices=["prepare", "publish"])
+    parser.add_argument("command", choices=["prepare", "publish", "release"])
     parser.add_argument("--directory", type=Path, required=True)
     parser.add_argument("--source-root", type=Path, default=Path.cwd())
+    parser.add_argument("--environment", choices=RELEASE_ENVIRONMENTS)
+    parser.add_argument("--sha")
+    parser.add_argument("--url")
+    parser.add_argument("--released-at")
     args = parser.parse_args()
     directory = args.directory.resolve()
+    if args.command == "release":
+        return release(args, directory)
     if args.command == "prepare":
         metadata = json.loads((directory / "metadata.json").read_text())
         metadata["pr_tiden_links"] = intent_links(pull_request_body(os.environ.get("GITHUB_EVENT_PATH")))
@@ -347,6 +462,40 @@ def main() -> int:
                          workspace=os.environ.get("TIDEN_WORKSPACE_ID", ""))
     print(json.dumps({k: result[k] for k in ("seqNum", "status", "branchName", "branchId", "buildSha", "stats", "liveDocStatus")}))
     return 0 if result["status"] in {"passed", "skipped"} else 1
+
+
+def release(args: argparse.Namespace, directory: Path) -> int:
+    if args.environment == "github-actions-synthetic":
+        # Only this main push run's own published evidence names the commit and its build URL.
+        if args.sha or args.url or args.released_at:
+            raise ValueError("a CI release takes its commit, URL and time from the published run")
+        manifest = json.loads((directory / "manifest.json").read_text())
+        if (manifest.get("event"), manifest.get("git_branch"), manifest.get("tiden_branch")) != ("push", "main", ""):
+            raise ValueError("only a main push run records a CI release")
+        sha, url = manifest["sha"], manifest["ci_url"]
+        released_at = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+    elif args.environment == "production":
+        if not (args.sha and args.url and args.released_at):
+            raise ValueError("a production release needs the promoted commit, its CI run URL and the apply time")
+        sha, url, released_at = args.sha, args.url, args.released_at
+    else:
+        raise ValueError("select the release environment")
+    try:
+        receipt = record_release(directory, sha, args.environment, url, released_at, os.environ["TIDEN_PRODUCT_ID"])
+    except StaleRelease as exc:
+        if args.environment == "production":
+            raise
+        # A newer main commit finished first; its own run records its release.
+        print(f"::warning title=Tiden release not recorded::{exc}")
+        return 0
+    except ForeignGate as exc:
+        if args.environment == "production":
+            raise
+        # The synthetic record is not promotion evidence; its receipt keeps the finding.
+        print(f"::warning title=Tiden release gate from another run::{exc}")
+        return 0
+    print(json.dumps(receipt))
+    return 0
 
 
 if __name__ == "__main__":
