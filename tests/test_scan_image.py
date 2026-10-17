@@ -344,6 +344,8 @@ def test_links_are_resolved_transitively_and_through_directories():
              ("app/conf", f"{site}/vendored"),  # a directory symlink from our code
              ("app/a.py", "app/b.py"), ("app/b.py", f"{site}/chained/s.py")]  # a chain ending in third-party code
     assert si.third_party("generic-api-key", f"{site}/plain/s.py", links)
+    perl = "usr/lib/x86_64-linux-gnu/perl/5.36.0/CORE/cop.h"  # Debian's merged-usr /lib -> usr/lib alias
+    assert si.third_party("generic-api-key", perl, [("lib", "usr/lib"), ("lib64", "usr/lib64")])
     assert not si.third_party("generic-api-key", f"{site}/vendored/s.py", links)
     assert not si.third_party("generic-api-key", f"./{site}/chained/s.py", links)
     cycle = [("a", "b"), ("b", "a")]

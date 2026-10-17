@@ -212,7 +212,7 @@ merged (proposal ANYM-301).
   the whole image. The two heuristic rules, `generic-api-key` and `jwt`, match
   ordinary code in hash-locked third-party packages, so they are not applied
   inside installed third-party distributions (`site-packages`, `dist-packages`)
-  and system files (`/usr/lib`, `/usr/include`); they still apply to our own
+  and system files (`/usr/lib`, `/usr/include` and their merged-usr aliases `/lib*`); they still apply to our own
   packages wherever they are installed (`OWN_PACKAGES` in `scripts/scan_image.py`,
   kept complete by a test), to any third-party file a link from our code points
   at, and to everything else, including `/usr/share` and `/usr/local`, where our

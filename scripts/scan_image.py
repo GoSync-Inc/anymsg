@@ -37,8 +37,9 @@ PAYLOAD_FREE = frozenset(b"123456")  # link, device, directory and fifo headers 
 # This is code rather than a gitleaks allowlist because its RE2 paths cannot exclude our own
 # packages, which uv installs into site-packages (agent_gateway, family_calendar). ANYM-303 C3.
 HEURISTIC_RULES = frozenset({"generic-api-key", "jwt"})
-# System files: only /usr/lib and /usr/include, never /usr/share or /usr/local, where our Dockerfiles COPY.
-THIRD_PARTY = re.compile(r"(?:^|/)(?:site|dist)-packages/[^/]+/|^usr/(?:lib|include)/")
+# System files: only /usr/lib and /usr/include (and /lib*, their merged-usr aliases on Debian), never
+# /usr/share or /usr/local, where our Dockerfiles COPY.
+THIRD_PARTY = re.compile(r"(?:^|/)(?:site|dist)-packages/[^/]+/|^(?:usr/)?(?:lib|lib32|lib64|libx32|include)/")
 OWN_PACKAGES = frozenset({"agent_gateway", "anymsg", "deedkit_gateway", "deedkit_platform_contracts",
                           "family_calendar", "family_calendar_service", "messaging_service",
                           "personal_os_voice_service", "platform_contracts", "telegram_broker",
