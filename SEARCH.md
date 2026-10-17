@@ -110,9 +110,13 @@ summaries include observation time and cache age; compact rendering never mutate
 the full cache or implies complete history.
 
 `get_updates` supports filters by accounts, chats, senders, origins, kinds,
-direction and dates. A consumer name binds its initial filter permanently.
-Choose a new consumer name for a different view; this prevents a filtered ACK
-from skipping events intended for another view. ACK order remains commit order,
+direction and dates. A consumer name binds its initial filter; a call with a
+different filter fails with `consumer_filter_mismatch`. Choose a new consumer
+name for a different view; this prevents a filtered ACK from skipping events
+intended for another view. Rebinding an existing consumer requires
+`reset_filters: true`, its current `expected_ack_version` and `cursor-write`
+permission: the new filter replaces the old one, the ACK version increases,
+outstanding deliveries are dropped and the position is kept. ACK order remains commit order,
 not the original timestamp of a backfilled message.
 
 

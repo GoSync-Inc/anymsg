@@ -2,7 +2,7 @@
 
 Planned account setup offers `new_only`, calendar-month `window`, explicit
 `since`, or `all_available`. Three months is a suggested default, not a maximum.
-This is a **standalone preview**. Deployed 0.9.6 collectors do not execute these
+This is a **standalone preview**. Current collectors (0.9.19) do not execute these
 waves or accept `history_policy`. Telegram retains `history_since`; WhatsApp
 retains existing checkpoints. Do not put preview fields into live collector JSON.
 

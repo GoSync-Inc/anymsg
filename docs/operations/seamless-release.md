@@ -2,7 +2,7 @@
 
 This opt-in protocol releases the **gateway and messaging HTTP API as one
 generation**. A source merge, successful CI and production promotion are separate
-events. Enrollment and live acceptance remain in [DK-40](../../BACKLOG.md).
+events. Enrollment and live acceptance remain in [DK-41](../../BACKLOG.md).
 The existing operator handles explicitly scheduled singleton updates.
 
 ## Release sequence

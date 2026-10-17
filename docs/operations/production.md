@@ -37,22 +37,24 @@ the group commit; queue a fork's pull request only after reviewing its workflow
 changes (TIDEN-CI.md).
 
 A merge through the queue is asynchronous. Once its checks pass, queue the pull
-request with **Merge when ready** or with the GraphQL `enqueuePullRequest`
-mutation, setting `expectedHeadOid` to the reviewed head SHA. It reaches `main`
-only after its group passes; a failed group drops it from the queue unmerged.
-While repository auto-merge is disabled, `gh pr merge` cannot queue a pull
-request: it calls `enablePullRequestAutoMerge` and fails with "Auto merge is not
-allowed" (cli/cli#13398).
+request with `gh pr merge <n> --squash --auto` (repository auto-merge is on),
+**Merge when ready**, or the GraphQL `enqueuePullRequest` mutation with
+`expectedHeadOid` set to the reviewed head SHA. It reaches `main` only after its
+group passes; a failed group drops it from the queue unmerged. If repository
+auto-merge is ever disabled, `gh pr merge` cannot queue a pull request: it calls
+`enablePullRequestAutoMerge` and fails with "Auto merge is not allowed"
+(cli/cli#13398).
 
-The reviewed desired ruleset is `deploy/main-ruleset.json`; until an administrator
-applies it, the classic rule in `deploy/main-protection.json` (strict up-to-date,
-no queue) stays live. Create the ruleset with
-`gh api --method POST repos/GoSync-Inc/deedkit/rulesets --input deploy/main-ruleset.json`,
-update it with
-`gh api --method PUT repos/GoSync-Inc/deedkit/rulesets/<id> --input deploy/main-ruleset.json`,
-and verify the effective rules with
-`gh api repos/GoSync-Inc/deedkit/rules/branches/main`. Then remove classic
-protection and keep it absent: GitHub enforces it together with the ruleset, and
+`main` is protected by the ruleset `deploy/main-ruleset.json` (live as ruleset
+25274451, with the merge queue); classic branch protection has been removed
+([parallel development](parallel-development.md#merging)). An administrator
+updates the ruleset with
+`gh api --method PUT repos/GoSync-Inc/deedkit/rulesets/<id> --input deploy/main-ruleset.json`
+(it was created with
+`gh api --method POST repos/GoSync-Inc/deedkit/rulesets --input deploy/main-ruleset.json`)
+and verifies the effective rules with
+`gh api repos/GoSync-Inc/deedkit/rules/branches/main`. Keep classic protection
+absent: GitHub enforces it together with the ruleset, and
 a pull request enters the queue only after it passes the branch protection
 checks, so a strict up-to-date rule would again require updating each branch
 first. `deploy/main-protection.json` remains the rollback state. To roll back,

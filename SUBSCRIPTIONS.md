@@ -3,7 +3,7 @@
 Current delivery work and priority: [BACKLOG.md](BACKLOG.md), DK-08–DK-10.
 This document is the API and delivery contract.
 
-Status: **schema 32** implements persistent structural subscriptions, passive
+Status: since **schema 32** (current schema 34) DeedKit implements persistent structural subscriptions, passive
 inspection, independent fetch/ACK, bounded long polling, native wake selectors,
 operator-registered signed hints and private feedback. Installing the package
 does not register a receiver, create a subscription, activate a provider or
@@ -70,7 +70,8 @@ and mounts no originals. Its default pass handles at most 16 subscriptions and
 checkpoint commit atomically; uniqueness and row locks support restart/retry and
 multiple workers. Fair ordering rotates sources beyond one batch.
 
-Install `messaging_service/subscription_role.sql` after migration 26, then create
+Install `services/messaging/messaging_service/subscription_role.sql` after migration 32 (it grants on
+`subscription_delivery` and `subscription_outbox`), then create
 a separate restricted LOGIN inheriting `messaging_subscriptions`. Put its DSN in
 `deploy/private/subscriptions.dsn` (0600, readable by UID 10001). Never use the
 owner or gateway DSN for this worker. Apply updated gateway, indexer and enrichment
