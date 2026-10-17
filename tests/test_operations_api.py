@@ -7,6 +7,10 @@ from starlette.testclient import TestClient
 
 from anymsg.client import AnyMsgError, Client
 from messaging_service.app import create_app
+from messaging_service.archive import Archive
+from messaging_service.messenger_operations import ParameterError, parameter_format, validate_operation
+from messaging_service.store import APIError
+from test_archive import event
 
 
 METHODS = ('list_messenger_operations', 'preview_messenger_operation',
@@ -191,3 +195,128 @@ def test_python_operation_errors_are_safe_and_never_retried(code):
             client.execute_messenger_operation(**arguments(METHODS[2]))
     assert failure.value.code == code and 'synthetic-private-content' not in str(failure.value)
     assert len(captured) == 1
+
+
+CANARY = 'CANARY_7f3e'
+
+
+@pytest.fixture
+def operations(seeded):
+    s, _, _ = seeded
+    archive = Archive(s)
+    archive.register('fields-telegram', 'telegram', 'Synthetic field errors', discover=True)
+    archive.ingest(event(account='fields-telegram', chat='100', provider_id='1',
+                         direction='outgoing', body='Synthetic outgoing text'))
+    key = s.issue_key('fields-agent', ['fields-telegram'],
+                      permissions=['read', 'download', 'send', 'message-edit', 'groups-manage'])
+    s.set_messenger_operations('fields-telegram', ['create_group', 'rename_group', 'edit_message'])
+    with s.pool.connection() as c:
+        chat = c.execute("SELECT id FROM chats WHERE account='fields-telegram'").fetchone()['id']
+        message = c.execute("SELECT id,revision FROM messages WHERE account='fields-telegram'").fetchone()
+    return s, key, chat, message
+
+
+def rejected(client, key, params):
+    headers = {'Authorization': 'Bearer ' + key, 'Accept': 'application/json, text/event-stream'}
+    rest = client.post('/v1/preview_messenger_operation', headers=headers, json=params)
+    mcp = client.post('/mcp', headers=headers, json={'jsonrpc': '2.0', 'id': 1, 'method': 'tools/call',
+        'params': {'name': 'preview_messenger_operation', 'arguments': params}}).json()['result']
+    assert rest.status_code == 400 and mcp['isError']
+    body = json.loads(mcp['content'][0]['text'].split(': ', 1)[1])
+    assert body['field_errors'] == rest.json()['field_errors']
+    assert CANARY not in rest.text and CANARY not in mcp['content'][0]['text']
+    return rest.json()
+
+
+def test_operation_field_error_contact_format(operations):
+    s, key, _, _ = operations
+    with TestClient(create_app(s, ['testserver'])) as client:
+        body = rejected(client, key, {'account': 'fields-telegram', 'operation': 'create_group',
+            'parameters': {'title': 'Synthetic group', 'user_ids': ['person_abc' + CANARY]}})
+    assert body['error'] == 'invalid_operation_parameters' and body['next_action'] == 'check_parameters'
+    assert body['field_errors'] == [{'field': 'user_ids/0', 'reason': 'format',
+                                     'expected': parameter_format('telegram', 'contact_id')}]
+    assert 'decimal' in body['field_errors'][0]['expected'] and 'person_*' in body['field_errors'][0]['expected']
+
+
+def test_create_group_preview_from_published_schema(operations):
+    s, key, _, _ = operations
+    rows = {r['operation']: r for r in s.list_messenger_operations(key, account='fields-telegram')['items']}
+    assert rows['create_group']['available'] is True
+    schema = rows['create_group']['parameters_schema']
+    assert set(schema) == {'title', 'user_ids'} and all(f['required'] for f in schema.values())
+    # An agent fills each required field from its published type and format only.
+    assert schema['title']['type'] == 'string' and schema['user_ids']['type'] == 'contact_ids'
+    assert 'decimal string' in schema['user_ids']['format']
+    parameters = {'title': 'Synthetic family group', 'user_ids': ['424242', '515151']}
+    preview = s.preview_messenger_operation(key, account='fields-telegram', operation='create_group',
+                                            parameters=parameters)
+    assert preview['parameters'] == parameters and len(preview['preview_digest']) == 64
+    assert preview['owner_approval_verified_by_server'] is False
+    with s.pool.connection() as c:
+        assert c.execute('SELECT count(*) AS n FROM messenger_commands').fetchone()['n'] == 0
+
+
+def errors(platform, operation, parameters):
+    with pytest.raises(ParameterError, match='^invalid_operation_parameters$') as failure:
+        validate_operation(platform, operation, parameters)
+    return failure.value.field_errors
+
+
+def test_operation_field_errors_cover_validators(operations):
+    assert errors('telegram', 'create_group', {'user_ids': ['1']}) == [
+        {'field': 'title', 'reason': 'required'}]
+    assert errors('telegram', 'create_group', {'title': 'x' * 129, 'user_ids': ['1'], 'foo': CANARY}) == [
+        {'field': 'title', 'reason': 'max_length', 'expected': 'at most 128 UTF-16 code units; most emoji count as 2'},
+        {'field': 'foo', 'reason': 'unknown_field', 'expected': 'only title, user_ids'}]
+    assert errors('telegram', 'create_group', {'title': ' ', 'user_ids': ['1', '1']}) == [
+        {'field': 'title', 'reason': 'blank', 'expected': 'non-blank text'},
+        {'field': 'user_ids', 'reason': 'unique', 'expected': 'no duplicate items'}]
+    # A non-identifier key is never returned; the error names the parameters object.
+    assert errors('telegram', 'rename_group', {'title': 'ok', CANARY + ' x': 1})[0]['field'] == 'parameters'
+    sha = 'a' * 64
+    assert errors('telegram', 'send_file', {'sha256': sha}) == [{'field': 'attachment_id', 'reason': 'required',
+        'expected': 'exactly one of attachment_id or upload_id'}]
+    assert errors('telegram', 'send_file', {'sha256': sha, 'attachment_id': 'att_' + 'b' * 32,
+                                            'upload_id': 'up_' + 'c' * 32}) == [
+        {'field': 'upload_id', 'reason': 'unique', 'expected': 'exactly one of attachment_id or upload_id'}]
+    assert errors('whatsapp', 'send_file', {'sha256': sha, 'attachment_id': 'att_' + 'b' * 32, 'mode': 'video_note'}) == [
+        {'field': 'mode', 'reason': 'enum', 'allowed': ['document', 'photo', 'video', 'audio', 'voice', 'sticker']}]
+    assert errors('telegram', 'update_profile', {})[0] == {'field': 'parameters', 'reason': 'required',
+        'expected': 'at least one of first_name, last_name, bio'}
+    assert errors('telegram', 'list_participants', {'limit': 0, 'offset': True}) == [
+        {'field': 'limit', 'reason': 'minimum', 'expected': 'at least 1'},
+        {'field': 'offset', 'reason': 'type', 'expected': 'integer'}]
+    # A huge integer keeps the other field's error; fallback paths appear once.
+    assert errors('telegram', 'send_location', {'latitude': 'bad', 'longitude': 10**400}) == [
+        {'field': 'latitude', 'reason': 'type', 'expected': 'finite number'},
+        {'field': 'longitude', 'reason': 'maximum', 'expected': 'at most 180'}]
+    crowded = errors('telegram', 'rename_group', {'title': 'ok', **{'bad-%d' % i: 1 for i in range(25)}, 'foo': 1})
+    assert [e['field'] for e in crowded] == ['parameters', 'foo']
+    assert errors('telegram', 'get_contact', {'user_id': str(2**63)})[0]['reason'] == 'format'
+    assert errors('telegram', 'chat_info', {'seconds': 1}) == [
+        {'field': 'seconds', 'reason': 'unknown_field', 'expected': 'no parameters'}]
+    # At most 20 entries, in schema order.
+    many = errors('telegram', 'create_group', {'user_ids': ['person_%d' % i for i in range(20)]})
+    assert len(many) == 20 and many[0]['field'] == 'title' and many[-1]['field'] == 'user_ids/18'
+    s, key, chat, message = operations
+    with pytest.raises(APIError) as failure:
+        s.preview_messenger_operation(key, account='fields-telegram', operation='edit_message', chat_id=chat,
+            message_id=message['id'], expected_revision=0, parameters={'text': 'Synthetic edit'})
+    assert failure.value.field_errors == [{'field': 'expected_revision', 'reason': 'minimum',
+        'expected': 'integer of at least 1: the current revision of the target message'}]
+    with pytest.raises(APIError) as failure:
+        s.preview_messenger_operation(key, account='fields-telegram', operation='create_group', chat_id=chat,
+            parameters={'title': 'Synthetic group', 'user_ids': ['424242']})
+    assert failure.value.field_errors == [{'field': 'chat_id', 'reason': 'unknown_field',
+        'expected': 'empty for an account-level operation'}]
+    with pytest.raises(APIError) as failure:
+        s.preview_messenger_operation(key, account='fields-telegram', operation='rename_group', chat_id=chat,
+            message_id=message['id'], parameters={'title': 'Synthetic group'})
+    assert failure.value.field_errors == [{'field': 'message_id', 'reason': 'unknown_field',
+        'expected': 'empty for a chat-level operation'}]
+    with pytest.raises(APIError) as failure:
+        s.execute_messenger_operation(key, account='fields-telegram', operation='rename_group', chat_id=chat,
+            parameters={'title': CANARY * 2000}, request_id='synthetic-fields-0001')
+    assert failure.value.field_errors == [{'field': 'parameters', 'reason': 'size',
+        'expected': 'canonical request of at most 16000 bytes'}]

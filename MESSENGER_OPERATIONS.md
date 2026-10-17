@@ -123,6 +123,54 @@ with `operation_not_started`.
 evidence when it exists. Status is visible only within the originating key/principal's permitted scope.
 No automatic retry of ambiguous writes is provided by the SDK or command worker.
 
+## Parameter formats and field errors
+
+Each `parameters_schema` field keeps its `type`, `required`, `default` and limits.
+Identifier and structured types also carry a reviewed `format` text for the
+account's platform. This is published metadata only: validation, normalization and
+persisted parameters do not change.
+
+| Type | Format |
+| --- | --- |
+| `contact_id` (Telegram) | Decimal string of a positive 64-bit user ID (1–19 digits, no leading zero), such as `sender_id` from `search_people`; not `person_*`, `@username` or a phone number |
+| `contact_id` (WhatsApp) | User JID `digits@c.us` or `digits@lid`, such as `sender_id` from `search_people`; not `person_*` or a bare phone number |
+| `contact_ids` | 1–20 unique `contact_id` values |
+| `message_id` | `msg_` plus 32 lowercase hex characters (archive message ID) |
+| `attachment_id` | `att_` plus 32 lowercase hex characters (archive attachment ID) |
+| `upload_id` | `up_` plus 32 lowercase hex characters, from `prepare_file_upload` |
+| `sha256` | 64 lowercase hex characters, the SHA-256 of the exact original |
+| `phone` | 5–20 digits, the first 1–9, with an optional leading `+`, no spaces or punctuation |
+| `file_mode` | `document`, `photo`, `video`, `audio`, `voice`, plus `video_note` (Telegram) or `sticker` (WhatsApp) |
+| `poll_options` | 2–10 unique non-blank strings of at most 100 UTF-16 code units |
+| `poll_indices` | Up to 20 unique integers from 0 to 9 |
+| `label_ids` | Up to 20 unique label IDs of 1–64 letters, digits, `_` or `-` |
+
+A rejected request keeps the error `invalid_operation_parameters` and
+`next_action: check_parameters`, and adds `field_errors`: a list of
+`{field, reason, expected?, allowed?}`, identical on REST, MCP and through the
+gateway. `field` is a parameter name (including `mode` for a MIME-family mismatch
+and `source_revision` for a forward source), a list element such as `user_ids/0`,
+an outer argument (`chat_id`, `message_id`, `expected_revision`) or `parameters`
+for the whole object. `reason` is one of `required`, `unknown_field`, `type`, `enum`,
+`min_length`, `max_length`, `pattern`, `minimum`, `maximum`, `min_items`,
+`max_items`, `unique`, `format`, `blank`, `size`. `expected` is a reviewed hint and
+`allowed` lists values from the catalog. String limits count UTF-16 code units, so
+most emoji count as 2. There is one entry per field, in schema
+order, at most 20. A submitted value is never returned; an unknown parameter is
+named only when its name is a short identifier. Example for `create_group` on
+Telegram with `user_ids: ["person_abc"]`:
+
+```json
+{"error": "invalid_operation_parameters", "next_action": "check_parameters",
+ "field_errors": [{"field": "user_ids/0", "reason": "format",
+   "expected": "Telegram user ID as a decimal string of a positive 64-bit integer (1-19 digits, no leading zero), such as sender_id from search_people; not person_*, @username or a phone number"}]}
+```
+
+`send_file` without a source names `attachment_id` with `required`; with both
+sources it names `upload_id` with `unique`. An empty `update_profile` names
+`parameters` with `required`. This shape follows the shared field error contract
+planned for gateway arguments and feedback (FB-03).
+
 ## Registered files and forward evidence
 
 The first upload path is `send_file`, with `attachment_id`, the exact `sha256`,

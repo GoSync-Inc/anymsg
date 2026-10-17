@@ -149,6 +149,15 @@ def _fields(platform, name, spec):
     return spec['fields']
 
 
+def _schema(platform, fields):
+    # Published metadata only; validation and persisted parameters never read it.
+    schema = deepcopy(fields)
+    for descriptor in schema.values():
+        text = parameter_format(platform, descriptor['type'])
+        if text: descriptor['format'] = text
+    return schema
+
+
 def operation_manifest(platform, *, provider=None):
     if platform not in ('telegram', 'whatsapp'):
         raise ValueError('unsupported_platform')
@@ -156,7 +165,7 @@ def operation_manifest(platform, *, provider=None):
     for name, spec in sorted(OPERATIONS.items()):
         row = {k: deepcopy(v) for k, v in spec.items() if k not in ('fields', 'platforms')}
         row.update(operation=name, supported=_supported(platform, name, spec, provider),
-                   parameters_schema=_fields(platform, name, spec))
+                   parameters_schema=_schema(platform, _fields(platform, name, spec)))
         if platform=='whatsapp' and provider=='whatsmeow' and name in NATIVE_UNSUPPORTED:
             row['limitation']='Not implemented by the native adapter; never substituted with a local cache mutation.'
         elif platform=='whatsapp' and provider=='whatsmeow' and name in ('get_reactions','get_message_info','get_pinned_messages'):
@@ -175,69 +184,138 @@ def operation_manifest(platform, *, provider=None):
     return rows
 
 
-def _valid(platform, descriptor, value):
-    kind = descriptor['type']
-    if kind=='upload_id':return isinstance(value,str) and re.fullmatch(r'up_[a-f0-9]{32}',value) is not None
-    if kind == 'string':
-        return (isinstance(value, str) and len(value.encode('utf-16-le')) // 2 <= descriptor['maximum']
-            and not any(ord(c) < 32 and c not in '\n\r\t' or ord(c) == 127 for c in value)
-            and (not descriptor.get('nonempty') or bool(value.strip())))
-    if kind == 'integer':
-        return type(value) is int and descriptor['minimum'] <= value <= descriptor['maximum']
-    if kind == 'boolean':
-        return type(value) is bool
-    if kind == 'number':
-        return type(value) in (int, float) and math.isfinite(value) and descriptor['minimum'] <= value <= descriptor['maximum']
+# Field error shape shared with FB-03 (ANYM-295), which moves it to platform_contracts.
+# Paths, reasons and hints come from this reviewed catalog, never from input values.
+FIELD_ERROR_REASONS = frozenset(('required', 'unknown_field', 'type', 'enum', 'min_length',
+    'max_length', 'pattern', 'minimum', 'maximum', 'min_items', 'max_items', 'unique',
+    'format', 'blank', 'size'))
+MAX_FIELD_ERRORS = 20
+FIELD_NAME = re.compile(r'[A-Za-z_][A-Za-z0-9_]{0,63}')
+FIELD_PATH = re.compile(r'[A-Za-z_][A-Za-z0-9_]{0,63}(/[0-9]{1,2})?')
+
+
+def field_error(field, reason, expected=None, allowed=None):
+    if reason not in FIELD_ERROR_REASONS or not FIELD_PATH.fullmatch(field):
+        raise ValueError('invalid_field_error')
+    return {'field': field, 'reason': reason, **({'expected': expected} if expected else {}),
+            **({'allowed': list(allowed)} if allowed else {})}
+
+
+class ParameterError(ValueError):
+    """invalid_operation_parameters with bounded field_errors; never input values."""
+    def __init__(self, *errors):
+        super().__init__('invalid_operation_parameters')
+        seen = set()  # One entry per field path, so fallback paths never crowd out others.
+        self.field_errors = [e for e in errors if not (e['field'] in seen or seen.add(e['field']))][:MAX_FIELD_ERRORS]
+
+
+def _modes(platform):
+    return ['document', 'photo', 'video', 'audio', 'voice'] + (['video_note'] if platform == 'telegram' else ['sticker'])
+
+
+def parameter_format(platform, kind):
+    """Reviewed format text for identifier and structured parameter types."""
     if kind == 'contact_id':
-        if not isinstance(value, str): return False
-        if platform == 'telegram':
-            return bool(re.fullmatch(r'[1-9][0-9]{0,18}', value)) and int(value) < 2**63
-        return bool(re.fullmatch(r'[0-9]{1,30}@(c\.us|lid)', value))
-    if kind in ('attachment_id', 'message_id', 'sha256'):
-        prefix = {'attachment_id': 'att_', 'message_id': 'msg_', 'sha256': ''}[kind]
-        size = 64 if kind == 'sha256' else 32
-        return isinstance(value, str) and bool(re.fullmatch(prefix + r'[a-f0-9]{' + str(size) + '}', value))
-    if kind == 'phone':
-        return isinstance(value, str) and bool(re.fullmatch(r'\+?[1-9][0-9]{4,19}', value))
+        return ('Telegram user ID as a decimal string of a positive 64-bit integer (1-19 digits, no leading zero), '
+                'such as sender_id from search_people; '
+                'not person_*, @username or a phone number' if platform == 'telegram' else
+                'WhatsApp user JID digits@c.us or digits@lid, such as sender_id from search_people; '
+                'not person_* or a bare phone number')
+    return {'contact_ids': '1-20 unique items, each a ' + parameter_format(platform, 'contact_id'),
+        'message_id': 'archive message ID msg_ plus 32 lowercase hex characters, from get_messages or search',
+        'attachment_id': 'archive attachment ID att_ plus 32 lowercase hex characters, from message attachments or search_files',
+        'upload_id': 'own upload ID up_ plus 32 lowercase hex characters, from prepare_file_upload',
+        'sha256': '64 lowercase hex characters: the SHA-256 of the exact original',
+        'phone': 'international number of 5-20 digits, the first 1-9, with an optional leading +, no spaces or punctuation',
+        'file_mode': 'one of ' + ', '.join(_modes(platform)),
+        'poll_options': '2-10 unique non-blank strings of at most 100 UTF-16 code units',
+        'poll_indices': 'up to 20 unique integers from 0 to 9 (zero-based option positions)',
+        'label_ids': 'up to 20 unique label IDs of 1-64 letters, digits, _ or -, from get_labels'}.get(kind)
+
+
+def _problem(platform, descriptor, value, field):
+    """First failing check for one parameter as a field error, or None when valid."""
+    kind = descriptor['type']
+    def fail(reason, expected=None, allowed=None, path=field):
+        return [field_error(path, reason, expected, allowed)]
+    if kind == 'string':
+        if not isinstance(value, str): return fail('type', 'string')
+        try: size = len(value.encode('utf-16-le')) // 2
+        except UnicodeError: return fail('format', 'valid Unicode text')
+        if size > descriptor['maximum']:
+            return fail('max_length', 'at most %d UTF-16 code units; most emoji count as 2' % descriptor['maximum'])
+        if any(ord(c) < 32 and c not in '\n\r\t' or ord(c) == 127 for c in value):
+            return fail('pattern', 'no control characters except newline, carriage return and tab')
+        if descriptor.get('nonempty') and not value.strip(): return fail('blank', 'non-blank text')
+        return None
+    if kind in ('integer', 'number'):
+        if kind == 'integer' and type(value) is not int: return fail('type', 'integer')
+        # An int is always finite; math.isfinite would overflow on a huge one.
+        if kind == 'number' and (type(value) not in (int, float) or type(value) is float and not math.isfinite(value)):
+            return fail('type', 'finite number')
+        if value < descriptor['minimum']: return fail('minimum', 'at least %s' % descriptor['minimum'])
+        if value > descriptor['maximum']: return fail('maximum', 'at most %s' % descriptor['maximum'])
+        return None
+    if kind == 'boolean':
+        return None if type(value) is bool else fail('type', 'boolean')
     if kind == 'file_mode':
-        modes = {'document', 'photo', 'video', 'audio', 'voice'} | ({'video_note'} if platform == 'telegram' else {'sticker'})
-        return isinstance(value, str) and value in modes
+        if not isinstance(value, str): return fail('type', 'string')
+        return None if value in _modes(platform) else fail('enum', allowed=_modes(platform))
+    pattern = {'upload_id': r'up_[a-f0-9]{32}', 'attachment_id': r'att_[a-f0-9]{32}', 'message_id': r'msg_[a-f0-9]{32}',
+        'sha256': r'[a-f0-9]{64}', 'phone': r'\+?[1-9][0-9]{4,19}',
+        'contact_id': r'[1-9][0-9]{0,18}' if platform == 'telegram' else r'[0-9]{1,30}@(c\.us|lid)'}.get(kind)
+    if pattern:
+        if not isinstance(value, str): return fail('type', 'string')
+        if not re.fullmatch(pattern, value) or kind == 'contact_id' and platform == 'telegram' and int(value) >= 2**63:
+            return fail('format', parameter_format(platform, kind))
+        return None
     if kind in ('contact_ids', 'poll_options', 'poll_indices', 'label_ids'):
-        if not isinstance(value, list) or len(value) > 20: return False
-        if kind not in ('poll_indices', 'label_ids') and not value: return False
-        if kind == 'poll_options':
-            if not 2 <= len(value) <= 10: return False
-            valid = all(_valid(platform, _field('string', maximum=100, nonempty=True), x) for x in value)
-        elif kind == 'contact_ids':
-            valid = all(_valid(platform, _field('contact_id'), x) for x in value)
-        elif kind == 'poll_indices':
-            valid = all(type(x) is int and 0 <= x < 10 for x in value)
-        else:
-            valid = all(isinstance(x, str) and bool(re.fullmatch(r'[a-zA-Z0-9_-]{1,64}', x)) for x in value)
-        return valid and len(set(value)) == len(value)
-    return False
+        if not isinstance(value, list): return fail('type', 'array')
+        maximum = 10 if kind == 'poll_options' else 20
+        if len(value) > maximum: return fail('max_items', 'at most %d items' % maximum)
+        minimum = 2 if kind == 'poll_options' else 1 if kind == 'contact_ids' else 0
+        if len(value) < minimum: return fail('min_items', 'at least %d item%s' % (minimum, 's' * (minimum > 1)))
+        item = {'poll_options': _field('string', maximum=100, nonempty=True), 'contact_ids': _field('contact_id'),
+                'poll_indices': _field('integer', minimum=0, maximum=9), 'label_ids': _field('label_id')}[kind]
+        errors = [e for i, x in enumerate(value) for e in (_problem(platform, item, x, '%s/%d' % (field, i)) or ())]
+        if errors: return errors
+        return None if len(set(value)) == len(value) else fail('unique', 'no duplicate items')
+    if kind == 'label_id':
+        if not isinstance(value, str): return fail('type', 'string')
+        return None if re.fullmatch(r'[a-zA-Z0-9_-]{1,64}', value) else fail('format', parameter_format(platform, 'label_ids'))
+    return fail('type')
 
 
 def validate_operation(platform, operation, parameters, *, provider=None):
     spec = operation_spec(operation)
     if not _supported(platform, operation, spec, provider): raise ValueError('unsupported_operation')
     if parameters is None: parameters = {}
-    if not isinstance(parameters, dict): raise ValueError('invalid_operation_parameters')
+    if not isinstance(parameters, dict): raise ParameterError(field_error('parameters', 'type', 'object'))
     fields = _fields(platform, operation, spec)
-    if set(parameters) - fields.keys(): raise ValueError('invalid_operation_parameters')
-    output = {}
+    output, errors = {}, []
     try:
         for name, descriptor in fields.items():
             if name not in parameters:
-                if descriptor['required']: raise ValueError('invalid_operation_parameters')
+                if descriptor['required']:
+                    errors.append(field_error(name, 'required', parameter_format(platform, descriptor['type'])))
+                    continue
                 if descriptor['default'] is None: continue
                 value = deepcopy(descriptor['default'])
             else: value = parameters[name]
-            if not _valid(platform, descriptor, value): raise ValueError('invalid_operation_parameters')
-            output[name] = value
-        if operation == 'update_profile' and not output: raise ValueError('invalid_operation_parameters')
-        if operation == 'send_file' and (('attachment_id' in output)+('upload_id' in output)!=1):
-            raise ValueError('invalid_operation_parameters')
+            problem = _problem(platform, descriptor, value, name)
+            if problem: errors.extend(problem)
+            else: output[name] = value
+        # Only a bounded identifier name is returned; the submitted value never is.
+        allowed = 'only ' + ', '.join(fields) if fields else 'no parameters'
+        for name in parameters:
+            if name not in fields:
+                errors.append(field_error(name if FIELD_NAME.fullmatch(str(name)) else 'parameters', 'unknown_field', allowed))
     except (UnicodeError, TypeError, OverflowError):
-        raise ValueError('invalid_operation_parameters') from None
+        raise ParameterError(field_error('parameters', 'type', 'JSON object of documented parameters')) from None
+    if errors: raise ParameterError(*errors)
+    if operation == 'update_profile' and not output:
+        raise ParameterError(field_error('parameters', 'required', 'at least one of ' + ', '.join(fields)))
+    if operation == 'send_file' and (('attachment_id' in output)+('upload_id' in output)!=1):
+        raise ParameterError(field_error('upload_id' if 'upload_id' in output else 'attachment_id',
+            'unique' if 'upload_id' in output else 'required', 'exactly one of attachment_id or upload_id'))
     return output
