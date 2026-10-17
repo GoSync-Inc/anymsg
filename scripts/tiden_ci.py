@@ -27,6 +27,8 @@ MODULE_REPORTS = {
     "calls_frontend": ("calls-frontend.xml", "node", "services/calls/frontend"),
     "backup_restore": ("backup-restore.xml", "python", ""),
 }
+# Each parallel test job uploads one `ci-evidence-<job>` fragment with the module checks it runs.
+FRAGMENTS = {"verify": (), "load": ("load",)}
 MAX_BYTES = 20 * 1024 * 1024
 # Tiden branch names: lowercase letters, digits, slashes, underscores and hyphens.
 TIDEN_BRANCH_NAME = re.compile(r"[a-z0-9]+(?:[/_-][a-z0-9]+)*")
@@ -143,6 +145,64 @@ def prepare(root: Path, directory: Path, metadata: dict) -> dict:
                 "test_counts": dict(counts), "check_counts": dict(Counter(r["execution"]["status"] for r in rows))}
     (directory / "manifest.json").write_text(json.dumps(manifest, indent=2))
     return manifest
+
+
+def fragment_sha(fragment: Path) -> str:
+    try:
+        return (fragment / "source-sha").read_text().strip()
+    except OSError:
+        return ""
+
+
+def assemble(directory: Path, fragments: Path, ci_url: str) -> dict:
+    """Merge the evidence fragments that the parallel test jobs uploaded into the directory `prepare` reads.
+
+    `verify` supplies the metadata and the seven checks; every other job supplies only its own module
+    outcomes. All fragments must name the same tested source SHA. A missing fragment leaves its checks
+    unrun, so `prepare` records them as blocked. `ci_url` names this assembly's run attempt, which reruns
+    with every producer, so a rerun publishes under its own row identities.
+    """
+    if not RUN_URL.fullmatch(ci_url or ""):
+        raise ValueError("the assembling run's attempt URL is required")
+    verify = fragments / "ci-evidence-verify"
+    try:
+        metadata = json.loads((verify / "metadata.json").read_text())
+    except (OSError, ValueError):
+        raise ValueError("the verify fragment with the run metadata is missing") from None
+    sha = metadata.get("sha", "")
+    if not re.fullmatch(r"[a-f0-9]{40}", sha) or fragment_sha(verify) != sha:
+        raise ValueError("the verify fragment does not name its tested source SHA")
+    module_checks = dict(metadata.get("module_checks") or {})
+    directory.mkdir(parents=True, exist_ok=True)
+    present = []
+    for job, names in FRAGMENTS.items():
+        fragment = fragments / f"ci-evidence-{job}"
+        if not fragment.is_dir():
+            module_checks.update({name: "skipped" for name in names if name not in module_checks})
+            continue
+        if fragment_sha(fragment) != sha:
+            raise ValueError(f"the {job} fragment tested another source than verify")
+        if job != "verify":
+            try:
+                outcomes = json.loads((fragment / "outcomes.json").read_text()).get("module_checks")
+            except (OSError, ValueError, AttributeError):
+                outcomes = None
+            if not isinstance(outcomes, dict) or set(outcomes) != set(names):
+                raise ValueError(f"the {job} fragment may report only its own checks")
+            module_checks.update(outcomes)
+        for path in fragment.iterdir():
+            if path.name in {"outcomes.json", "source-sha"} or (job != "verify" and path.name == "metadata.json"):
+                continue
+            if path.is_symlink() or not path.is_file():
+                raise ValueError("an evidence fragment holds only regular files")
+            if (directory / path.name).exists():
+                raise ValueError(f"two evidence fragments provide {path.name}")
+            (directory / path.name).write_bytes(path.read_bytes())
+        present.append(job)
+    (directory / "source-sha").write_text(sha + "\n")
+    metadata.update({"ci_url": ci_url, "module_checks": module_checks, "fragments": present})
+    (directory / "metadata.json").write_text(json.dumps(metadata))
+    return metadata
 
 
 def resolve_branch(manifest: dict, mapping: dict) -> str:
@@ -428,8 +488,9 @@ def record_release(directory: Path, sha: str, environment: str, url: str, releas
 
 def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("command", choices=["prepare", "publish", "release"])
+    parser.add_argument("command", choices=["assemble", "prepare", "publish", "release"])
     parser.add_argument("--directory", type=Path, required=True)
+    parser.add_argument("--fragments", type=Path)
     parser.add_argument("--source-root", type=Path, default=Path.cwd())
     parser.add_argument("--environment", choices=RELEASE_ENVIRONMENTS)
     parser.add_argument("--sha")
@@ -439,6 +500,11 @@ def main() -> int:
     directory = args.directory.resolve()
     if args.command == "release":
         return release(args, directory)
+    if args.command == "assemble":
+        ci_url = "https://github.com/{}/actions/runs/{}/attempts/{}".format(*(
+            os.environ.get(name, "") for name in ("GITHUB_REPOSITORY", "GITHUB_RUN_ID", "GITHUB_RUN_ATTEMPT")))
+        print(json.dumps({"fragments": assemble(directory, args.fragments.resolve(), ci_url)["fragments"]}))
+        return 0
     if args.command == "prepare":
         metadata = json.loads((directory / "metadata.json").read_text())
         metadata["pr_tiden_links"] = intent_links(pull_request_body(os.environ.get("GITHUB_EVENT_PATH")))

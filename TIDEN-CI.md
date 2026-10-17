@@ -6,6 +6,14 @@ the `ci-evidence` artifact, including failed runs. Python uses xunit1 to retain
 source paths; Node's generic `test` classname is qualified by its source file.
 Parameterized Python executions retain their parameter names and status.
 
+Test jobs run in parallel and each uploads a `ci-evidence-<job>` fragment:
+`checks / verify` the seven checks and its module reports, `checks / load` the
+gateway load gate. The `checks / evidence` job merges them into `ci-evidence`
+only when every fragment names the same tested source SHA, records a missing
+fragment's checks as unrun (blocked), names the evidence by its own run attempt,
+and fails when a test job failed, was cancelled or was skipped, whether or not
+Tiden reporting is configured.
+
 The separate reporting job receives no database or messenger credentials. It
 uses Tiden CLI 0.33.0 from the official release with a pinned SHA-256 checksum.
 Fork pull requests do not receive the Tiden secret or publish evidence. Package
@@ -198,7 +206,8 @@ intent branch and publish real results there before reviewing the merge. After
 merge, verify both main's gate and the GitHub App processing/drift state.
 
 The integrated CI includes gateway, calendar, calls and calls-frontend reports,
-plus the measured gateway load gate. Existing messaging check/test identities
+plus the measured gateway load gate, which runs on a runner of its own in
+parallel with the suite. Existing messaging check/test identities
 and links remain intact. Module assertions support reviewed contracts in the
 same product; a successful messaging run alone cannot verify another module.
 
