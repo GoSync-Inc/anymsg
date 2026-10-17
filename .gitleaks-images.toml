@@ -3195,3 +3195,8 @@ paths = ['''(?:^|/)site-packages/rsa/pem\.py$''']
 description = "postgres:18-bookworm base image (backup target): Debian ssl-cert's generated snakeoil key ships in the official public image; the backup worker serves no TLS and never reads it, and a later layer cannot remove it from the published base layer. Owner risk acceptance 2026-10-17, relayed by the orchestrator: 'Allow this file'."
 targetRules = ["private-key"]
 paths = ['''\.tar!etc/ssl/private/ssl-cert-snakeoil\.key$''']
+
+[[allowlists]]
+description = "google-auth (calendar and calls images): google/auth/crypt/_python_rsa.py defines the PEM marker strings _PKCS1_MARKER, and google/auth/transport/_mtls_helper.py documents PEM markers in comments; checked in google-auth 2.62.0; no key."
+targetRules = ["private-key"]
+paths = ['''(?:^|/)site-packages/google/auth/crypt/_python_rsa\.py$''', '''(?:^|/)site-packages/google/auth/transport/_mtls_helper\.py$''']

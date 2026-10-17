@@ -217,7 +217,7 @@ merged (proposal ANYM-301).
   `.gitleaks-images.toml` with a `description` naming the package and why the
   match is not a secret, its `targetRules`, and an exact file `paths` regex (or an
   exact value); never a whole tree. Current entries: the Python base image's
-  public `GPG_KEY` fingerprint, python-rsa's PEM marker template, and the Debian
+  public `GPG_KEY` fingerprint, PEM marker strings in python-rsa and google-auth, and the Debian
   snakeoil key in the postgres base image of the backup target (owner risk
   acceptance 2026-10-17). Such a change is reviewed like any CI change and
   rebuilds every image.

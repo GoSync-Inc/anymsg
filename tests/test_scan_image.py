@@ -336,7 +336,10 @@ def test_only_the_base_image_signing_key_fingerprint_is_allowed_in_the_config(tm
 @pytest.mark.parametrize("path, allowed", [("etc/ssl/private/ssl-cert-snakeoil.key", True),
                                           ("etc/ssl/private/server.key", False),
                                           ("usr/local/lib/python3.13/site-packages/rsa/pem.py", True),
-                                          ("usr/local/lib/python3.13/site-packages/rsa/key.py", False)])
+                                          ("usr/local/lib/python3.13/site-packages/rsa/key.py", False),
+                                          ("app/.venv/lib/python3.13/site-packages/google/auth/crypt/_python_rsa.py", True),
+                                          ("app/.venv/lib/python3.13/site-packages/google/auth/transport/_mtls_helper.py", True),
+                                          ("app/.venv/lib/python3.13/site-packages/google/auth/crypt/rsa.py", False)])
 def test_private_key_allowlists_are_exact_files(tmp_path, path, allowed):
     found = findings(tmp_path, layers=[{path: made_up_private_key(path)}])
     assert (found == []) is allowed
