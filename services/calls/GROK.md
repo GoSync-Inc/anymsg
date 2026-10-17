@@ -18,7 +18,7 @@ the current answer. They become available on the next model turn.
 Transcription hints use the documented `ru`, `en` and `id` codes. Unsupported
 regional variants can silently fall back to automatic language detection.
 
-In a noisy browser rehearsal, enable **«В шумном месте: говорить по кнопке»**
+In a noisy browser rehearsal, enable **"В шумном месте: говорить по кнопке"** (Noisy place: push to talk)
 before starting. The microphone starts muted; hold the talk button (or Space /
 Enter with that button focused) for a reply and release it while listening.
 Release, pointer cancellation, lost focus, a hidden page and stopping all close

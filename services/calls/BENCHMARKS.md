@@ -1,26 +1,26 @@
-# Скорость обычной цепочки STT → LLM → TTS
+# Speed of the ordinary STT → LLM → TTS chain
 
-Проверено 14 октября 2026. В Pipecat скорость зависит от выбранных сервисов, окончания речевого хода, потокового синтеза и сети. Ниже отдельно приведены измерения полной цепочки и компонентов.
+Checked on 14 October 2026. In Pipecat, speed depends on the chosen services, the end of the speech turn, streaming synthesis and the network. Measurements of the full chain and of the components are given separately below.
 
-**Полная цепочка.** В публикации Modal от 4 ноября 2025 Pipecat + Parakeet-tdt-0.6b-v3 + Qwen3-4B-Instruct-2507/vLLM + Kokoro TTS, с поиском по документации, достигли медианы около **1 секунды** от конца речи человека до слышимого ответа. Клиент, бот и модели находились близко друг к другу в Bay Area; использовались WebRTC и Modal Tunnels. Замер делался по записи разговора и включал аппаратуру. Это результат конкретной установки, не SLA и не проверка наших трёх языков. [Методика и результат Modal](https://modal.com/blog/low-latency-voice-bot).
+**Full chain.** In Modal's publication of 4 November 2025, Pipecat + Parakeet-tdt-0.6b-v3 + Qwen3-4B-Instruct-2507/vLLM + Kokoro TTS, with documentation search, reached a median of about **1 second** from the end of the person's speech to an audible reply. The client, bot and models were close to each other in the Bay Area; WebRTC and Modal Tunnels were used. The measurement was made from a recording of the conversation and included hardware. This is the result of a specific installation, not an SLA and not a check of our three languages. [Modal's method and result](https://modal.com/blog/low-latency-voice-bot).
 
-**Распознавание.** Бенчмарк Pipecat: 24 модели, одинаковые 1000 аудиофрагментов. TTFS измеряет время от фактического конца речи до окончательной расшифровки, с вычетом собственного ожидания VAD. [Speech-to-text benchmark](https://www.pipecat.ai/benchmarks/speech-to-text).
+**Recognition.** Pipecat benchmark: 24 models, the same 1000 audio fragments. TTFS measures the time from the actual end of speech to the final transcription, minus VAD's own wait. [Speech-to-text benchmark](https://www.pipecat.ai/benchmarks/speech-to-text).
 
 | STT | p50 | p95 |
 |---|---:|---:|
-| Deepgram nova-3-general | 247 мс | 298 мс |
-| Soniox stt-rt-v4 | 249 мс | 281 мс |
+| Deepgram nova-3-general | 247 ms | 298 ms |
+| Soniox stt-rt-v4 | 249 ms | 281 ms |
 
-**Текстовая модель.** Voice Readiness проверяет 46 конфигураций на 30 ходах с инструментами, соблюдением инструкций и опорой на знания. TTFAT — от начала запроса до первого токена ответа или вывода вызова инструмента, без отдельно передаваемого рассуждения; первый ответ разговора исключён. [Voice Readiness](https://www.pipecat.ai/benchmarks/voice-readiness).
+**Text model.** Voice Readiness checks 46 configurations on 30 turns with tools, instruction following and grounding in knowledge. TTFAT is from the start of the request to the first response token or tool call output, without separately transmitted reasoning; the first response of a conversation is excluded. [Voice Readiness](https://www.pipecat.ai/benchmarks/voice-readiness).
 
-| LLM / сервис | p50 TTFAT | p95 | Успешные ходы |
+| LLM / service | p50 TTFAT | p95 | Successful turns |
 |---|---:|---:|---:|
-| Qwen3.8-27B FP8 / Baseten | 649 мс | 801 мс | 98,2% |
-| Claude Haiku 4.5 / Anthropic | 637 мс | 1615 мс | 98,0% |
-| Gemini 3.6 Flash, minimal / AI Studio | 798 мс | 984 мс | 97,1% |
+| Qwen3.8-27B FP8 / Baseten | 649 ms | 801 ms | 98.2% |
+| Claude Haiku 4.5 / Anthropic | 637 ms | 1615 ms | 98.0% |
+| Gemini 3.6 Flash, minimal / AI Studio | 798 ms | 984 ms | 97.1% |
 
-Авторы дают ориентир: оптимизированная голосовая цепочка добавляет примерно 500 мс сверх LLM. Это оценка, а не замер любой комбинации. Медианы разных экспериментов нельзя складывать и выдавать за измеренную задержку полного разговора; TTS ждёт достаточного текста, а части обработки могут идти параллельно.
+The authors give a guideline: an optimized voice chain adds about 500 ms on top of the LLM. This is an estimate, not a measurement of any combination. Medians of different experiments cannot be added and passed off as a measured delay of a full conversation; TTS waits for enough text, and parts of the processing can run in parallel.
 
-**Разговоры с инструментами.** В [PhoneBench Alpha 1](https://www.pipecat.ai/benchmarks/phonebench-alpha-1) отдельно оценивают 15 текстовых моделей на сценариях телефонного обслуживания. PhoneLLM 30B Alpha 1: p50 первого токена 331 мс, p95 около 600 мс, оценка качества 72,3%; Gemini 3.6 Flash: 1168/1468 мс, качество 78,6%. Это ещё один тест LLM, не задержка всей звуковой цепочки; проценты качества нельзя прямо сравнивать с Voice Readiness. Полную методику обещают опубликовать по мере развития бенчмарка.
+**Conversations with tools.** In [PhoneBench Alpha 1](https://www.pipecat.ai/benchmarks/phonebench-alpha-1) 15 text models are assessed separately on phone-service scenarios. PhoneLLM 30B Alpha 1: p50 of the first token 331 ms, p95 about 600 ms, quality score 72.3%; Gemini 3.6 Flash: 1168/1468 ms, quality 78.6%. This is one more LLM test, not the delay of the whole audio chain; quality percentages cannot be compared directly with Voice Readiness. The full method is promised to be published as the benchmark develops.
 
-Для нашего сравнения нужен один браузер, одни аудиореплики, одинаковые инструменты и регионы размещения. Считать следует конец речи → первый полученный звук, p50/p95 и остановку звука при перебивании; отдельно оценивать точность инструментов и сохранность незавершённого рассказа. Публичные результаты выше не заменяют проверку русского, английского и индонезийского в нашем сценарии.
+For our comparison we need one browser, the same audio utterances, the same tools and hosting regions. The measure should be end of speech → first received sound, p50/p95 and the stopping of sound on interruption; separately assess tool accuracy and the preservation of an unfinished story. The public results above do not replace checking Russian, English and Indonesian in our scenario.
