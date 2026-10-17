@@ -264,7 +264,9 @@ def create_app(policy_path, public_url, *, transports=None):
                     mcp_route = request.url.path.rstrip("/") == "/mcp"
                     if chunk_route or mcp_route:
                         try:
-                            policy.authorize(key, UPLOAD_CHUNK_TOOL)
+                            snapshot, agent = policy.authenticate(key)
+                            credential = dispatch.credential(agent)
+                            policy.authorize_agent(snapshot, agent, UPLOAD_CHUNK_TOOL)
                             limit = UPLOAD_BODY_LIMIT
                         except Denied:
                             if chunk_route:
@@ -314,7 +316,8 @@ def create_app(policy_path, public_url, *, transports=None):
                     # A streaming response must terminate on revocation, never
                     # write a second response or a successful final body.
                     raise RuntimeError("stream_access_revoked") from None
-                rest_route = request.url.path.startswith("/v1/") and not request.url.path.startswith("/v1/files/")
+                rest_route = (request.url.path.startswith("/v1/") and not request.url.path.startswith("/v1/files/")
+                              and error.status != 401)
                 await JSONResponse({"error": error.code}, status_code=error.status,
                                    headers=expiry_headers(credential) if rest_route else None)(
                     scope, receive, protected_send

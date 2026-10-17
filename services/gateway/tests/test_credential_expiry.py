@@ -349,3 +349,45 @@ def test_rest_error_header_follows_latest_authentication(tmp_path, frozen, befor
         rest = client.post("/v1/messages_search", json={"limit": "x"}, headers=HEADERS)
     assert rest.status_code == 422 and rest.json() == {"error": "invalid_arguments"}
     assert rest.headers.get("X-DeedKit-Key-Expires") == (stamp(NOW + timedelta(days=after)) if after < 7 else None)
+
+
+def replace_after(app, path, calls, change):
+    """Apply `change` to the policy once, right after the given authentication call (1-based)."""
+    held, original = app.state.policy, app.state.policy.authenticate
+    seen = {"count": 0}
+
+    def authenticate(key):
+        result = original(key)
+        seen["count"] += 1
+        if seen["count"] == calls:
+            value = json.loads(path.read_text())
+            value["revision"] += 1
+            change(value["principals"][0])
+            path.write_text(json.dumps(value))
+        return result
+
+    held.authenticate = authenticate
+
+
+@pytest.mark.parametrize("change,status", [
+    (lambda agent: agent.update(enabled=False), 401),
+    (lambda agent: agent.update(expires_at=stamp(NOW + timedelta(days=30))), 403),
+], ids=["revoked", "extended"])
+def test_upload_route_check_records_latest_authentication(tmp_path, frozen, change, status):
+    app, path = gateway(tmp_path, stamp(NOW + timedelta(days=6)))
+    # The boundary admits the key in the window; its upload-tool check authenticates again.
+    replace_after(app, path, 1, change)
+    with TestClient(app) as client:
+        rest = client.post("/v1/messages_upload_file_chunk", json={}, headers=HEADERS)
+    assert rest.status_code == status
+    assert "X-DeedKit-Key-Expires" not in rest.headers
+
+
+def test_discovery_recheck_records_latest_authentication(tmp_path, frozen):
+    app, path = gateway(tmp_path, stamp(NOW + timedelta(days=6)))
+    # Boundary, admission and discovery see the window; the discovery recheck sees an extension.
+    replace_after(app, path, 3, lambda agent: agent.update(expires_at=stamp(NOW + timedelta(days=30))))
+    with TestClient(app) as client:
+        rest = client.post("/v1/platform_capabilities", json={}, headers=HEADERS)
+    assert rest.status_code == 409 and rest.json() == {"error": "policy_changed"}
+    assert "X-DeedKit-Key-Expires" not in rest.headers

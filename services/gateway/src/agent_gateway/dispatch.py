@@ -156,7 +156,7 @@ class Dispatch:
         return result
 
     async def discover(self, key):
-        snapshot, agent = self.policy.authenticate(key)
+        snapshot, agent = self.authenticate(key)
         visible = self.policy.visible(snapshot, agent)
         modules = sorted({CATALOG[name]["module"] for name in visible} - {"gateway"})
 
@@ -173,7 +173,7 @@ class Dispatch:
         states = {module: state for module, _, state in results}
         # Recheck current local policy after discovery; a slow backend does not
         # let the old policy snapshot survive a revocation.
-        current, principal = self.policy.authenticate(key)
+        current, principal = self.authenticate(key)
         if current["revision"] != snapshot["revision"]:
             raise Denied("policy_changed", 409)
         visible = [n for n in visible if n in self.policy.visible(current, principal)]
@@ -204,11 +204,14 @@ class Dispatch:
             "backend_tool_manifests": manifests,
         }
 
-    def admit(self, key, name):
-        """`Policy.authorize`, recording the authenticated holder's expiry before the tool check."""
+    def authenticate(self, key):
+        """`Policy.authenticate`, recording the holder's expiry as the request's latest."""
         snapshot, agent = self.policy.authenticate(key)
         admitted.set(self.credential(agent))
-        return self.policy.authorize_agent(snapshot, agent, name)
+        return snapshot, agent
+
+    def admit(self, key, name):
+        return self.policy.authorize_agent(*self.authenticate(key), name)
 
     async def call(self, key, name, values):
         snapshot, agent, tool = self.admit(key, name)
@@ -218,7 +221,7 @@ class Dispatch:
             raise Denied("invalid_arguments", 422) from None
         if tool["module"] == "gateway":
             snapshot, agent, visible, states = await self.discover(key)
-            admitted.set(credential := self.credential(agent))
+            credential = admitted.get()
             return {
                 "service": "deedkit",
                 "version": "0.1.0",
