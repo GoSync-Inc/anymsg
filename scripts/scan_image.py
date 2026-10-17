@@ -27,7 +27,8 @@ CHUNK = 1024 * 1024
 # The only gitleaks log lines a scan may print: the findings summary, and the documented skip of an
 # archive nested inside a layer (.gz, .xz, .whl), which --max-archive-depth 1 does not open.
 EXPECTED_LOG = re.compile(r"\S+ WRN (?:leaks found: \d+|skipping archive: exceeds max archive depth "
-                          r"max_archive_depth=1 path=\S+)")
+                          r"max_archive_depth=1 path=(?:[^\s\"]+|\"(?:[^\"\\]|\\.)*\"))")
+MAX_ALIASES = 256
 BLOCK, ZERO = 512, bytes(512)
 PAYLOAD_FREE = frozenset(b"123456")  # link, device, directory and fifo headers carry no payload
 # The two heuristic rules match ordinary code in hash-locked third-party packages (OAuth helpers,
@@ -63,11 +64,15 @@ def number(field):
 
 
 def pax_size(data):
-    """The `size` record of a PAX extended header, if any."""
+    """The `size` record of a PAX extended header, if any; a malformed record refuses."""
     size, position = None, 0
     while position < len(data) and data[position:position + 1] != b"\0":
-        length = int(data[position:data.index(b" ", position)])
-        key, _, value = data[data.index(b" ", position) + 1:position + length - 1].partition(b"=")
+        space = data.find(b" ", position)
+        digits = data[position:space] if space > position else b""
+        length = int(digits) if digits.isdigit() else 0
+        if length <= len(digits) + 1 or position + length > len(data) or data[position + length - 1] != ord("\n"):
+            raise ValueError("malformed PAX record")
+        key, _, value = data[space + 1:position + length - 1].partition(b"=")
         if key == b"size":
             size = int(value)
         position += length
@@ -115,18 +120,42 @@ def validate_tar(path):
                 layer.seek(blocks, 1)
 
 
+def clean(path):
+    """An image path without `./`, `..` or a leading slash."""
+    return posixpath.normpath("/" + path).lstrip("/")
+
+
 def aliases(path):
     """(link path, target path) for every hard or symbolic link in a layer, relative to the image root."""
     links = []
     with tarfile.open(path, "r:") as layer:
         for entry in layer:
             if entry.islnk():
-                links.append((entry.name, entry.linkname.lstrip("/")))
+                links.append((clean(entry.name), clean(entry.linkname)))
             elif entry.issym():
                 target = entry.linkname if entry.linkname.startswith("/") else \
-                    posixpath.join(posixpath.dirname(entry.name), entry.linkname)
-                links.append((entry.name, posixpath.normpath(target).lstrip("/")))
+                    posixpath.join(posixpath.dirname(clean(entry.name)), entry.linkname)
+                links.append((clean(entry.name), clean(target)))
     return links
+
+
+def names_of(path, links):
+    """Every path a file is reachable by through hard links and file or directory symlinks, transitively.
+
+    None when the set grows past MAX_ALIASES, which callers treat as not narrowable.
+    """
+    names, pending = {path}, [path]
+    while pending:
+        current = pending.pop()
+        for name, target in links:
+            if current == target or current.startswith(target + "/"):
+                alias = name + current[len(target):]
+                if alias not in names:
+                    if len(names) >= MAX_ALIASES:
+                        return None
+                    names.add(alias)
+                    pending.append(alias)
+    return names
 
 
 def prepare(archive_path, directory, links=None):
@@ -177,14 +206,15 @@ def own(path):
 
 
 def third_party(rule, path, links=()):
-    """Whether a heuristic finding lies only inside an installed third-party distribution or system file.
+    """Whether a heuristic finding lies only inside installed third-party distributions or system files.
 
-    Our own packages are recognized first, wherever they are installed, and a file that any link
-    outside third-party code points at is not treated as third-party.
+    Every name the file is reachable by (hard links, file and directory symlinks, transitively) must
+    be a third-party path outside our own packages; otherwise the heuristic finding stands.
     """
-    if rule not in HEURISTIC_RULES or own(path) or not THIRD_PARTY.search(path):
+    if rule not in HEURISTIC_RULES:
         return False
-    return not any(target == path and (own(name) or not THIRD_PARTY.search(name)) for name, target in links)
+    names = names_of(clean(path), links)
+    return names is not None and all(not own(name) and THIRD_PARTY.search(name) for name in names)
 
 
 def gitleaks():

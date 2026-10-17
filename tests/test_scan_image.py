@@ -338,6 +338,33 @@ def test_a_third_party_file_linked_from_our_code_is_not_narrowed(tmp_path):
     assert si.aliases(layer) == [("app/settings.py", third), ("app/conf/link.py", third)]
 
 
+def test_links_are_resolved_transitively_and_through_directories():
+    site = "app/.venv/lib/python3.13/site-packages"
+    links = [("app/.venv/lib64", "app/.venv/lib"),  # venv plumbing: both names stay third-party
+             ("app/conf", f"{site}/vendored"),  # a directory symlink from our code
+             ("app/a.py", "app/b.py"), ("app/b.py", f"{site}/chained/s.py")]  # a chain ending in third-party code
+    assert si.third_party("generic-api-key", f"{site}/plain/s.py", links)
+    assert not si.third_party("generic-api-key", f"{site}/vendored/s.py", links)
+    assert not si.third_party("generic-api-key", f"./{site}/chained/s.py", links)
+    cycle = [("a", "b"), ("b", "a")]
+    assert si.third_party("generic-api-key", f"{site}/x/s.py", cycle)
+    fan = [(f"app/copy{n}", site) for n in range(si.MAX_ALIASES + 1)]
+    assert not si.third_party("generic-api-key", f"{site}/x/s.py", fan)  # too many names: not narrowed
+
+
+def test_malformed_pax_records_refuse_instead_of_looping():
+    assert si.pax_size(b"11 size=12\n") == 12
+    for record in (b"0 size=1\n", b"2 x\n", b"99 size=1\n", b"11 size=12X"):
+        with pytest.raises(ValueError):
+            si.pax_size(record)
+
+
+def test_a_quoted_nested_archive_path_is_an_expected_log_line():
+    line = '7:06AM WRN skipping archive: exceeds max archive depth max_archive_depth=1 path="/tmp/s/layer-0.tar!app/a b/c.gz"'
+    assert si.EXPECTED_LOG.fullmatch(line)
+    assert not si.EXPECTED_LOG.fullmatch(line + ' ERR="x"')
+
+
 @needs_gitleaks
 def test_a_hardlink_from_our_code_keeps_a_third_party_finding(tmp_path):
     third = "app/.venv/lib/python3.13/site-packages/somelib/settings.py"
@@ -416,13 +443,17 @@ PYTHON_GPG = "GPG_KEY=" + "7169605F62C75135" + "6D054A26A821E680E5FA6305"  # pub
 
 
 @needs_gitleaks
-@pytest.mark.parametrize("env, allowed", [(PYTHON_GPG, True), (PYTHON_GPG + "ABCDEF0123456789", False),
-                                         ("X" + PYTHON_GPG, False),
-                                         ("GPG_KEY=" + "0123456789ABCDEF" + "0123456789ABCDEF01234567", False)],
-                         ids=["exact", "suffixed", "prefixed", "other-key"])
+@pytest.mark.parametrize("env, allowed", [(PYTHON_GPG, True),
+                                         ("GPG_KEY=" + "0123456789ABCDEF" + "0123456789ABCDEF01234567", False)])
 def test_only_the_base_image_signing_key_fingerprint_is_allowed_in_the_config(tmp_path, env, allowed):
     found = findings(tmp_path, layers=[{"app/clean.txt": "clean"}], env=[env], history=["ENV " + env])
     assert (found == []) is allowed
+
+
+@needs_gitleaks
+@pytest.mark.parametrize("env", [PYTHON_GPG + "ABCDEF0123456789", "X" + PYTHON_GPG], ids=["suffixed", "prefixed"])
+def test_the_signing_key_allowlist_matches_only_the_exact_value(tmp_path, env):
+    assert findings(tmp_path, layers=[{"app/clean.txt": "clean"}], env=[env])
 
 
 @needs_gitleaks
@@ -441,3 +472,13 @@ def test_private_key_allowlists_are_exact_files(tmp_path, path, allowed):
     assert ("aws-access-token", "layer-0", path, 1) in other
     if not allowed:
         assert [(f[0], f[2]) for f in found] == [("private-key", path)]
+
+
+def test_history_scan_policy_excludes_only_scan_policy_files_and_old_synthetic_values():
+    policy = tomllib.loads((ROOT / ".gitleaks.toml").read_text())
+    assert policy["extend"] == {"useDefault": True} and "rules" not in policy
+    files, synthetic = policy["allowlists"]
+    assert files["paths"] == [r"^config/gitleaks/gitleaks-8\.30\.1-default\.toml$", r"^\.gitleaks-images\.toml$"]
+    assert set(files) == {"description", "paths"}
+    assert synthetic["condition"] == "AND" and synthetic["targetRules"] == ["generic-api-key"]
+    assert synthetic["paths"] == [r"^tests/test_scan_image\.py$"] and len(synthetic["regexes"]) == 2

@@ -8,3 +8,10 @@ useDefault = true
 [[allowlists]]
 description = "Scan policy files: gitleaks 8.30.1's vendored default rules and the image-scan configuration (rule examples and a public signing-key fingerprint)."
 paths = ['''^config/gitleaks/gitleaks-8\.30\.1-default\.toml$''', '''^\.gitleaks-images\.toml$''']
+
+[[allowlists]]
+description = "Synthetic test values in an earlier commit of the image-scan tests (the public CPython signing-key fingerprint and a made-up key, now split in the source)."
+condition = "AND"
+targetRules = ["generic-api-key"]
+paths = ['''^tests/test_scan_image\.py$''']
+regexes = ['''7169605F62C751356D054A26A821E680E5FA6305''', '''0123456789ABCDEF0123456789ABCDEF01234567''']
