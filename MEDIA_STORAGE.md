@@ -149,9 +149,9 @@ an account and then on the first claim at least 60 seconds after the previous
 sweep, so the stored row lags by at most 60 seconds plus one claim cycle (about
 one second on an idle collector). Attachment status and media requests report
 such a lease as `retry_exhausted`/`failed` meanwhile; the operator status media
-phase still counts it as a lease until the sweep. Expired storage reservations are still
-reclaimed on every claim. `tests/test_media_claim_performance.py` checks the
-plans with 30,000 and 60,000 dormant jobs.
+phase still counts it as a lease until the sweep. Expired storage reservations
+are still reclaimed on every claim. `tests/test_media_claim_performance.py`
+checks the plans with 30,000 and 60,000 dormant jobs.
 
 Message capture and original downloads have separate disk budgets. Collector
 `disk_reserve_bytes` retains the capture/spool floor (default 1 GiB).

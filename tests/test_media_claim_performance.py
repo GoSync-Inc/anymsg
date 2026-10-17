@@ -392,5 +392,6 @@ def test_exhausted_lease_is_marked_within_one_interval_and_one_claim_cycle(backl
         with s.pool.connection() as c:
             state=c.execute('SELECT state FROM media_jobs WHERE message=%s',(exhausted,)).fetchone()['state']
         if state=='failed': break
-        assert clock[0]-expired_at<archive_module.MEDIA_SWEEP_SECONDS
-    assert clock[0]-expired_at<=archive_module.MEDIA_SWEEP_SECONDS+cycle
+        assert clock[0]-expired_at<60
+    # The card's bound, independent of the implementation constant.
+    assert clock[0]-expired_at<=60+cycle
