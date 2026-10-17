@@ -77,8 +77,9 @@ server includes that status in traceability/gates.
 ## Card intake
 
 New work reaches Tiden from four sources: the owner; agent feedback recorded
-through DeedKit `submit_feedback` (read with `list_feedback`, SUBSCRIPTIONS.md);
-production issue triage (`triage-issues`); and audits. A worker that finds work
+through DeedKit `submit_feedback`; production issue triage (`triage-issues`); and
+audits. `list_feedback` returns only the calling key's records (SUBSCRIPTIONS.md),
+so the session holding that key relays its feedback to the orchestrator. A worker that finds work
 outside its task reports it to the orchestrator instead of starting it.
 
 1. **Triage.** Search Tiden main and open branches (`product-context`,
@@ -86,8 +87,10 @@ outside its task reports it to the orchestrator instead of starting it.
    Decide whether the work is worth doing; a declined candidate gets its reason at
    its source and no card.
 2. **Write.** Opus or Fable at high effort writes the card from the template
-   below: on a proposal branch for a future-only requirement, on main for a
-   current defect (Current truth and future proposals).
+   below, never directly on main: on a proposal branch for a future-only
+   requirement, which stays open until implemented, or on a review branch for a
+   current defect, which merges to main after review and acceptance (Current
+   truth and future proposals).
 3. **Review.** Astra and Fable review every new card and every spec edit
    (`AGENTS.md`); the card text goes to them as a file.
 4. **Accept.** The owner accepts the card, or the orchestrator does so relaying
@@ -96,6 +99,8 @@ outside its task reports it to the orchestrator instead of starting it.
    ordered by Score, highest first. A current breakage (a defect or an unresolved
    production incident) and a hard deadline go ahead of the order. Deferred work
    stays on main as planned `Backlog` work: it is not cancelled, moved or copied.
+   An existing card becomes ready through a spec edit that adds the template
+   fields, reviewed like any spec edit, and its acceptance; it is never recreated.
 
 ```text
 Title: <plain words: what changes for the owner>
@@ -105,6 +110,7 @@ Acceptance criteria:
 Kind: defect | feature | operational acceptance | chore
 Lane: <lane>   Expected paths: <paths>
 Depends on: <ANYM-n, or none>
+Priority: High | Medium | Low (Tiden's priority field)
 Commitment: committed | conditional | needs a triage decision
 Boundary: <what is already implemented; what remains>
 Evidence to close: <tests and checks; any separately authorized live action>
@@ -208,7 +214,8 @@ display text can use DeedKit immediately.
    tests or the seven `anymsg-ci::*` checks. Review assertions before proposing
    links: even an exact source-file match does not prove a whole specification.
    Build the `Spec impact:` list (`AGENTS.md`): match
-   `git diff --name-only <merge-base>..HEAD` against the `repo_file` anchors in
+   `git diff --no-renames --name-only <merge-base>..HEAD` (both paths of a
+   rename) against the `repo_file` anchors in
    `tiden spec list --branch main --include-sources --format json`, let an anchor
    from before the move into `services/messaging/` match without that prefix,
    leave out the `BACKLOG.md` hub, and add the session delta from
@@ -259,9 +266,14 @@ Drift compares Git main with a reviewed spec-sync watermark. Re-anchoring, PR
 links and component changes are bookkeeping, not verification: they do not make
 spec text current. Advance the watermark (`tiden drift advance`) only after a
 delta audit has checked every spec anchored to files changed since the previous
-watermark against the code, and its edits are merged on Tiden main; never use
-`empty_sync` or `bootstrap` to clear a delta that was not audited. Record the
-audited SHA, the spec count and the findings in the audit artifact, outside Git.
+watermark against the code, every changed file without a matching anchor has an
+anchor on the spec it implements or a recorded reason why none applies, and the
+audit's edits are merged on Tiden main. Pass `--from`, `--to` and `--reason`
+explicitly; never use `empty_sync` (the default) or `bootstrap` to clear a delta
+that was not audited. The vendor documents none of the reasons (CLI 0.33.0
+accepts `empty_sync`, `bootstrap` and `baseline`): confirm which one records an
+audited advance before the first use and note it here. Record the audited SHA,
+the spec count and the findings in the audit artifact, outside Git.
 A new commit after the audited target is fresh drift, not a reason to claim the
 old review covered it.
 

@@ -75,14 +75,16 @@ and every spec in the session delta of `tiden intent progress`, built as the Tid
 workflow describes: one line per spec, `ANYM-n: updated` or
 `ANYM-n: no behavior change — <reason>`. The list is a floor: also name a spec
 whose behavior changed without an anchor match, and add anchors for new files to
-the specs they implement. A skip is invalid when a changed code file is anchored to
-a spec. Reviewers receive the current text of every listed spec, not only the
+the specs they implement; without a local CLI, say so under `Spec impact:`. A skip
+is invalid when it changes code beyond comments in a file anchored to a spec.
+Reviewers receive the current text of every listed spec, not only the
 promised ones, and check each disposition; "no behavior change" on a spec whose
 criteria the diff changes is a finding. Before `tiden intent close`, every
 session-delta spec has a disposition in that list; a passing linked test does not
-make spec text current. Merge the Tiden branch in the same step as the Git PR,
-confirm with `tiden branch merge-preview` that nothing of the change is left
-unmerged, and set a card to its delivered status when its code merges.
+make spec text current. Merge the Tiden branch in the same step as the Git PR:
+check `tiden branch merge-preview` before merging and read back Tiden main after
+it, so nothing of the change is left unmerged, and set a card to its delivered
+status when its code merges.
 
 Backlog and specs are reviewed too, on top of the level's reviews. Cards enter
 Tiden through the card intake in docs/operations/tiden-product-workflow.md.

@@ -97,8 +97,9 @@ at least important (`AGENTS.md`). Prefer splitting it.
   orchestrator's "ok" (Worker protocol). Enqueueing a pull request is merging it.
   Never bypass required checks or use administrator merges.
 - Merging the Git pull request never merges its Tiden branch. Merge both in the
-  same step, under the same review level and conditions, and confirm with the
-  Tiden merge preview that nothing of the change is left unmerged.
+  same step, under the same review level and conditions: check the Tiden merge
+  preview before merging and read back Tiden main after it, so nothing of the
+  change is left unmerged.
 
 ## Schema compatibility
 
