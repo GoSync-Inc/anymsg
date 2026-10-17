@@ -24,7 +24,8 @@ under Review levels in [AGENTS.md](../../AGENTS.md). Do not restate those rules 
 
 A story is **ready** when its Tiden card was accepted through the card intake in
 the Tiden workflow and has the template's fields, including its Score, **lane**
-and expected paths. Stories that are not ready go back to the owner. A
+and expected paths. A story that is not ready goes back to card intake (the owner for feature
+and improvement). A
 change that takes `tiden intent skip` has no story; its brief names the goal and
 paths instead.
 
@@ -139,10 +140,11 @@ at least important (`AGENTS.md`). Prefer splitting it.
 
 ## Orchestrator loop
 
-1. Read Tiden main and open proposal branches; list ready stories by Score,
-   current breakages and hard deadlines first.
+1. Read Tiden main and open proposal branches; list ready stories.
 2. List open pull requests and intent branches; compute busy lanes.
-3. Dispatch every story whose paths fit a free lane; there is no fixed number of
+3. Select the wave by the Queue rule in the card intake
+   ([tiden-product-workflow.md](tiden-product-workflow.md)) and dispatch every
+   selected story whose paths fit a free lane; there is no fixed number of
    workers. The real limits are file overlap (lanes), the GitHub CI queue and the
    owner's attention for owner-level decisions; the orchestrator watches them.
 4. Each brief names: story link or goal, lane, expected paths, review level,
@@ -154,7 +156,7 @@ at least important (`AGENTS.md`). Prefer splitting it.
 6. After merge: confirm the worker's post-merge check, update the story, free the
    lane.
 7. Escalate to the owner: priority conflicts, owner-level pull requests, every
-   escalation condition under Review levels in `AGENTS.md`, any story that is not
+   escalation condition under Review levels in `AGENTS.md`, any feature or improvement story that is not
    ready.
 
 The orchestrator starts no new worker when its context is above about 60%, at the

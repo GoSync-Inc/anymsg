@@ -93,13 +93,28 @@ starting it.
    current defect, which merges to main after review and acceptance (Current
    truth and future proposals).
 3. **Review.** Astra and Fable review every new card and every spec edit
-   (`AGENTS.md`); the card text goes to them as a file.
-4. **Accept.** The owner accepts the card, or the orchestrator does so relaying
-   the owner's quoted words. Record it on the card.
-5. **Queue.** Accepted cards with a lane and expected paths form the ready queue,
-   ordered by Score, highest first. A current breakage (a defect or an unresolved
-   production incident) and a hard deadline go ahead of the order. Deferred work
-   stays on main as planned `Backlog` work: it is not cancelled, moved or copied.
+   (`AGENTS.md`); the card text goes to them as a file. They first judge whether
+   the card should exist: a real need and value, no duplicate of an existing card
+   or built-in capability, no over-engineering (a smaller or existing solution),
+   and whether it must be built now. They may reject or shrink it; a rejected
+   card gets its reason at its source.
+4. **Accept.** Cards in the categories feature and improvement (owner-visible
+   product behavior) are accepted by the owner, presented in plain words, or by
+   the orchestrator relaying the owner's quoted words. Cards in defect, infra,
+   refactor and research are accepted by the orchestrator once Astra and Fable
+   both approve with no open findings, necessity check included. The orchestrator
+   brings such a card to the owner when the reviewers disagree, when it changes
+   product behavior beyond restoring the contract, or when an escalation
+   condition in `AGENTS.md` applies. Record who accepted on the card.
+5. **Queue.** Accepted cards with a lane and expected paths form the ready queue.
+   A wave takes current breakages (defects, unresolved production incidents) and
+   hard deadlines first. The rest of the wave is about 70% product (feature,
+   improvement) and 30% engineering (infra, refactor), counted by Effort, and
+   holds at least one refactor card when one is ready. Within each share, order
+   by Score, highest first. When a feature needs a refactor or an enabler, create a separate
+   refactor or infra card and link it as the feature's dependency. A research card
+   counts toward the category of the work it unblocks, or engineering when that
+   is unknown. Deferred work stays on main as planned `Backlog` work: it is not cancelled, moved or copied.
    An existing card becomes ready through a spec edit that adds the template
    fields, reviewed like any spec edit, and its acceptance; it is never recreated.
 
@@ -108,23 +123,52 @@ Title: <plain words: what changes for the owner>
 Problem: <what is wrong or missing today and the desired behavior; evidence, source>
 Acceptance criteria:
 - <observable, testable criterion>
-Kind: defect | feature | operational acceptance | chore
+Category: defect | feature | improvement | infra | refactor | research
 Lane: <lane>   Expected paths: <paths>
 Depends on: <ANYM-n, or none>
 Priority: High | Medium | Low (Tiden's priority field)
 Commitment: committed | conditional | needs a triage decision
 Boundary: <what is already implemented; what remains>
 Evidence to close: <tests and checks; any separately authorized live action>
-Value: <1|2|3|5|8>   Effort: <1|2|3|5|8>   Score: <Value / Effort, two decimals>
+Value: <1|2|3|5|8>   Effort: <1|2|3|5|8; 13 and 21 only before the split>   Score: <Value / Effort, two decimals>
 History: <DK-* identity, related specs, source/PR links, as-of SHA>
 How others solve it: <concrete open-source projects or standards; adopt | adapt | build, and why>
 Research: <large items only, by the research rule in AGENTS.md>
-Accepted: <date>, <owner | orchestrator relaying the owner>
+Accepted: <date>, <owner | orchestrator | orchestrator relaying the owner>
+Actual: <h> h (intent rounds <h> h; PR #<n> open→merge <h> h), added when the work merges
 ```
 
-Value is the benefit to the owner. Effort is agent work: 1 is about an hour, 3
-about a day, 8 a week or more. Tiden's priority field keeps its meaning (High,
-Medium, Low) and still raises review levels; the queue order comes from Score.
+Category: defect = current behavior breaks a contract or spec; feature = a new
+owner-visible capability; improvement = a better existing capability; infra = CI,
+release, deploy, observability, operations, dependency updates; refactor = code structure without
+behavior change, including enablers a feature needs; research = a time-boxed
+investigation whose output is a decision or cards. An acceptance card takes the
+category of the work it accepts.
+
+Value is the benefit to the owner. Effort is in story points (Fibonacci 1, 2, 3,
+5, 8, 13, 21): relative size from the amount of work, complexity and
+uncertainty or risk, estimated by comparison with the reference stories below,
+not in hours and not from human-team experience. Reference stories (merged PRs):
+1 = #59 (one-line-scope release fix); 2 = #66 (small release fix with test);
+3 = #52 (expire unprocessed originals by policy); 5 = #68 (exact source SHA in
+images and release record); 8 = #40 (blue-green HTTP releases). Score stays
+Value / Effort. Tiden's priority field keeps its meaning (High, Medium, Low) and
+still raises review levels; the order within a share comes from Score.
+
+13 and 21 are size signals only (21 is much larger): such a card becomes a parent
+(Feature, or Epic for 21) that keeps the overall estimate, with child Stories of
+at most 8, each an independent increment and one PR. Steps inside a story are the
+worker's plan, not cards. Ready cards are at most 8; the card review checks every
+8 for a split.
+
+When a card's work merges, the worker records the actual time on the card in
+hours, as one total from first start to merge (the parts overlap; never sum
+them), with the parts: intent rounds from `tiden intent journal --format json`
+(StartedAt to ClosedAt) and the PR's open-to-merge time; a recorded skip has the
+PR times only. The orchestrator keeps the velocity ledger across cards; the weekly
+review ([parallel-development.md](parallel-development.md)) reports points per
+hour from these pairs, uses it for wave planning and revises the reference
+stories.
 
 ## Working loop
 

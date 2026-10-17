@@ -92,8 +92,9 @@ Opus or Fable at high effort writes every new card and spec text. Astra and Fabl
 both review every new card and every spec edit, single or bulk: Fable for clear,
 testable acceptance criteria, no duplicates, right component, priority,
 dependencies and score; Astra for whether the problem and criteria match the code,
-edge cases, security and the research note. Only the owner, or the orchestrator
-relaying the owner, accepts a card into the ready queue. Without a code PR, a spec
+edge cases, security and the research note. Acceptance into the
+ready queue follows Card intake step 4 (owner for feature and improvement; the
+orchestrator for the other categories after both reviews). Without a code PR, a spec
 edit in Tiden is normal and a bulk restructuring is important. Signals and the
 owner row raise either, as for a PR, and the agent merges under the conditions
 below. A proposal branch for future requirements stays open until implemented
