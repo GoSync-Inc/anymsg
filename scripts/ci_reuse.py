@@ -55,14 +55,19 @@ def run_url(repository: str, run_id: object, attempt: object) -> str:
     return f"https://github.com/{repository}/actions/runs/{run_id}/attempts/{attempt}"
 
 
-def queue_run(sha: str, get, sleep=time.sleep, wait: int = QUEUE_WAIT_SECONDS) -> dict:
-    """The merge queue run that verified `sha` by promotion's rules, after waiting for it to complete."""
+def queue_run(sha: str, get, sleep=time.sleep, wait: int = QUEUE_WAIT_SECONDS, clock=time.monotonic) -> dict:
+    """The merge queue run that verified `sha` by promotion's rules, after waiting for it to complete.
+
+    The wait is measured on the clock, so slow API responses cannot stretch it; the decision step's own timeout,
+    below the job's, also ends a hung lookup as a full verification.
+    """
+    deadline = clock() + wait
     try:
-        for _ in range(wait // QUEUE_POLL_SECONDS):
+        while True:
             latest = production.latest_run(sha, "merge_group", get)
             if latest is None:
                 raise Refused("no merge queue run tested this commit")
-            if latest.get("status") == "completed":
+            if latest.get("status") == "completed" or clock() + QUEUE_POLL_SECONDS > deadline:
                 break
             sleep(QUEUE_POLL_SECONDS)
         return production.queue_verification(sha, get)
@@ -70,11 +75,11 @@ def queue_run(sha: str, get, sleep=time.sleep, wait: int = QUEUE_WAIT_SECONDS) -
         raise Refused(str(exc)) from None
 
 
-def decide(sha: str, repository: str, get=production.api, sleep=time.sleep) -> dict:
+def decide(sha: str, repository: str, get=production.api, sleep=time.sleep, clock=time.monotonic) -> dict:
     """Pin the queue run, its latest attempt and that attempt's one evidence artifact; Refused means verify in full."""
     if repository != production.REPOSITORY or not SHA.fullmatch(sha):
         raise Refused("only an exact commit of this repository's main reuses its queue verification")
-    queue = queue_run(sha, get, sleep)
+    queue = queue_run(sha, get, sleep, clock=clock)
     attempt = queue["run_attempt"]
     started = get(f"actions/runs/{queue['id']}/attempts/{attempt}")
     if started.get("id") != queue["id"] or started.get("run_attempt") != attempt or not started.get("run_started_at"):

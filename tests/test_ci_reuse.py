@@ -150,15 +150,45 @@ def test_an_earlier_attempts_evidence_beside_the_latest_attempts_is_ignored():
     assert ci_reuse.decide(SHA, REPOSITORY, get=github, sleep=lambda seconds: None)["artifact_id"] == "77"
 
 
+class Clock:
+    """A synthetic monotonic clock: sleeping, and optionally every API call, advances it."""
+
+    def __init__(self):
+        self.now, self.sleeps = 0.0, []
+
+    def __call__(self):
+        return self.now
+
+    def sleep(self, seconds):
+        self.sleeps.append(seconds)
+        self.now += seconds
+
+
 def test_the_decision_waits_for_a_running_queue_run_and_never_reuses_one_that_does_not_finish():
-    github, sleeps = GitHub(runs=[queue_run(status="in_progress", conclusion=None)]), []
+    github, clock = GitHub(runs=[queue_run(status="in_progress", conclusion=None)]), Clock()
     github.after["actions/workflows"] = lambda state: len(github.calls) > 3 and state.runs[0].update(
         status="completed", conclusion="success")
-    assert ci_reuse.decide(SHA, REPOSITORY, get=github, sleep=sleeps.append)["run_id"] == str(QUEUE_ID)
-    assert sleeps and set(sleeps) == {ci_reuse.QUEUE_POLL_SECONDS}
-    stuck = GitHub(runs=[queue_run(status="in_progress", conclusion=None)])
+    assert ci_reuse.decide(SHA, REPOSITORY, get=github, sleep=clock.sleep, clock=clock)["run_id"] == str(QUEUE_ID)
+    assert clock.sleeps and set(clock.sleeps) == {ci_reuse.QUEUE_POLL_SECONDS}
+    stuck, clock = GitHub(runs=[queue_run(status="in_progress", conclusion=None)]), Clock()
     with pytest.raises(ci_reuse.Refused, match="not a completed success"):
-        ci_reuse.decide(SHA, REPOSITORY, get=stuck, sleep=lambda seconds: None)
+        ci_reuse.decide(SHA, REPOSITORY, get=stuck, sleep=clock.sleep, clock=clock)
+    assert clock.now <= ci_reuse.QUEUE_WAIT_SECONDS
+
+
+def test_slow_api_responses_never_stretch_the_wait_for_the_queue_run():
+    clock = Clock()
+    stuck = GitHub(runs=[queue_run(status="in_progress", conclusion=None)])
+    stuck.after[""] = lambda state: setattr(clock, "now", clock.now + 11)  # every API call takes 11 seconds
+    with pytest.raises(ci_reuse.Refused, match="not a completed success"):
+        ci_reuse.decide(SHA, REPOSITORY, get=stuck, sleep=clock.sleep, clock=clock)
+    # The last poll starts before the deadline; the remaining reads of queue_verification follow it.
+    assert clock.now <= ci_reuse.QUEUE_WAIT_SECONDS + 3 * 11
+    ci, _ = workflows()
+    decide = next(step for step in ci["jobs"]["reuse"]["steps"] if step.get("id") == "decide")
+    # A lookup that hangs anyway ends at the step timeout, recorded as a full verification, inside the job's.
+    assert decide["continue-on-error"] is True and decide["timeout-minutes"] * 60 > ci_reuse.QUEUE_WAIT_SECONDS
+    assert decide["timeout-minutes"] < ci["jobs"]["reuse"]["timeout-minutes"]
 
 
 def test_only_an_exact_commit_of_this_repository_is_considered():
@@ -178,13 +208,13 @@ def test_a_lookup_error_before_the_choice_means_full_verification_and_a_green_de
     def unavailable(path):
         raise OSError("GitHub API unavailable")
     monkeypatch.setattr(production, "api", unavailable)
-    monkeypatch.setattr(ci_reuse.decide, "__defaults__", (unavailable, lambda seconds: None))
+    monkeypatch.setattr(ci_reuse.decide, "__defaults__", (unavailable, lambda seconds: None, Clock()))
     assert ci_reuse.main() == 0
     assert output.read_text() == "decision=full\n"
     assert "Full verification" in capsys.readouterr().out
     output.write_text("")
     github = GitHub(artifacts=[artifact(data=b"zip")])
-    monkeypatch.setattr(ci_reuse.decide, "__defaults__", (github, lambda seconds: None))
+    monkeypatch.setattr(ci_reuse.decide, "__defaults__", (github, lambda seconds: None, Clock()))
     assert ci_reuse.main() == 0
     assert output.read_text().splitlines() == ["decision=reuse", f"run_id={QUEUE_ID}", "run_attempt=2", "artifact_id=77",
                                                "artifact_digest=" + digest(b"zip")]
@@ -376,7 +406,8 @@ def tiden_main(monkeypatch, directory, environment, *command):
         return subprocess.CompletedProcess(args, 0, stdout=json.dumps(values.get(tuple(operation), {})), stderr="")
     monkeypatch.setattr(subprocess, "run", run)
     for name, value in {"GITHUB_REPOSITORY": REPOSITORY, "GITHUB_RUN_ID": str(PUSH_ID), "GITHUB_RUN_ATTEMPT": "1",
-                        "GITHUB_SHA": SHA, "TIDEN_PRODUCT_ID": PRODUCT, **environment}.items():
+                        "GITHUB_SHA": SHA, "GITHUB_EVENT_NAME": "push", "GITHUB_REF": "refs/heads/main",
+                        "TIDEN_PRODUCT_ID": PRODUCT, **environment}.items():
         monkeypatch.setenv(name, value)
     monkeypatch.delenv("TIDEN_BRANCH_MAP", raising=False)
     monkeypatch.setattr(sys, "argv", ["tiden_ci.py", *command, "--directory", str(directory)])
@@ -424,8 +455,8 @@ def test_the_push_run_records_the_release_under_its_own_run_url(tmp_path, monkey
 
 @pytest.mark.parametrize("environment", [
     {"GITHUB_RUN_ATTEMPT": "2"}, {"GITHUB_RUN_ID": "901"}, {"GITHUB_SHA": "b" * 40}, {"GITHUB_REPOSITORY": "fork/deedkit"},
-    {"GITHUB_RUN_ID": ""},
-], ids=["other-attempt", "other-run", "other-commit", "other-repository", "no-environment"])
+    {"GITHUB_RUN_ID": ""}, {"GITHUB_EVENT_NAME": "workflow_dispatch"}, {"GITHUB_REF": "refs/heads/feature"},
+], ids=["other-attempt", "other-run", "other-commit", "other-repository", "no-environment", "not-push", "not-main"])
 @pytest.mark.parametrize("command", [("publish",), ("release", "--environment", "github-actions-synthetic")],
                          ids=["publish", "release"])
 def test_a_publication_record_of_another_run_attempt_or_commit_publishes_nothing(tmp_path, monkeypatch, environment, command):
@@ -446,8 +477,20 @@ def test_a_publication_record_beside_evidence_that_is_not_the_queue_runs_publish
             tiden_main(monkeypatch, published, {}, *command)
     (published / "manifest.json").write_text(json.dumps(manifest))
     record = json.loads((published / "publication.json").read_text())
-    for change in ({"event": "merge_group"}, {"git_branch": "feature"}, {"producer": {**record["producer"], "sha": "b" * 40}}):
+    producer = record["producer"]
+    foreign = f"https://github.com/fork/deedkit/actions/runs/{QUEUE_ID}/attempts/2"
+    for change in ({"event": "merge_group"}, {"git_branch": "feature"}, {"producer": {**producer, "sha": "b" * 40}},
+                   {"producer": {"url": producer["url"], "sha": SHA}},
+                   {"producer": {**producer, "repository": "fork/deedkit"}},
+                   {"producer": {**producer, "workflow": ".github/workflows/other.yml"}},
+                   {"producer": {**producer, "run_attempt": "1"}},
+                   {"producer": {**producer, "run_id": str(QUEUE_ID + 1)}},
+                   {"producer": {**producer, "run_id": str(PUSH_ID)}},
+                   {"producer": {**producer, "artifact_digest": "md5:x"}},
+                   {"producer": {**producer, "url": foreign}}):
         (published / "publication.json").write_text(json.dumps({**record, **change}))
+        if change.get("producer", {}).get("url") == foreign:
+            (published / "manifest.json").write_text(json.dumps({**manifest, "ci_url": foreign}))
         with pytest.raises(ValueError, match="publication record"):
             tiden_main(monkeypatch, published, {}, *command)
 

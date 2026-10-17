@@ -59,6 +59,7 @@ MAX_RUN_PAGES = 10
 # run's unchanged evidence with this record of itself as publisher, and these check rows under its own run URL.
 PUBLICATION = "publication.json"
 PUBLISHED_CHECKS = "ci-checks-published.json"
+PRODUCER_FIELDS = ("repository", "workflow", "run_id", "run_attempt", "url", "artifact_id", "artifact_digest", "sha")
 
 
 def source_path(value: str, root: Path) -> str:
@@ -249,26 +250,35 @@ def assemble(directory: Path, fragments: Path, ci_url: str, producers: dict) -> 
 def published_manifest(directory: Path, manifest: dict) -> dict:
     """The manifest this run publishes: its own, or with a publication record the merge queue run's evidence.
 
-    The record must name this job's main push run, attempt and commit from its environment, and the evidence must
-    be the queue run's of that commit. Test executions, outcomes and identities stay the queue run's; the event,
+    The job must run for a push to main, the record must name this job's run, attempt and commit from its
+    environment, and its producer must be a ci.yml run attempt of this repository whose evidence, of that commit,
+    lies beside it. Test executions, outcomes and identities stay the queue run's; the event,
     Git branch, CI URL and check row IDs become this push run's, and `tested_in` names the queue run attempt.
     """
     if not (directory / PUBLICATION).exists() and not (directory / PUBLICATION).is_symlink():
         return manifest
-    repository, run_id, attempt, sha = (os.environ.get(name, "") for name in (
-        "GITHUB_REPOSITORY", "GITHUB_RUN_ID", "GITHUB_RUN_ATTEMPT", "GITHUB_SHA"))
+    repository, run_id, attempt, sha, event, ref = (os.environ.get(name, "") for name in (
+        "GITHUB_REPOSITORY", "GITHUB_RUN_ID", "GITHUB_RUN_ATTEMPT", "GITHUB_SHA", "GITHUB_EVENT_NAME", "GITHUB_REF"))
     ci_url = f"https://github.com/{repository}/actions/runs/{run_id}/attempts/{attempt}"
     try:
         record = json.loads(control_file(directory, PUBLICATION))
         producer = record["producer"]
-        valid = (bool(RUN_ATTEMPT_URL.fullmatch(ci_url)) and re.fullmatch(r"[a-f0-9]{40}", sha) is not None
+        producer_url = "https://github.com/{}/actions/runs/{}/attempts/{}".format(
+            repository, producer["run_id"], producer["run_attempt"])
+        valid = ((event, ref) == ("push", "refs/heads/main") and bool(RUN_ATTEMPT_URL.fullmatch(ci_url))
+                 and re.fullmatch(r"[a-f0-9]{40}", sha) is not None
                  and {key: record.get(key) for key in ("schema", "event", "git_branch", "repository", "run_id",
                                                        "run_attempt", "sha", "ci_url")}
                  == {"schema": 1, "event": "push", "git_branch": "main", "repository": repository, "run_id": run_id,
                      "run_attempt": attempt, "sha": sha, "ci_url": ci_url}
                  and producer["sha"] == manifest.get("sha") == sha and merge_queue_run(manifest)
-                 and producer["url"] == manifest.get("ci_url") != ci_url
-                 and RUN_ATTEMPT_URL.fullmatch(producer["url"]) is not None)
+                 and set(producer) == set(PRODUCER_FIELDS) and producer["repository"] == repository
+                 and producer["workflow"] == ".github/workflows/ci.yml"
+                 and str(producer["run_id"]).isdigit() and str(producer["run_attempt"]).isdigit()
+                 and str(producer["run_id"]) != run_id and str(producer["artifact_id"]).isdigit()
+                 and re.fullmatch(r"sha256:[0-9a-f]{64}", producer["artifact_digest"]) is not None
+                 and producer["url"] == producer_url == manifest.get("ci_url")
+                 and RUN_ATTEMPT_URL.fullmatch(producer_url) is not None)
         rows = json.loads(control_file(directory, "ci-checks.json")) if valid else []
         published = [{**row, "id": str(uuid.uuid5(uuid.NAMESPACE_URL, ci_url + "/" + row["signature"].split("::", 1)[1])),
                       "message": f"{row['message']}; tested in {producer['url']}"} for row in rows]
