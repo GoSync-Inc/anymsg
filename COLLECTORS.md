@@ -1,21 +1,21 @@
-# Telegram collector: подготовка к подключению
+# Telegram collector: preparing to connect
 
-Каждый аккаунт подключает владелец в своём терминале. Количество аккаунтов
-не ограничено двумя: compose показывает примеры двух независимых WhatsApp и
-одного Telegram. Для следующих аккаунтов нужны отдельные configs, sessions,
-spools, account IDs и services. Проверки живого сбора относятся к конкретной
-установке и не доказывают полноту истории другого пользователя.
+The owner connects each account in their own terminal. The number of accounts
+is not limited to two: compose shows examples of two independent WhatsApp accounts and
+one Telegram account. Further accounts need separate configs, sessions,
+spools, account IDs and services. Live collection checks apply to a specific
+installation and do not prove the completeness of another user's history.
 
-## Устройство
+## Design
 
-- Telethon 1.45.0 закреплён lock-файлами. Обработчики new/edit/delete сначала сохраняют capture в ограниченную очередь с fsync. Недоступная БД не удерживает блокировку записи в очередь. Переполнение очереди/ошибка сохранения останавливает collector и требует reconciliation.
-- Процесс держит локальный `flock` session-файла и продлеваемую DB lease. Отдельные leases защищают media jobs; потерявший ownership процесс не может завершить ingest или опубликовать файл. Это не способ удалённо остановить старый Mac-клиент: его остановку и автозапуск проверяют до handover.
-- Новый чат получает недавнюю страницу; прежняя история догружается небольшими порциями. Новые сообщения проходят по отдельному high-water cursor из PostgreSQL. Cursor двигается только после записи всей страницы, а live callback его не перескакивает. При падении страницы её captures остаются для replay.
-- Повторная сверка недавнего окна обнаруживает правки; persisted tombstones не дают позднему backfill воскресить известное удаление. Удаление без chat ID применяется только к ID-пространству private/basic group, а не к channel с совпавшим номером сообщения.
-- Файлы скачиваются по обновлённому provider reference частями по 512 KiB. Размер проверяется до публикации, worker продлевает lease. FloodWait определяет минимальное время следующей попытки; thumbnail не выдаётся вместо оригинала. В0.7.3 явно выбирается PhotoSize/Progressive, размер которого совпадает с descriptor; порядок размеров в ответе не используется как гарантия. Cached/stripped-only preview остаётся unavailable.
-- Gateway не получает Telegram credentials. Отдельная collector role имеет DML только для ingest/jobs/positions; ключи агентов, consumer ACK, grants, DDL и изменение collection policy ей недоступны. Эта роль предназначена для доверенного сборщика одного владельца, не является изоляцией между разными владельцами.
+- Telethon 1.45.0 is pinned by lock files. The new/edit/delete handlers first save the capture to a bounded queue with fsync. An unavailable DB does not hold the queue write lock. A queue overflow or save error stops the collector and requires reconciliation.
+- The process holds a local `flock` on the session file and a renewable DB lease. Separate leases protect media jobs; a process that has lost ownership cannot finish an ingest or publish a file. This is not a way to stop an old Mac client remotely: its shutdown and autostart are checked before handover.
+- A new chat gets a recent page; earlier history is loaded in small portions. New messages go through a separate high-water cursor from PostgreSQL. The cursor moves only after the whole page is written, and a live callback does not jump over it. If a page fails, its captures remain for replay.
+- A repeated check of the recent window detects edits; persisted tombstones keep a late backfill from resurrecting a known deletion. A deletion without a chat ID applies only to the ID space of a private/basic group, not to a channel with a matching message number.
+- Files are downloaded by the refreshed provider reference in 512 KiB parts. The size is checked before publication, and the worker renews the lease. FloodWait sets the minimum time of the next attempt; a thumbnail is not issued in place of the original. In 0.7.3 a PhotoSize/Progressive whose size matches the descriptor is chosen explicitly; the order of sizes in the response is not used as a guarantee. A cached/stripped-only preview stays unavailable.
+- The gateway does not receive Telegram credentials. A separate collector role has DML only for ingest/jobs/positions; agent keys, consumer ACKs, grants, DDL and changes to the collection policy are not available to it. This role is intended for a trusted collector of one owner and is not isolation between different owners.
 
-Coverage остаётся `partial`: Telegram не гарантирует уведомление обо всех удалениях, недоступная история не равна пустой истории, а ограниченное overlap-окно не доказывает отсутствие старых правок. Исчезновение из недавней страницы не считается удалением. Ограничение discovery и недоступный явно выбранный чат имеют отдельные status codes.
+Coverage stays `partial`: Telegram does not guarantee a notification about every deletion, unavailable history is not the same as empty history, and a bounded overlap window does not prove there are no old edits. Disappearance from a recent page is not treated as a deletion. A discovery limit and an unavailable explicitly chosen chat have separate status codes.
 
 Original downloads use [independent storage admission](MEDIA_STORAGE.md):
 `media_disk_reserve_bytes` (default 10 GiB) is separate from the capture/spool
@@ -23,17 +23,17 @@ Original downloads use [independent storage admission](MEDIA_STORAGE.md):
 `paused_storage`, preserve their provider attempts, and do not stop new-message
 capture. Configure these floors after measuring the host and backup workspace.
 
-### Доступность новых сообщений
+### Availability of new messages
 
-Telegram new/edit callbacks и WhatsApp `message_create` (включая исходящие)
-сохраняют события в durable spool. Очередь разбирается каждые 250 мс независимо
-от периодической сверки истории. Текст и его Postgres full-text vectors становятся
-видимыми после одной ingest transaction. Скачивание originals, извлечение текста
-и модельная обработка выполняются отдельно и имеют собственные статусы.
-250 мс — интервал проверки очереди, не SLA: к нему добавляются доставка провайдера,
-fsync, очередь БД и время самого запроса агента. При остановке/reconnect возможны
-догоняющие события; `origin=live` не доказывает отсутствие такой задержки.
-Stateless MCP не будит простаивающего агента: клиент должен вызвать чтение/updates.
+Telegram new/edit callbacks and WhatsApp `message_create` (including outgoing)
+save events to a durable spool. The queue is drained every 250 ms, independently
+of the periodic history check. The text and its Postgres full-text vectors become
+visible after one ingest transaction. Downloading originals, extracting text
+and model processing run separately and have their own statuses.
+250 ms is the queue polling interval, not an SLA: provider delivery,
+fsync, the DB queue and the agent's own request time are added to it. After a stop/reconnect
+catch-up events are possible; `origin=live` does not prove there was no such delay.
+Stateless MCP does not wake an idle agent: the client must call read/updates.
 
 Account sync freshness keeps successful scan age in `scan_state`, separately
 from live capture state. Pending spool captures report `capture_backlogged`; an
@@ -42,82 +42,82 @@ history scan. An old last commit with zero pending captures is not evidence of
 lag on a quiet source. Media storage pauses qualify original availability
 independently. Chat-restricted readers receive no account-wide collector state.
 
-Owner mentions сохраняются по Telegram `mentioned` или совпадению WhatsApp
-mentioned IDs с cached phone/LID identities текущего авторизованного аккаунта.
-У WhatsApp quoted participant тоже может подтвердить ответ владельцу. Capture
-не делает дополнительных contact/quoted-message запросов; неизвестный LID не
-сопоставляется с phone по имени или числовому совпадению. Ранее сохранённые reply
-IDs можно сопоставить с outgoing только внутри того же account/chat. Это
-эвристика очереди внимания, а не provider unread state или факт обязательства.
+Owner mentions are saved by Telegram `mentioned` or by a match of WhatsApp
+mentioned IDs with the cached phone/LID identities of the currently authorized account.
+For WhatsApp, a quoted participant can also confirm a reply to the owner. Capture
+makes no extra contact/quoted-message requests; an unknown LID is not
+matched to a phone by name or numeric coincidence. Previously saved reply
+IDs can be matched to an outgoing message only within the same account/chat. This is a
+heuristic for the attention queue, not the provider's unread state or a fact of an obligation.
 
-Документация использованных API: [Telethon catch-up и streaming download](https://docs.telethon.dev/en/stable/modules/client.html), [ограничения MessageDeleted](https://docs.telethon.dev/en/stable/modules/events.html#telethon.events.messagedeleted.MessageDeleted). Реальные Telegram downloads проверены; длительное наблюдение и сценарии reconnect требуют отдельной приёмки. В0.7.2 истёкшие/требующие обновления file references обрабатываются очередью с ограниченными попытками и новой загрузкой metadata, не останавливая сбор остальных чатов.
+API documentation used: [Telethon catch-up and streaming download](https://docs.telethon.dev/en/stable/modules/client.html), [MessageDeleted limitations](https://docs.telethon.dev/en/stable/modules/events.html#telethon.events.messagedeleted.MessageDeleted). Real Telegram downloads were verified; long-term observation and reconnect scenarios need separate acceptance. In 0.7.2 expired or refresh-needing file references are handled by the queue with bounded attempts and a fresh metadata load, without stopping collection of other chats.
 
-### Карантин очереди и устойчивость
+### Queue quarantine and resilience
 
-Одно сообщение не останавливает сбор аккаунта. Адаптеры обрезают или
-нейтрализуют отображаемые поля от отправителя (MIME с параметрами или
-управляющими символами, длинные имена файлов и имена профилей, NUL в тексте,
-размер больше 8 GiB, слишком длинный `replyToId`) вместо отказа. Сообщение,
-которое всё равно не проходит проверку, при сверке истории пропускается и
-считается в `invalid_provider_messages` статуса `live_capture`.
+One message does not stop an account's collection. Adapters truncate or
+neutralize display fields supplied by the sender (MIME with parameters or
+control characters, long file names and profile names, NUL in text,
+a size over 8 GiB, an overlong `replyToId`) instead of rejecting them. A message
+that still fails validation is skipped during history reconciliation and
+counted in `invalid_provider_messages` of the `live_capture` status.
 
-Если запись в spool не проходит валидацию или её квитанция отправки навсегда
-расходится с БД (например, после восстановления старого бэкапа), `drain`
-переносит файл в `quarantine/` внутри того же spool
-(0700) рядом с `<имя>.reason` с кодом без содержимого. Следующие записи
-разбираются дальше. `live_capture` показывает `capture_quarantined`,
-`quarantined_captures` и `next_action=inspect_capture_quarantine`. Удерживаемые
-записи не в архиве; файлы ничего не удаляет. Чтобы повторить запись после
-исправления, верните файл без изменения имени из `quarantine/` в каталог spool
-при остановленном коллекторе. Повреждённый файл (digest не совпадает с
-именем) и переполненный карантин (1000 записей) по-прежнему останавливают
-разбор со `spool_corrupt`.
+If a spool record fails validation or its send receipt permanently
+disagrees with the DB (for example, after restoring an old backup), `drain`
+moves the file to `quarantine/` inside the same spool
+(0700) next to `<name>.reason` with a code and no content. Later records
+continue to be processed. `live_capture` shows `capture_quarantined`,
+`quarantined_captures` and `next_action=inspect_capture_quarantine`. The held
+records are not in the archive; nothing deletes the files. To replay a record after
+fixing, move the file back, without renaming it, from `quarantine/` into the spool directory
+while the collector is stopped. A corrupt file (digest does not match
+the name) and an overflowing quarantine (1000 records) still stop
+processing with `spool_corrupt`.
 
-Временные ошибки PostgreSQL (statement timeout, обрыв соединения, занятый
-pool) не перезапускают коллектор: сверка, медиа, отправки и heartbeat
-повторяют попытку с паузой до 60 с. Lease продлевается с локальным дедлайном:
-если БД не отвечает дольше lease, коллектор останавливается сам, а не ждёт на
-полуоткрытом соединении.
+Transient PostgreSQL errors (statement timeout, dropped connection, busy
+pool) do not restart the collector: reconciliation, media, sends and heartbeat
+retry with a pause of up to 60 s. The lease is renewed with a local deadline:
+if the DB does not respond for longer than the lease, the collector stops itself rather than waiting on a
+half-open connection.
 
-## Условия перед живым подключением
+## Conditions before a live connection
 
-1. Закончить и проверить автоматический encrypted offsite backup, включая session/spool, и восстановление в изоляции. Сохранить rollback исходного Mac-клиента. Ранее проверенный разовый backup БД/оригиналов этих условий целиком не закрывает.
+1. Finish and verify the automatic encrypted offsite backup, including session/spool, and restore in isolation. Keep the rollback of the original Mac client. The previously verified one-off backup of the DB/originals does not close these conditions entirely.
 
-   Текущий автоматический runner имеет `recovery.accounts: []`, поскольку реальных
-   аккаунтов ещё нет. При подключении подготовить RO mounts для session и spool,
-   добавить account/session_path и private config/credentials/permit в settings.
-   После pairing, пока постоянный collector выключен, выполнить backup и проверить
-   восстановление в карантин, не запускать восстановленную сессию. Backup должен
-   видеть существующий `.owner.lock`; сам он его не создаёт. После первого запуска
-   проверить цикл stop/capture/resume и статус доставки на реальном аккаунте.
-2. Зафиксировать точный account и ожидаемый Telegram user ID. Остановить прежний runtime и все пути его автозапуска; проверить отсутствие клиента. Не переносить SQLite session при работающем процессе и не запускать старый MCP параллельно.
-3. Оператором применить schema migrations. Выполнить [collector_role.sql](messaging_service/collector_role.sql) и установить отдельный пароль через приватное соединение, без вывода в stdout/argv. Сохранить DSN как `private/collector.dsn`. PostgreSQL не публикуется в интернет.
-4. Зарегистрировать account через owner CLI: `register-account --account telegram-primary --platform telegram --label Telegram --discover-chats`. При ограниченном сборе вместо discovery задать `--include-chats`; exclusions задаются отдельно. Регистрация не подключает provider.
-5. Подготовить `private/telegram.json`, `telegram.credentials.json`, `telegram.permit.json` по [шаблонам](deploy/telegram.example.json). Значения credentials и expected ID вводятся приватно. Secrets — 0600, доступны только UID сборщика и оператору; новый session directory — 0700. Создать принадлежащие UID10001 каталоги `sessions` и spool volume. Gateway не монтирует их.
-6. Только после проверки остановки прежнего клиента поставить `prior_clients_stopped: true`, совпадающие account/expected ID и `enabled: true`. Отсутствие/неверные права секрета, другой user ID или выключенная конфигурация приводят к отказу запуска.
+   The current automatic runner has `recovery.accounts: []` because there are no real
+   accounts yet. When connecting, prepare RO mounts for the session and spool,
+   add the account/session_path and the private config/credentials/permit to settings.
+   After pairing, while the permanent collector is off, run a backup and verify
+   restore into quarantine; do not start the restored session. The backup must
+   see the existing `.owner.lock`; it does not create it. After the first start,
+   check the stop/capture/resume cycle and the delivery status on the real account.
+2. Fix the exact account and the expected Telegram user ID. Stop the previous runtime and all its autostart paths; check that no client is running. Do not move the SQLite session while the process is running and do not run the old MCP in parallel.
+3. The operator applies the schema migrations. Run [collector_role.sql](messaging_service/collector_role.sql) and set a separate password over a private connection, without printing it to stdout/argv. Save the DSN as `private/collector.dsn`. PostgreSQL is not exposed to the internet.
+4. Register the account through the owner CLI: `register-account --account telegram-primary --platform telegram --label Telegram --discover-chats`. For limited collection, give `--include-chats` instead of discovery; exclusions are set separately. Registration does not connect the provider.
+5. Prepare `private/telegram.json`, `telegram.credentials.json`, `telegram.permit.json` from the [templates](deploy/telegram.example.json). Credential values and the expected ID are entered privately. Secrets are 0600, readable only by the collector UID and the operator; a new session directory is 0700. Create the `sessions` directories and the spool volume owned by UID 10001. The gateway does not mount them.
+6. Only after verifying that the previous client has stopped, set `prior_clients_stopped: true`, matching account/expected ID and `enabled: true`. A missing secret or wrong permissions on it, a different user ID or a disabled configuration make startup fail.
 
-Сессия может быть перенесена после корректной остановки либо создана владельцем заново. Для нового входа предусмотрена команда, запускаемая **самим владельцем в его терминале**, после подготовки выше:
+A session can be moved after a clean stop or created anew by the owner. For a new login there is a command, run **by the owner themselves in their own terminal**, after the preparation above:
 
 ```sh
 docker compose -f compose.yaml -f compose.collectors.yaml run --rm --no-deps telegram \
   python -m messaging_service.telegram_pair --config /run/secrets/telegram_config
 ```
 
-Она требует интерактивный терминал, отдельную DB lease и session lock. Телефон, код и пароль вводятся скрыто непосредственно в терминале. Gateway/MCP этих полей не принимают. Команда проверяет ожидаемый user ID и завершает соединение; постоянный collector сама не запускает. При ошибке identity сбор запрещён, пока оператор не выяснит причину.
+It requires an interactive terminal, a separate DB lease and the session lock. The phone, code and password are entered hidden directly in the terminal. The gateway/MCP do not accept these fields. The command checks the expected user ID and closes the connection; it does not start the permanent collector. On an identity error collection is forbidden until the operator finds the cause.
 
-Постоянный запуск — отдельный операторский шаг после pairing/проверенного переноса:
+The permanent start is a separate operator step after pairing/a verified move:
 
 ```sh
 docker compose -f compose.yaml -f compose.collectors.yaml --profile collectors up -d telegram
 ```
 
-[Compose overlay](deploy/compose.collectors.yaml) не включает collector по умолчанию. У него нет входящих портов; root filesystem read-only, UID10001, dropped capabilities, ограничения CPU/RAM/PIDs. Только этому процессу доступны session, spool и writable originals. Наличие overlay не означает, что он уже запущен.
+The [Compose overlay](deploy/compose.collectors.yaml) does not enable the collector by default. It has no incoming ports; the root filesystem is read-only, UID 10001, dropped capabilities, CPU/RAM/PIDs limits. Only this process has access to the session, spool and writable originals. The presence of the overlay does not mean it is already running.
 
-## Проверка после подключения
+## Checks after connecting
 
-Проверить expected identity и account scope, недавний текст/файл, правку и явное удаление, повторный запуск, временную потерю сети/БД, размер/хеш большого оригинала и фактический расход RAM. Сравнить provider IDs в выбранном контрольном окне. Отдельно проверить две независимые consumer ACK и закрытый чужой scope. Тестовые исходящие сообщения владелец может отправить сам; агенту для отправки требуется точное согласование.
+Check the expected identity and account scope, a recent text/file, an edit and an explicit deletion, a restart, a temporary loss of network/DB, the size/hash of a large original and the actual RAM use. Compare provider IDs in the chosen control window. Check separately two independent consumer ACKs and a closed foreign scope. The owner can send test outgoing messages themselves; the agent needs exact confirmation to send.
 
-Затем проверить 48 часов и отключение прежнего хоста перед заявлением о длительной устойчивости. Каждый следующий аккаунт подключается отдельно, после проверки единственного владельца его сессии. При rollback сначала доказать остановку server collector и сохранить его свежую session/state; затем восстановить единственного владельца на прежнем пути. Оригинальные архивы не удалять.
+Then watch for 48 hours and shut down the previous host before claiming long-term stability. Each further account is connected separately, after verifying that its session has a single owner. On rollback, first prove that the server collector has stopped and save its fresh session/state; then restore the single owner on the previous path. Do not delete the original archives.
 
 ## WhatsApp adapter
 
@@ -265,12 +265,12 @@ prove stable operation for every history size.
 The stop waiter is active while the provider connects. Shutdown cancels a pending connect, disconnects the owned client, and releases the fenced lease. Timeout and lost-lease errors still propagate. Regression tests cover all three paths; production shutdown must still be verified against the actual browser process.
 
 
-## Ограниченное окно Telegram (0.8.0 / schema11)
+## Bounded Telegram window (0.8.0 / schema 11)
 
-Operator config `history_since` — ISO timestamp с обязательной timezone, либо null для неограниченной истории. Это нижняя граница первоначальной загрузки, а не срок удаления данных: сохранённые сообщения и файлы остаются, новые события продолжают приниматься. Все страницы initial/backfill/reconcile фильтруются по времени сообщения. Старые уже поставленные media jobs остаются в очереди, но не выбираются сборщиком при действующей границе. `history_since` не применяется к WhatsApp.
+Operator config `history_since` is an ISO timestamp with a mandatory timezone, or null for unbounded history. It is the lower bound of the initial load, not a data deletion period: saved messages and files remain, and new events continue to be accepted. All initial/backfill/reconcile pages are filtered by message time. Old media jobs that are already queued stay in the queue but are not picked by the collector while the bound is in effect. `history_since` does not apply to WhatsApp.
 
-`max_dialogs: null` включает полный проход по доступному списку через пагинацию Telethon; целое число остаётся явным операторским ограничением. Перед первой загрузкой истории каталог сохраняется в `chats` и `collector_chats`, поэтому пустая история чата не означает отсутствия чата. Политика include/exclude применяется и к каталогу. Повторный обход выбирает давно не предпринятые попытки; попытка сохраняется до API запроса, так что ошибка/restart не заставляет начинать с одного и того же чата.
+`max_dialogs: null` enables a full pass over the available list through Telethon pagination; an integer stays an explicit operator limit. Before the first history load the catalog is saved in `chats` and `collector_chats`, so an empty chat history does not mean the chat is absent. The include/exclude policy applies to the catalog too. A repeated pass picks the attempts not made for a long time; an attempt is saved before the API request, so an error/restart does not make it start from the same chat again.
 
-`window_complete` означает достижение заданной временной границы; `history_exhausted` — конец доступных страниц у провайдера. Это разные признаки. Изменение `history_since` сбрасывает только первый; граница последней страницы сохраняется так, чтобы расширение периода не потеряло отброшенную часть страницы. Ни один из признаков не доказывает полноту старых правок/удалений или доступность всех вложений. Discovery печатает только агрегированные число диалогов, limit и history_since, без названий и сообщений.
+`window_complete` means the set time bound was reached; `history_exhausted` is the end of the provider's available pages. These are different flags. Changing `history_since` resets only the first; the boundary of the last page is kept so that extending the period does not lose the part of a page that was cut off. Neither flag proves the completeness of old edits/deletions or the availability of all attachments. Discovery prints only the aggregated number of dialogs, the limit and history_since, with no names or messages.
 
-Это не новый общий rate governor: существующая обработка FloodWait сохранена. Общий лимит всех API/media запросов и клиентский интерфейс адресного расширения отдельного чата остаются отдельными работами.
+This is not a new general rate governor: the existing FloodWait handling is kept. A shared limit on all API/media requests and a client interface for the targeted expansion of a single chat remain separate work.

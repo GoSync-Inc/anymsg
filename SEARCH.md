@@ -1,50 +1,50 @@
-# Поиск и чтение архива
+# Archive search and reading
 
-AnyMsg хранит сообщения и файлы зарегистрированных аккаунтов и отвечает агентам.
-Поддерживаются Telegram и WhatsApp; наличие адаптера не означает, что аккаунт
-подключён или его история полна. Состояния покрытия возвращаются в ответах.
+AnyMsg stores the messages and files of registered accounts and answers agents.
+Telegram and WhatsApp are supported; the existence of an adapter does not mean an account
+is connected or its history is complete. Coverage states are returned in the responses.
 
-`search` принимает `accounts`, `chats`, `senders` — списки до100 точных ID.
-Внутри списка действует «или», между списками и прежними одиночными фильтрами —
-«и». Все условия пересекаются с правами ключа. `null`/отсутствие не ограничивает
-измерение, `[]` возвращает пустую выдачу. Чужой ID в списке не расширяет права.
-Sender ID относится к источнику/аккаунту; совпадение строк не объединяет людей.
+`search` accepts `accounts`, `chats`, `senders` — lists of up to 100 exact IDs.
+Inside a list "or" applies; between lists and the earlier single filters —
+"and". All conditions are intersected with the key's permissions. `null`/absence does not limit
+the dimension, `[]` returns an empty result. A foreign ID in a list does not widen permissions.
+A sender ID belongs to the source/account; a match of strings does not merge people.
 
 `query_mode`:
 
-- `all` по умолчанию: все слова в любом порядке;
-- `phrase`: слова в указанном порядке как фраза;
-- `web`: кавычки, `OR`, исключение `-слово`, например `"срок оплаты" OR invoice`.
+- `all` by default: all words in any order;
+- `phrase`: words in the given order as a phrase;
+- `web`: quotes, `OR`, exclusion `-word`, for example `"срок оплаты" OR invoice`.
 
-Поиск использует встроенные словари PostgreSQL для словоформ; языки, точный
-поиск и явный approximate fallback описаны ниже. Синонимы не добавляются автоматически. `search` индексирует текст сообщений;
-для имён есть [search_people](PEOPLE.md), для содержимого и имён файлов —
-[search_files и get_file_text](FILE_INDEX.md). Пустой
-результат не доказывает отсутствие сообщения у провайдера. Смотрите coverage.
+Search uses the built-in PostgreSQL dictionaries for word forms; languages, exact
+search and the explicit approximate fallback are described below. Synonyms are not added automatically. `search` indexes message text;
+for names there is [search_people](PEOPLE.md), for the content and names of files —
+[search_files and get_file_text](FILE_INDEX.md). An empty
+result does not prove the provider has no such message. See coverage.
 
-`from_time` включается, `to_time` не включается; даты с timezone приводятся кUTC.
-`direction` ограничивает incoming/outgoing. Порядок `asc` по умолчанию,
-`desc` начинает с новых. `next_cursor` передаётся как `after` при неизменных
-фильтрах и порядке; это позиция живого архива, не зафиксированный snapshot.
-Изменения источника между страницами видны отдельно через `get_updates`.
+`from_time` is inclusive, `to_time` is exclusive; dates with a timezone are converted to UTC.
+`direction` limits to incoming/outgoing. The default order is `asc`,
+`desc` starts with the newest. `next_cursor` is passed as `after` with unchanged
+filters and order; it is a position in the live archive, not a fixed snapshot.
+Changes of the source between pages are visible separately through `get_updates`.
 
-Раскрытие результата:
+Expanding a result:
 
-1. `get_context(message_id)` возвращает исходное сообщение, соседние записи,
-   attachments и `context_window`. Два ограниченных прохода по индексу заменяют
-   сортировку всей переписки; сообщение-якорь включено, если не удалено.
-2. Старше окна: `get_messages(chat_id, before=older_cursor, order="desc")`.
-3. Новее окна: `get_messages(chat_id, after=newer_cursor, order="asc")`.
-4. Следующие страницы — `after=next_cursor` с тем же порядком. `after` и `before`
-   одновременно запрещены. Одинаковые timestamps разделяются стабильным ID.
-5. `get_attachment(attachment_id)` выдаёт сведения и временную ссылку на
-   оригинал; pending/unavailable не подменяются превью. Файл не помещается вJSON.
+1. `get_context(message_id)` returns the source message, neighboring records,
+   attachments and `context_window`. Two bounded index passes replace
+   sorting the whole conversation; the anchor message is included unless deleted.
+2. Older than the window: `get_messages(chat_id, before=older_cursor, order="desc")`.
+3. Newer than the window: `get_messages(chat_id, after=newer_cursor, order="asc")`.
+4. Next pages — `after=next_cursor` with the same order. `after` and `before`
+   together are forbidden. Identical timestamps are separated by a stable ID.
+5. `get_attachment(attachment_id)` returns details and a temporary link to the
+   original; pending/unavailable are not replaced with a preview. A file does not fit in JSON.
 
-Поиск, контекст и история не обращаются кTelegram/WhatsApp и не двигают ACK.
-MCP и REST используют один Store/policy layer. По имени сначала вызывается
-`search_people`, затем сообщения ищутся по возвращённым account/sender_id.
-По файлам `search_files` даёт attachment_id, source message и статус индексации;
-`get_file_text` возвращает текст частями с SHA256 оригинала и ревизией источника.
+Search, context and history do not call Telegram/WhatsApp and do not move the ACK.
+MCP and REST use one Store/policy layer. For a name, first call
+`search_people`, then search messages by the returned account/sender_id.
+For files, `search_files` gives attachment_id, the source message and the indexing status;
+`get_file_text` returns the text in parts with the original's SHA256 and the source revision.
 
 ## 0.9 query options
 
