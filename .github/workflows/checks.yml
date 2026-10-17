@@ -52,6 +52,7 @@ jobs:
         run: |
           mkdir -p "$RUNNER_TEMP/ci-evidence"
           git rev-parse HEAD > "$RUNNER_TEMP/ci-evidence/source-sha"
+          echo "$GITHUB_RUN_ATTEMPT" > "$RUNNER_TEMP/ci-evidence/attempt"
           echo "sha=$(git rev-parse HEAD)" >> "$GITHUB_OUTPUT"
       - name: Start the release router image build and the Python image pull in the background
         # Both overlap the module test steps; the Python/PostgreSQL step waits for them and fails on either.
@@ -288,15 +289,20 @@ jobs:
     # in parallel with verify, instead of after the whole suite on the verify runner.
     runs-on: ubuntu-latest
     timeout-minutes: 10
+    outputs:
+      source_sha: ${{ steps.source.outputs.sha }}
     steps:
       - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6.1.0
         with:
           persist-credentials: false
           ref: ${{ inputs.source_ref }}
       - name: Start evidence record
+        id: source
         run: |
           mkdir -p "$RUNNER_TEMP/ci-evidence"
           git rev-parse HEAD > "$RUNNER_TEMP/ci-evidence/source-sha"
+          echo "$GITHUB_RUN_ATTEMPT" > "$RUNNER_TEMP/ci-evidence/attempt"
+          echo "sha=$(git rev-parse HEAD)" >> "$GITHUB_OUTPUT"
       - uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1 # v6.3.0
         with: {python-version: '3.13'}
       - uses: astral-sh/setup-uv@37802adc94f370d6bfd71619e3f0bf239e1f3b78 # v7.6.0
@@ -346,9 +352,17 @@ jobs:
           pattern: ci-evidence-*
           path: ${{ runner.temp }}/fragments
       - name: Merge the fragments of the tested commit and record every check outcome
+        # A job's fragment counts only with its job result and captured checkout SHA; without a fresh fragment
+        # its checks take that result, never a pass. Evidence is prepared either way, then a missing one fails.
+        env:
+          VERIFY: verify:${{ needs.verify.result }}:${{ needs.verify.outputs.source_sha }}
+          LOAD: load:${{ needs.load.result }}:${{ needs.load.outputs.source_sha }}
         run: |
-          python ci-tools/scripts/tiden_ci.py assemble --directory "$RUNNER_TEMP/ci-evidence" --fragments "$RUNNER_TEMP/fragments"
+          assembled=0
+          python ci-tools/scripts/tiden_ci.py assemble --directory "$RUNNER_TEMP/ci-evidence" --fragments "$RUNNER_TEMP/fragments" \
+            --producer "$VERIFY" --producer "$LOAD" || assembled=$?
           python ci-tools/scripts/tiden_ci.py prepare --directory "$RUNNER_TEMP/ci-evidence"
+          exit "$assembled"
       - name: Retain test evidence even when a check fails
         if: ${{ always() }}
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
