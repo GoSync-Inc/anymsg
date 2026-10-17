@@ -586,3 +586,51 @@ def test_ci_gate_passes_a_skipped_verify_only_for_a_validated_reuse_of_this_comm
     completed = subprocess.run(["bash", "-e", "-c", step["run"]], env={"PATH": "/usr/bin:/bin", **environment},
                                capture_output=True)
     assert (completed.returncode == 0) == passes
+
+
+class Response(io.BytesIO):
+    def __enter__(self):
+        return self
+
+    def __exit__(self, *args):
+        self.close()
+
+
+def test_the_job_token_reaches_only_the_github_api_never_the_redirected_artifact_storage(monkeypatch):
+    import email.message
+    import urllib.error
+    import urllib.request
+    requests = []
+
+    def redirect(location):
+        headers = email.message.Message()
+        headers["Location"] = location
+
+        class Opener:
+            def open(self, request, timeout):
+                requests.append(request)
+                raise urllib.error.HTTPError(request.full_url, 302, "Found", headers, None)
+        return lambda *handlers: Opener()
+
+    def storage(request, timeout):
+        requests.append(request)
+        return Response(b"zip")
+    monkeypatch.setenv("GH_TOKEN", "synthetic-job-token")
+    monkeypatch.setattr(urllib.request, "urlopen", storage)
+    monkeypatch.setattr(urllib.request, "build_opener", redirect("https://storage.example/blob?sig=x"))
+    assert ci_reuse.download("actions/artifacts/77/zip") == b"zip"
+    api, blob = requests
+    assert api.full_url == f"https://api.github.com/repos/{REPOSITORY}/actions/artifacts/77/zip"
+    assert api.get_header("Authorization") == "Bearer synthetic-job-token"
+    assert blob.full_url == "https://storage.example/blob?sig=x"
+    assert blob.get_header("Authorization") is None and "synthetic-job-token" not in json.dumps(blob.header_items())
+    # A redirect that is not HTTPS is never followed, and an oversized archive is refused.
+    requests.clear()
+    monkeypatch.setattr(urllib.request, "build_opener", redirect("http://storage.example/blob"))
+    with pytest.raises(urllib.error.HTTPError):
+        ci_reuse.download("actions/artifacts/77/zip")
+    assert len(requests) == 1
+    monkeypatch.setattr(urllib.request, "build_opener", redirect("https://storage.example/blob"))
+    monkeypatch.setattr(ci_reuse, "MAX_ARCHIVE_BYTES", 2)
+    with pytest.raises(ci_reuse.Refused, match="size limit"):
+        ci_reuse.download("actions/artifacts/77/zip")
