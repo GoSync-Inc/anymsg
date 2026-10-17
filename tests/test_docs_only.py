@@ -119,17 +119,34 @@ def test_anything_but_listed_unread_documents_verifies_in_full(tmp_path, change,
         "split-json-files-list", "docker-directory-copy", "other-file-type", "unparsable-python-keeps-comments"])
 def test_a_consumer_found_by_the_scan_means_full_verification(tmp_path, code, hit):
     docs_only_run, why = decide(tmp_path, edit("docs/guide.md", "NOTES.md"), code=code)
-    assert docs_only_run is False and why == "scanned code may read a changed document: " + hit
+    assert docs_only_run is False and why.startswith("scanned code may read a changed document: " + hit), why
 
 
 def test_matches_in_comments_and_reviewed_exclusions_do_not_count(tmp_path):
+    # Python comments are told apart from strings by the tokenizer; an exclusion skips only the directory check.
     code = {"scripts/commented.py": "# docs/guide.md is described in a comment only\nvalue = 1  # see NOTES.md\n",
-            "scripts/client.mjs": "// rglob('*.md') in a comment\nconst value = 1;\n",
-            "tests/fixture.py": 'GUIDE = "docs/guide.md"  # a synthetic repository\n'}
+            "tests/fixture.py": 'import pathlib\nroot = pathlib.Path("synthetic")\n\n\n\n\nfiles = list((root / "docs").iterdir())\n'}
     exclusions = "tests/fixture.py | builds a synthetic repository under tmp_path\n"
     assert decide(tmp_path, edit("docs/guide.md", "NOTES.md"), code=code, exclusions=exclusions)[0] is True
     assert decide(tmp_path / "unexcluded", edit("docs/guide.md"), code=code)[1] == (
-        "scanned code may read a changed document: tests/fixture.py:1")
+        "scanned code may read a changed document: tests/fixture.py:7")
+    # An excluded file is still refused when it names a changed document.
+    named = {**code, "tests/fixture.py": code["tests/fixture.py"] + 'GUIDE = "docs/guide.md"\n'}
+    assert decide(tmp_path / "named", edit("docs/guide.md"), code=named, exclusions=exclusions)[1] == (
+        "scanned code may read a changed document: tests/fixture.py:8")
+
+
+@pytest.mark.parametrize("code, hit", [
+    ({"scripts/report.mjs": 'const report = `\n// ${fs.readFileSync("docs/guide.md", "utf8")}\n`;\n'}, "scripts/report.mjs:2"),
+    ({".github/workflows/x.yml": "jobs:\n  x:\n    run: |\n      # cat NOTES.md\n"}, ".github/workflows/x.yml:4"),
+    ({"packages/z/package.json": '{\n  "files": [\n    "src",\n    "lib",\n    "assets",\n    "types",\n    "docs"\n  ]\n}\n'},
+     "packages/z/package.json:2"),
+    ({"scripts/large.py": "PAD = 1\n" * (1024 * 1024 + 1) + 'TEXT = open("docs/guide.md").read()\n'},
+     "scripts/large.py:1048578"),
+], ids=["template-string", "shell-comment-in-yaml", "long-json-files-list", "past-8-mib"])
+def test_comment_like_lines_outside_python_and_far_apart_or_late_matches_still_count(tmp_path, code, hit):
+    docs_only_run, why = decide(tmp_path, edit("docs/guide.md", "NOTES.md"), code=code)
+    assert docs_only_run is False and why.startswith("scanned code may read a changed document: " + hit), why
 
 
 def test_a_scan_exclusion_without_a_reason_is_refused(tmp_path):
@@ -201,7 +218,7 @@ def workflows():
 
 def test_only_a_pull_request_run_decides_and_a_failed_decision_verifies_in_full():
     _, checks = workflows()
-    job = checks["jobs"]["docs"]
+    job = checks["jobs"]["documentation"]
     assert job["if"] == ("${{ github.event_name == 'pull_request' && inputs.source_ref == '' "
                          "&& !inputs.reuse_queue_evidence }}")
     assert "permissions" not in job and "secrets." not in json.dumps(job)
@@ -210,18 +227,18 @@ def test_only_a_pull_request_run_decides_and_a_failed_decision_verifies_in_full(
     assert decide["env"] == {"EVENT_NAME": "${{ github.event_name }}", "HEAD_SHA": "${{ github.event.pull_request.head.sha }}"}
     assert job["outputs"]["docs_only"] == "${{ steps.decide.outcome == 'success' && steps.decide.outputs.docs_only || 'false' }}"
     outputs = checks.get("on", checks.get(True))["workflow_call"]["outputs"]
-    assert outputs["docs_only"]["value"] == "${{ jobs.docs.outputs.docs_only }}"
-    assert outputs["docs_sha"]["value"] == "${{ jobs.docs.outputs.docs_sha }}"
-    skip = "needs.docs.outputs.docs_only != 'true'"
+    assert outputs["docs_only"]["value"] == "${{ jobs.documentation.outputs.docs_only }}"
+    assert outputs["docs_sha"]["value"] == "${{ jobs.documentation.outputs.docs_sha }}"
+    skip = "needs.documentation.outputs.docs_only != 'true'"
     for name in ("verify", "load", "evidence"):
-        assert skip in checks["jobs"][name]["if"] and "docs" in checks["jobs"][name]["needs"]
+        assert skip in checks["jobs"][name]["if"] and "documentation" in checks["jobs"][name]["needs"]
 
 
 def test_a_docs_only_run_records_a_skipped_route_and_stays_green(tmp_path):
     _, checks = workflows()
     steps = {step.get("name") or step["uses"].split("@")[0]: step for step in checks["jobs"]["tiden"]["steps"]}
     config = steps["Check optional Tiden configuration"]
-    assert config["env"]["DOCS_ONLY"] == "${{ needs.docs.outputs.docs_only }}"
+    assert config["env"]["DOCS_ONLY"] == "${{ needs.documentation.outputs.docs_only }}"
 
     def run(script, **env):
         output = tmp_path / "output"

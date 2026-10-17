@@ -1,15 +1,17 @@
 # Reviewed docs-only documents (ANYM-323, scripts/docs_only.py). A pull request run whose every changed path is
 # one of these exact repository paths, and whose scan of every tracked non-Markdown file finds no consumer, skips
 # the test jobs. Add an entry only after a review finds that no test, script, packaging file, Dockerfile or workflow
-# of any module reads it, directly or through a composed path such as ROOT / "docs" / "guide.md". README.md,
-# SETUP.md, THIRD_PARTY_NOTICES.md and licenses are never listed. TIDEN-CI.md and docs/operations/production.md are
-# left out because workflows name them, CODEX_ENRICHMENT.md because a messaging module docstring names it.
+# of any module reads it, directly or through a composed path such as ROOT / "docs" / "guide.md", and that no
+# tracked non-Markdown file names it (the scan refuses any such file, comment or not, outside Python comments).
+# README.md, SETUP.md, THIRD_PARTY_NOTICES.md and licenses are never listed. Left out because a file names them:
+# TIDEN-CI.md and docs/operations/production.md (workflows), CODEX_ENRICHMENT.md (a messaging docstring), AGENTS.md
+# (services/calendar/pyproject.toml, for its own copy), TELEMETRY.md (Dockerfile comments), CONTRIBUTING.md (the
+# vendored gitleaks config) and SENDING.md (the deedkit npm client).
 .claude/rules/deploy.md
 .claude/rules/migrations.md
 .claude/rules/tests.md
 .claude/rules/whatsmeow.md
 ACCESS.md
-AGENTS.md
 ARCHITECTURE.md
 BACKLOG.md
 BACKUP.md
@@ -18,7 +20,6 @@ BACKUP_STREAMING.md
 CLAUDE.md
 COLLECTORS.md
 COLLECTOR_STATES.md
-CONTRIBUTING.md
 CONVERSATION.md
 ENRICHMENT.md
 FILE_INDEX.md
@@ -36,9 +37,7 @@ REVIEW_FOLLOWUP.md
 ROADMAP.md
 SEARCH.md
 SECURITY.md
-SENDING.md
 SUBSCRIPTIONS.md
-TELEMETRY.md
 WHATSAPP_IDENTITIES.md
 docs/migrations/calendar-import.md
 docs/migrations/calls-import.md
@@ -63,7 +62,11 @@ docs/quality/whatsmeow-parity.md
 docs/whatsapp-native.md
 
 ## scan exclusions
-# <path> | <reason>: scanned files the reviewed guard skips, because their matches read no listed document.
-services/calendar/pyproject.toml | its sdist include list is relative to services/calendar and names that service's own AGENTS.md and docs
+# <path> | <reason>. Each entry skips only the directory or glob check of that file, after a review found that its
+# listing and docs/Markdown matches read no listed document; the file is still refused if it names a changed one.
+.github/workflows/production-release.yml | a comment names docs/operations/production.md, which is not listed; it lists no documents
+services/calendar/pyproject.toml | its sdist include list is relative to services/calendar and names that service's own docs
 scripts/docs_only.py | the guard's own pattern literals
 tests/test_docs_only.py | the guard's tests: synthetic repositories under tmp_path and the guard's pattern literals
+tests/test_seamless_release.py | docs is a local variable holding parsed Compose documents; it lists release state, not Markdown
+tests/test_tiden_ci.py | synthetic repositories under tmp_path for the image change detection and evidence tests

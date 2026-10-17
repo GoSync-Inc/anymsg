@@ -543,11 +543,11 @@ def test_only_a_main_push_decides_and_only_the_reuse_job_reads_actions():
 
 def test_a_reusing_push_skips_only_the_test_jobs_and_still_builds_publishes_and_records():
     ci, checks = workflows()
-    skip = "${{ !cancelled() && !inputs.reuse_queue_evidence && needs.docs.outputs.docs_only != 'true' }}"
+    skip = "${{ !cancelled() && !inputs.reuse_queue_evidence && needs.documentation.outputs.docs_only != 'true' }}"
     assert checks["jobs"]["verify"]["if"] == checks["jobs"]["load"]["if"] == skip
-    assert checks["jobs"]["evidence"]["if"] == "${{ always() && !inputs.reuse_queue_evidence && needs.docs.outputs.docs_only != 'true' }}"
+    assert checks["jobs"]["evidence"]["if"] == "${{ always() && !inputs.reuse_queue_evidence && needs.documentation.outputs.docs_only != 'true' }}"
     tiden = checks["jobs"]["tiden"]
-    assert tiden["needs"] == ["docs", "evidence"] and tiden["if"].startswith("${{ always() && !cancelled()")
+    assert tiden["needs"] == ["documentation", "evidence"] and tiden["if"].startswith("${{ always() && !cancelled()")
     assert "reuse_queue_evidence" not in json.dumps(tiden)
     for name in ("native", "images"):
         assert "if" not in ci["jobs"][name] and "needs" not in ci["jobs"][name]

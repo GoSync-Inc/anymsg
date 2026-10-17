@@ -21,18 +21,18 @@ on:
         description: Exact commit these checks tested
         value: ${{ jobs.verify.outputs.source_sha }}
       docs_only:
-        description: Whether the docs job classified this pull request run as documentation-only
-        value: ${{ jobs.docs.outputs.docs_only }}
+        description: Whether the documentation job classified this pull request run as documentation-only
+        value: ${{ jobs.documentation.outputs.docs_only }}
       docs_sha:
         description: The pull request merge commit the docs-only decision classified
-        value: ${{ jobs.docs.outputs.docs_sha }}
+        value: ${{ jobs.documentation.outputs.docs_sha }}
     secrets:
       TIDEN_API_TOKEN:
         required: false
 permissions:
   contents: read
 jobs:
-  docs:
+  documentation:
     # A pull request run that changes only reviewed documentation nothing reads skips the test jobs (ANYM-323,
     # scripts/docs_only.py, .github/docs-only-paths.txt). Every other event, and any doubt, verifies in full.
     if: ${{ github.event_name == 'pull_request' && inputs.source_ref == '' && !inputs.reuse_queue_evidence }}
@@ -55,8 +55,8 @@ jobs:
           HEAD_SHA: ${{ github.event.pull_request.head.sha }}
         run: python3 scripts/docs_only.py
   verify:
-    needs: docs
-    if: ${{ !cancelled() && !inputs.reuse_queue_evidence && needs.docs.outputs.docs_only != 'true' }}
+    needs: documentation
+    if: ${{ !cancelled() && !inputs.reuse_queue_evidence && needs.documentation.outputs.docs_only != 'true' }}
     runs-on: ubuntu-latest
     timeout-minutes: 30
     env:
@@ -334,8 +334,8 @@ jobs:
   load:
     # The paired gateway load gate measures its latency and isolation budgets on a runner of its own,
     # in parallel with verify, instead of after the whole suite on the verify runner.
-    needs: docs
-    if: ${{ !cancelled() && !inputs.reuse_queue_evidence && needs.docs.outputs.docs_only != 'true' }}
+    needs: documentation
+    if: ${{ !cancelled() && !inputs.reuse_queue_evidence && needs.documentation.outputs.docs_only != 'true' }}
     runs-on: ubuntu-latest
     timeout-minutes: 10
     outputs:
@@ -382,8 +382,8 @@ jobs:
     # One `ci-evidence` artifact from every test job's fragment, attempted even after a failure so the
     # failure itself is recorded (TIDEN-CI.md). A missing, failed, cancelled or skipped test job fails
     # this job whether or not Tiden reporting is configured.
-    needs: [docs, verify, load]
-    if: ${{ always() && !inputs.reuse_queue_evidence && needs.docs.outputs.docs_only != 'true' }}
+    needs: [documentation, verify, load]
+    if: ${{ always() && !inputs.reuse_queue_evidence && needs.documentation.outputs.docs_only != 'true' }}
     runs-on: ubuntu-latest
     timeout-minutes: 5
     steps:
@@ -431,7 +431,7 @@ jobs:
           test "$VERIFY_RESULT" = success
           test "$LOAD_RESULT" = success
   tiden:
-    needs: [docs, evidence]
+    needs: [documentation, evidence]
     # PRs from forks never receive credentials. Internal PRs retain their actual
     # tested merge SHA, not the head SHA or the last successful main revision.
     if: ${{ always() && !cancelled() && (github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository) }}
@@ -446,7 +446,7 @@ jobs:
           TIDEN_WORKSPACE_ID: ${{ vars.TIDEN_WORKSPACE_ID }}
           EVENT_NAME: ${{ github.event_name }}
           SOURCE_BRANCH: ${{ github.head_ref || github.ref_name }}
-          DOCS_ONLY: ${{ needs.docs.outputs.docs_only }}
+          DOCS_ONLY: ${{ needs.documentation.outputs.docs_only }}
         run: |
           # A merge queue run publishes nothing, so it needs no Tiden configuration or CLI.
           # Matched with case, like scripts/tiden_ci.py; expression startsWith() ignores case.

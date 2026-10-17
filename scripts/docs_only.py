@@ -4,8 +4,8 @@
 Such a run skips the test jobs; every other run, and any doubt, verifies in full. A path qualifies only when it is
 named exactly in the reviewed list `.github/docs-only-paths.txt`. As a regression guard, not a proof, every other
 tracked file of the tested merge commit (the tests, scripts, packaging files, Dockerfiles and workflows of every
-module, and anything else) is also scanned, outside unambiguous comments, for the changed path, its file name, and
-any directory or glob read of Markdown.
+module, and anything else) is also scanned whole, outside Python comments only, for the changed path or its file
+name, and for any directory or glob read of Markdown; reviewed exclusions skip only the latter check.
 """
 from __future__ import annotations
 
@@ -24,16 +24,10 @@ ROOTS = ("docs/", ".claude/")
 # Shipped in packages and images, or legal texts: never docs-only, whatever the list says.
 NEVER = {"README.md", "SETUP.md", "THIRD_PARTY_NOTICES.md"}
 INTENT_LINE = re.compile(r"Tiden intent branch:", re.IGNORECASE)
-# A directory or glob read that could pick up Markdown: a listing call, an include pattern or a Docker copy that
-# names it within WINDOW lines, so a call or a list split across lines still counts.
+# A directory or glob read that could pick up Markdown: a file holding both a listing call, an include pattern or a
+# Docker copy and a Markdown, `docs` or `.claude` name anywhere, however far apart they are.
 LISTING = re.compile(r"\b(?:r?glob|iterdir|walk|scandir|listdir|find|ls|include|exclude|only-include|files|COPY|ADD)\b")
 MARKDOWN = re.compile(r"\*\.md\b|(?<![\w-])docs(?![\w-])|\.claude\b")
-WINDOW = 3
-# Only whole-line comments are dropped, except in Python, whose tokenizer separates comments from strings; a
-# comment marker inside a string or after code never hides that code.
-LINE_COMMENT = {"#": (".yml", ".yaml", ".toml", ".sh", ".bash", ".cfg", ".ini", ".conf", ".dockerignore", ".gitignore"),
-                "//": (".js", ".mjs", ".cjs", ".ts", ".go")}
-MAX_SCANNED_BYTES = 8 * 1024 * 1024
 DOCUMENT = 0o100644
 
 
@@ -90,32 +84,30 @@ def without_python_comments(text: str) -> list[str]:
 
 
 def code_lines(root: Path, path: str) -> list[str]:
-    """The scanned file's lines with only unambiguous comments removed."""
-    try:
-        text = (root / path).read_bytes()[:MAX_SCANNED_BYTES].decode("utf-8", errors="replace")
-    except OSError:
-        return []
-    if path.endswith(".py"):
-        return without_python_comments(text)
-    name = PurePosixPath(path).name
-    marker = "#" if name.startswith("Dockerfile") else next(
-        (marker for marker, kinds in LINE_COMMENT.items() if name.endswith(kinds)), None)
-    return ["" if marker and line.lstrip().startswith(marker) else line for line in text.splitlines()]
+    """The whole scanned file, as lines. Only Python comments are removed, by the tokenizer that tells them from
+    strings; in every other file a comment-like line could be code (a template string, a heredoc), so it counts."""
+    text = (root / path).read_bytes().decode("utf-8", errors="replace")
+    return without_python_comments(text) if path.endswith(".py") else text.splitlines()
 
 
 def consumers(root: Path, changed: list[str], exclusions: dict[str, str]) -> list[str]:
-    """Where scanned files name a changed document or read Markdown by directory or glob."""
+    """Where scanned files name a changed document or its file name, or read Markdown by directory or glob.
+
+    The reviewed exclusions skip only the directory or glob check of a file; no file may name a changed document.
+    """
     names = [re.compile(r"(?<![\w.-])" + re.escape(value) + r"(?![\w-])")
              for value in {*changed, *(PurePosixPath(path).name for path in changed)}]
     hits = []
     for path in scan_inputs(root):
-        if path in exclusions:
+        try:
+            lines = code_lines(root, path)
+        except OSError:  # a file that cannot be read cannot be shown not to read a document
+            hits.append(f"{path}: not scannable")
             continue
-        lines = code_lines(root, path)
-        for number, line in enumerate(lines, 1):
-            nearby = "\n".join(lines[max(0, number - 1 - WINDOW):number + WINDOW])
-            if any(name.search(line) for name in names) or (LISTING.search(line) and MARKDOWN.search(nearby)):
-                hits.append(f"{path}:{number}")
+        hits.extend(f"{path}:{number}" for number, line in enumerate(lines, 1) if any(name.search(line) for name in names))
+        text = "\n".join(lines)
+        if path not in exclusions and MARKDOWN.search(text) and (listing := LISTING.search(text)):
+            hits.append(f"{path}:{text.count(chr(10), 0, listing.start()) + 1}")
     return hits
 
 
