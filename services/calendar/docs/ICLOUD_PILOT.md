@@ -1,19 +1,19 @@
-# Подключение и пилот iCloud
+# iCloud connection and pilot
 
-Пилот создаёт и меняет только вымышленные события в выбранном тестовом календаре. Он не приглашает участников, не меняет sharing и не переносит реальные семейные встречи.
+The pilot creates and changes only fictional events in a chosen test calendar. It does not invite participants, does not change sharing and does not move real family meetings.
 
-## 1. Подготовить Apple Account
+## 1. Prepare the Apple Account
 
-1. Включить двухфакторную защиту Apple Account.
-2. Открыть [account.apple.com](https://account.apple.com), раздел **Sign-In and Security → App-Specific Passwords**, создать пароль с названием `Family Calendar Pilot`.
-3. Использовать этот пароль при локальном подключении. Основной пароль Apple Account сервису не нужен. Порядок и обязательную 2FA описывает [Apple](https://support.apple.com/en-us/102654).
-4. Создать **новый пустой календарь Family Calendar Pilot** именно в iCloud. Удобно через [icloud.com/calendar](https://www.icloud.com/calendar); [инструкция Apple](https://support.apple.com/en-ie/guide/icloud/mmfbbb2cf9/icloud). В Apple «Календаре» выбрать раздел iCloud: календарь «На моём Mac» не доступен серверу CalDAV.
+1. Turn on two-factor protection for the Apple Account.
+2. Open [account.apple.com](https://account.apple.com), the **Sign-In and Security → App-Specific Passwords** section, and create a password named `Family Calendar Pilot`.
+3. Use this password for the local connection. The service does not need the main Apple Account password. The procedure and the mandatory 2FA are described by [Apple](https://support.apple.com/en-us/102654).
+4. Create a **new empty calendar Family Calendar Pilot** in iCloud specifically. It is convenient through [icloud.com/calendar](https://www.icloud.com/calendar); [Apple's instructions](https://support.apple.com/en-ie/guide/icloud/mmfbbb2cf9/icloud). In the Apple "Calendar" app choose the iCloud section: a calendar "On My Mac" is not available to the CalDAV server.
 
-Календарь Google, показанный приложением Apple, подключается впоследствии через Google API. Для этого пилота нужен источник iCloud.
+A Google calendar shown by the Apple app is connected later through the Google API. This pilot needs an iCloud source.
 
-## 2. Ввести credentials локально
+## 2. Enter credentials locally
 
-Из корня репозитория:
+From the repository root:
 
 ```sh
 uv sync --locked
@@ -22,59 +22,59 @@ uv run family-calendar connection list
 uv run family-calendar pilot icloud discover --connection pilot-a
 ```
 
-Ввести email Apple Account, затем пароль приложения в скрытый запрос терминала. Не отправлять пароль в чат, не добавлять его в аргументы команды или файлы Git. Без интерактивного терминала ввод отключён.
+Enter the Apple Account email, then the app password at the hidden terminal prompt. Do not send the password in chat, add it to command arguments or to Git files. Without an interactive terminal, input is disabled.
 
-Discovery вернёт `read_verified: true` и массив `calendars` с `ref`, названием и `privilege`. Это подтверждает чтение discovery, а не чтение всех событий или право записи. Найти **Family Calendar Pilot** и скопировать его `ref` вида `cal-…`. Если календарь не найден, проверить источник iCloud и повторить discovery; не выбирать личный календарь вместо него.
+Discovery returns `read_verified: true` and a `calendars` array with `ref`, title and `privilege`. This confirms that discovery can read, not that all events can be read or that writing is allowed. Find **Family Calendar Pilot** and copy its `ref` of the form `cal-…`. If the calendar is not found, check the iCloud source and repeat discovery; do not pick a personal calendar instead.
 
-Один аккаунт не доказывает доступ к другому. Второй подключается отдельным ID и своим паролем:
+One account does not prove access to another. The second is connected with a separate ID and its own password:
 
 ```sh
 uv run family-calendar connection add-icloud --id pilot-b
 uv run family-calendar pilot icloud discover --connection pilot-b
 ```
 
-Повторный `add-icloud` с существующим ID не перезаписывает credentials. Если пароль отозван, подключить новый отдельный ID и заново выполнить discovery/allowlist. Старые отчёты сохранять; перенос существующего журнала на другой ID запрещён.
+A repeated `add-icloud` with an existing ID does not overwrite credentials. If the password has been revoked, connect a new separate ID and run discovery/allowlist again. Keep old reports; moving an existing journal to another ID is forbidden.
 
-## 3. Разрешить запись в тестовый календарь
+## 3. Allow writing to the test calendar
 
-Во всех командах ниже заменить `CALENDAR_REF` на найденный ref. Пример пути `outputs/icloud-pilot-01` — новый приватный каталог одного запуска.
+In all commands below replace `CALENDAR_REF` with the ref found. The example path `outputs/icloud-pilot-01` is a new private directory for one run.
 
 ```sh
 uv run family-calendar pilot icloud allow-write --connection pilot-a --calendar-ref CALENDAR_REF --test-calendar
 uv run family-calendar pilot icloud run --connection pilot-a --calendar-ref CALENDAR_REF --allow-write --run-dir outputs/icloud-pilot-01
 ```
 
-`--test-calendar` фиксирует выбор оператором отдельного тестового календаря. Allowlist относится к точной паре connection/calendar; серверные `read_only` запрещают запись. При `unknown` privileges право остаётся непроверенным до реальной записи. Флаг `--allow-write` сам по себе allowlist не создаёт.
+`--test-calendar` records the operator's choice of a separate test calendar. The allowlist applies to the exact connection/calendar pair; server-side `read_only` forbids writing. With `unknown` privileges, the right stays unverified until a real write. The `--allow-write` flag does not create an allowlist by itself.
 
-Матрица ограничена 16 создаваемыми объектами (обычно 13), с отдельными UID/href. Большинство событий начинается в следующий понедельник в 16:00 Asia/Makassar. Fixtures часового пояса Europe/Berlin начинаются 19 октября 2026 и пересекают DST; это намеренная фиксированная дата проверки. Имя события начинается с `[Family Pilot]`. Одиночное CRUD-событие удаляется в ходе теста; остальные остаются до проверки и очистки.
+The matrix is limited to 16 created objects (usually 13), with separate UID/href. Most events start on the next Monday at 16:00 Asia/Makassar. The Europe/Berlin timezone fixtures start on 19 October 2026 and cross a DST change; this is an intentional fixed check date. An event name starts with `[Family Pilot]`. The single CRUD event is deleted during the test; the others remain until checking and cleanup.
 
-## 4. Проверить отчёт и Apple клиент
+## 4. Check the report and the Apple client
 
 ```sh
 uv run family-calendar pilot icloud status --run-dir outputs/icloud-pilot-01
 uv run python scripts/check_pilot_evidence.py --run-dir outputs/icloud-pilot-01 --allow-unaccepted
 ```
 
-Первая команда ничего не отправляет в сеть. Проверяющий скрипт сверяет scope, intent hashes, фактические read-back ICS и состояние шагов. `--allow-unaccepted` проверяет целостность до визуальной приёмки. Это локальная проверка свидетельств, а не подпись или независимое подтверждение провайдера.
+The first command sends nothing to the network. The checker script verifies scope, intent hashes, the actual read-back ICS and the state of the steps. `--allow-unaccepted` checks integrity before visual acceptance. This is a local check of the evidence, not a signature or independent confirmation by the provider.
 
-Дождаться синхронизации Apple «Календаря» или iCloud UI. По `manifest.json` определить начальный понедельник. Проверить:
+Wait for the Apple "Calendar" app or the iCloud UI to sync. Find the starting Monday from `manifest.json`. Check:
 
-| Сценарий | Что увидеть |
+| Scenario | What to see |
 |---|---|
-| Одиночный CRUD | Событие после create/update/delete отсутствует; шаги подтверждены журналом |
-| Single/cancel/series (`exceptions`) | Вторая встреча индивидуально перенесена на 18:00, третья отменена; после series shift остальные в 17:00, индивидуальное время сохранено |
-| Future COUNT/UNTIL | Прошлые встречи в 16:00, будущие в 17:00; перенесённая пятая в 18:00, третья отменена; всего пять встреч |
-| Future infinite | То же поведение на границе; будущее остаётся бессрочной серией |
-| Native RANGE (`native-range`) | Начиная со второй встречи новое время 17:00; проверить и более поздние недели |
-| All-day | Событие перенесено на следующий день; длительность один день |
-| Floating | Локальное время отображается последовательно; интерпретация для поиска слотов всё ещё отключена |
-| TZ/DST/properties | Europe/Berlin сохраняет 17:00 по обе стороны DST; alarm 15 минут; EXDATE/RDATE не потеряны |
+| Single CRUD | After create/update/delete the event is absent; the steps are confirmed by the journal |
+| Single/cancel/series (`exceptions`) | The second meeting is individually moved to 18:00, the third is cancelled; after the series shift the rest are at 17:00, the individual time is kept |
+| Future COUNT/UNTIL | Past meetings at 16:00, future ones at 17:00; the moved fifth at 18:00, the third cancelled; five meetings in total |
+| Future infinite | The same behavior at the boundary; the future stays an unbounded series |
+| Native RANGE (`native-range`) | Starting from the second meeting the new time is 17:00; also check later weeks |
+| All-day | The event is moved to the next day; duration one day |
+| Floating | Local time is displayed consistently; interpretation for slot search is still disabled |
+| TZ/DST/properties | Europe/Berlin keeps 17:00 on both sides of DST; a 15-minute alarm; EXDATE/RDATE are not lost |
 
-X-свойства проверяет server read-back, поскольку Apple UI может их не показывать. Server echo `RANGE` без правильного поведения клиента не доказывает native future support. Если native probe не работает, отметить это в результате; split future проверяется независимо.
+X-properties are checked by the server read-back, since the Apple UI may not show them. A server echo of `RANGE` without correct client behavior does not prove native future support. If the native probe does not work, note that in the result; the split future is checked independently.
 
-Сравнение `VTIMEZONE` для `Asia/Makassar` и `Europe/Berlin` использует точную последовательность UTC-переходов в интервале 2020–2035. Это позволяет iCloud заменить историю зоны своим эквивалентным описанием; изменения времени, правил, alarms и свойств событий по-прежнему различаются. Другие зоны, дополнительные свойства зоны и сложные определения сравниваются полностью. Поведение за пределами этого интервала, включая дальнее будущее бессрочных серий, пилотом не подтверждается. Генерация определения использует dateutil для корректного момента весеннего DST-перехода.
+The `VTIMEZONE` comparison for `Asia/Makassar` and `Europe/Berlin` uses the exact sequence of UTC transitions in the interval 2020–2035. This lets iCloud replace the zone's history with its own equivalent description; changes of time, rules, alarms and event properties are still distinguished. Other zones, additional zone properties and complex definitions are compared in full. Behavior outside this interval, including the far future of unbounded series, is not confirmed by the pilot. Generating the definition uses dateutil for the correct moment of the spring DST transition.
 
-Сохранить честный результат core и отдельные результаты future/native, а также название/версию клиента. Пример для трёх успешных проверок:
+Save an honest core result and separate future/native results, as well as the client name/version. Example for three successful checks:
 
 ```sh
 uv run family-calendar pilot icloud record-visual-check --run-dir outputs/icloud-pilot-01 --result pass --future-result pass --native-range-result pass --checked-all-cases --client 'Apple Calendar, version from About'
@@ -82,49 +82,49 @@ uv run family-calendar pilot icloud reconcile --run-dir outputs/icloud-pilot-01
 uv run python scripts/check_pilot_evidence.py --run-dir outputs/icloud-pilot-01
 ```
 
-`--result` относится к core (single, conditional, single/cancel/series, all-day, properties/TZ); future и native имеют отдельные flags. Вместо `pass` использовать `fail`, если обнаружена ошибка, либо `not-checked` для ещё не проверенного future/native. `--checked-all-cases` подтверждает просмотр всех применимых случаев core. По умолчанию отметка хранится как `owner_reported`.
+`--result` applies to core (single, conditional, single/cancel/series, all-day, properties/TZ); future and native have separate flags. Use `fail` instead of `pass` if an error is found, or `not-checked` for a future/native not yet checked. `--checked-all-cases` confirms that all applicable core cases were viewed. By default the mark is stored as `owner_reported`.
 
-Если клиент проверил агент через Computer Use, использовать `--source agent_observed --evidence outputs/icloud-pilot-01/observations.json`. Manifest содержит `checks`: для каждого просмотренного сценария — `result` (`pass`/`fail`) и `artifacts` (относительные пути к PNG/JPEG и TXT внутри этого run-dir). Например:
+If the agent checked the client through Computer Use, use `--source agent_observed --evidence outputs/icloud-pilot-01/observations.json`. The manifest contains `checks`: for each scenario viewed — `result` (`pass`/`fail`) and `artifacts` (relative paths to PNG/JPEG and TXT inside this run-dir). For example:
 
 ```json
 {"checks":{"all_day":{"result":"pass","artifacts":["client-observed/all-day.png","client-observed/all-day.txt"]}}}
 ```
 
-Для полной приёмки нужны все пять core-сценариев, для future — дополнительно три future-сценария; для проверенного native — `native_range_probe`. Пример выше показывает только формат одного сценария. Каждый сценарий требует screenshot и сохранённый текст UI; файлы должны быть owner-only. При записи сохраняются SHA-256 артефактов. Report и evidence checker отклоняют отсутствующие, изменённые или выходящие за run-dir артефакты. Это локальная проверка целостности наблюдений агента, а не независимая подпись Apple или автоматическое распознавание картинки. Источник `agent_observed` не выдаётся за подтверждение владельца.
+Full acceptance needs all five core scenarios, for future — additionally three future scenarios; for a verified native — `native_range_probe`. The example above shows only the format of one scenario. Each scenario requires a screenshot and the saved UI text; the files must be owner-only. On recording, the SHA-256 of the artifacts is saved. The report and evidence checker reject missing, changed or out-of-run-dir artifacts. This is a local integrity check of the agent's observations, not an independent Apple signature or automatic image recognition. The `agent_observed` source is not passed off as owner confirmation.
 
-`reconcile` может продолжить ещё не выполненные шаги матрицы в ранее разрешённом календаре. Не считать это командой исключительно чтения.
+`reconcile` may continue matrix steps that have not yet been executed in the previously allowed calendar. Do not treat it as a read-only command.
 
-`gate_a=accepted_core` разрешает дальнейшую разработку core; `accepted_core_and_future` дополнительно подтверждает simple weekly split. `not_accepted` требует исправления/повторной проверки. Mock environment всегда `not_accepted`. Второй аккаунт и shared calendar остаются `unverified` до отдельного live теста. Неуспех native probe не отключает подтверждённый split; native остаётся unverified и не используется для обычных переносов.
+`gate_a=accepted_core` allows further core development; `accepted_core_and_future` additionally confirms the simple weekly split. `not_accepted` requires a fix/recheck. The mock environment is always `not_accepted`. The second account and a shared calendar stay `unverified` until a separate live test. A failed native probe does not disable the confirmed split; native stays unverified and is not used for ordinary moves.
 
-## 5. Сбой и повтор команды
+## 5. Failure and command retry
 
-- Сохранить **тот же** `--run-dir`: UID/href и intent закреплены. Новый каталог означает новый набор событий.
-- При timeout сначала `status`, затем `reconcile`. Unknown mutation автоматически не повторяется; read-back либо подтверждает цель, либо оставляет `needs_attention`.
-- Отсутствие объекта сразу после timeout не разрешает повтор записи. Повторить reconciliation позже; при продолжающейся неопределённости оставить объект/отчёт для анализа.
-- При `version_conflict` чужая правка не перезаписывается. Такой шаг не сбрасывается в `prepared` автоматически.
-- `conditional:stale-version` с 412 — намеренный отрицательный тест; остальные conflicts нуждаются в разборе.
-- После 401/403 либо отзыва локальной записи следующие новые mutations в этой матрице блокируются.
-- Не запускать два live процесса для одного run-dir одновременно. SQLite atomic claim защищает отдельный шаг, но полноценные worker leases и межаккаунтные locks входят в следующие этапы.
+- Keep the **same** `--run-dir`: UID/href and intent are pinned. A new directory means a new set of events.
+- On a timeout, run `status` first, then `reconcile`. An unknown mutation is not repeated automatically; the read-back either confirms the target or leaves `needs_attention`.
+- The absence of an object right after a timeout does not allow repeating the write. Repeat reconciliation later; if uncertainty continues, keep the object/report for analysis.
+- On `version_conflict` someone else's edit is not overwritten. Such a step is not reset to `prepared` automatically.
+- `conditional:stale-version` with 412 is an intentional negative test; other conflicts need analysis.
+- After 401/403 or revocation of the local write permission, further new mutations in this matrix are blocked.
+- Do not run two live processes for one run-dir at the same time. The SQLite atomic claim protects a single step, but full worker leases and cross-account locks belong to the next stages.
 
-Отчёт использует `evidence_as_of`: повтор команды не превращает исторический read-back в свежую проверку внешнего состояния. Время `generated_at` обозначает только сборку отчёта.
+The report uses `evidence_as_of`: repeating the command does not turn a historical read-back into a fresh check of the external state. The `generated_at` time denotes only when the report was built.
 
-## 6. Очистить и отключить запись
+## 6. Clean up and disable writing
 
-После сохранения evidence и визуальной проверки:
+After the evidence is saved and the visual check is done:
 
 ```sh
 uv run family-calendar pilot icloud cleanup --run-dir outputs/icloud-pilot-01
 uv run family-calendar pilot icloud disable-write --connection pilot-a --calendar-ref CALENDAR_REF
 ```
 
-Cleanup удаляет только verified-owned refs с совпадающими последними ETag и semantic hash. Ручные изменения, неизвестные результаты и отсутствующие без deletion intent объекты не удаляются автоматически. Проверить `remaining` и `conflicts`; при ненулевом результате сохранить журнал для разбора. Для повторной cleanup запись должна ещё быть разрешена. Не удалять весь календарь вместо проверки оставшихся объектов.
+Cleanup deletes only verified-owned refs with matching last ETag and semantic hash. Manual changes, unknown results and objects that are missing without a deletion intent are not deleted automatically. Check `remaining` and `conflicts`; if non-zero, keep the journal for analysis. For a repeated cleanup, writing must still be allowed. Do not delete the whole calendar instead of checking the remaining objects.
 
-После начала cleanup матрицу в том же каталоге запустить нельзя (`run_already_cleaned`). Для нового теста — новый run-dir. Journals/reports можно сохранять как приватное историческое evidence.
+After cleanup has started, the matrix cannot be run in the same directory (`run_already_cleaned`). For a new test — a new run-dir. Journals/reports can be kept as private historical evidence.
 
-Отключение allowlist не отзывает сам Apple пароль. Его можно отдельно отозвать на account.apple.com. Apple также автоматически отзывает пароли приложений при смене основного пароля; [источник](https://support.apple.com/en-us/102654).
+Disabling the allowlist does not revoke the Apple password itself. It can be revoked separately at account.apple.com. Apple also revokes app passwords automatically when the main password is changed; [source](https://support.apple.com/en-us/102654).
 
-## Хранение
+## Storage
 
-По умолчанию `.local/` создаётся в текущем рабочем каталоге: credentials зашифрованы Fernet, локальный ключ хранится отдельно в `.local/master.key`; файлы 0600, папка 0700. В `outputs/` находятся приватные ICS до/после, фактические ответы, href, mappings и SQLite journal. Оба каталога исключены из Git и пакетов.
+By default `.local/` is created in the current working directory: credentials are encrypted with Fernet, the local key is stored separately in `.local/master.key`; files 0600, folder 0700. `outputs/` holds the private before/after ICS, the actual responses, hrefs, mappings and the SQLite journal. Both directories are excluded from Git and packages.
 
-Локальный ключ рядом с конфигурацией защищает от случайной утечки одного файла; пользователь, имеющий доступ к обоим, сможет расшифровать credentials. Это локальный owner-only pilot store, не системный Keychain или production vault. Ключ не терять: сервис не генерирует новый поверх существующих credentials. Для запуска из другого каталога всегда явно задавать `--home /absolute/private/registry` **до** `connection` / `pilot`; при существующем каталоге нужны закрытые права.
+A local key next to the configuration protects against an accidental leak of a single file; a user with access to both can decrypt the credentials. This is a local owner-only pilot store, not a system Keychain or a production vault. Do not lose the key: the service does not generate a new one over existing credentials. For a run from another directory always pass `--home /absolute/private/registry` explicitly **before** `connection` / `pilot`; an existing directory needs restricted permissions.

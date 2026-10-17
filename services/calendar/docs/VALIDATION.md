@@ -1,33 +1,33 @@
-# Проверка реализации 2026-10-14
+# Implementation check 2026-10-14
 
-## Сервис v0.2 — 2026-10-15
+## Service v0.2 — 2026-10-15
 
-- Полный normal прогон: **113 passed**, без skips, с настоящим PostgreSQL 18 и изолированными test schemas. Один warning из Starlette/AnyIO об устаревшем alias; он не является ошибкой тестов.
-- Policy tests: grant intersection, busy-only redaction, неизвестная занятость, scope revocation, group isolation, версии обязанностей и отсутствие ложного подтверждения другим человеком.
-- Worker tests: unknown без повторного create, crash reconciliation, read-back auth failure, два workers, сериализация записи/публикации read snapshot, доступ к receipts после выключения write opt-in.
-- Vault/OAuth identity, provider pagination, conditional headers, сохранение идентичности события при переносе, floating-time degradation, REST/MCP schema и origin checks.
-- Live через официальный MCP SDK: один Google и два iCloud connection читаются независимо. В двух тестовых календарях create → update → delete: **6 verified mutations**, стабильные refs и read-back; тестовые события удалены. Нормальные календари не изменялись.
-- Stdio MCP из другого project cwd: 10 tools, 32 разрешённых календаря, без provider IDs/credentials и без write opt-in. Повтор apply с тем же request ID возвращал существующую operation.
-- Slots live: configured parent+child sources complete; добавление непривязанного партнёра даёт unknown, без verified slots. Доступ только к занятости не открывает agenda details.
-- Отдельные DB роли не могут менять grants/keys/memberships/connections/write opt-in. Оба процесса имеют одного OS пользователя; это не production process isolation.
-- Private live receipts сохранены вне Git. Первый пробный conditional Google insert сохранён как остановленная неопределённая операция, не пересылался; read-back не нашёл объект. Успешная матрица — отдельный тест после исправления provider-specific precondition. История не переписана в PASS.
+- Full normal run: **113 passed**, no skips, with a real PostgreSQL 18 and isolated test schemas. One warning from Starlette/AnyIO about a deprecated alias; it is not a test error.
+- Policy tests: grant intersection, busy-only redaction, unknown busy time, scope revocation, group isolation, duty versions and the absence of false confirmation on behalf of another person.
+- Worker tests: unknown without repeating create, crash reconciliation, read-back auth failure, two workers, serialization of the write/publication of a read snapshot, access to receipts after write opt-in is turned off.
+- Vault/OAuth identity, provider pagination, conditional headers, keeping the event identity on a move, floating-time degradation, REST/MCP schema and origin checks.
+- Live through the official MCP SDK: one Google and two iCloud connections are read independently. In two test calendars create → update → delete: **6 verified mutations**, stable refs and read-back; the test events were deleted. Normal calendars were not changed.
+- Stdio MCP from another project cwd: 10 tools, 32 allowed calendars, no provider IDs/credentials and no write opt-in. Repeating apply with the same request ID returned the existing operation.
+- Slots live: configured parent+child sources complete; adding an unbound partner gives unknown, with no verified slots. Access to busy time only does not open agenda details.
+- Separate DB roles cannot change grants/keys/memberships/connections/write opt-in. Both processes run as one OS user; this is not production process isolation.
+- Private live receipts are stored outside Git. The first trial conditional Google insert was saved as a stopped unknown operation, was not resent; the read-back did not find the object. The successful matrix is a separate test after fixing the provider-specific precondition. The history was not rewritten into a PASS.
 
-MCP зарегистрирован локально; уже открытые Codex чаты не проверены на hot reload. Не проверены второй независимый Google аккаунт, sharing супругам, Google recurrence write, связанные семейные проекции, incremental sync и backup/restore. CI конфигурация обновлена, remote CI и публикация не запускались. Исходный статус этапа 1 ниже сохранён как история.
+MCP is registered locally; already open Codex chats were not checked for hot reload. Not verified: a second independent Google account, sharing with spouses, Google recurrence write, linked family projections, incremental sync and backup/restore. The CI configuration was updated, remote CI and publication were not run. The original status of stage 1 below is kept as history.
 
-Реализован первый этап локального iCloud pilot. Live Gate A **не принят**: настоящий Apple Account ещё не подключён, server/client совместимость не проверена.
+The first stage of the local iCloud pilot is implemented. Live Gate A is **not accepted**: a real Apple Account is not connected yet, server/client compatibility is not verified.
 
-Проверено локально на Python 3.13.11 / uv 0.9.26:
+Checked locally on Python 3.13.11 / uv 0.9.26:
 
 - `uv run pytest tests/unit tests/contract`: **53 passed**.
-- Ruff check и format check: PASS.
+- Ruff check and format check: PASS.
 - `uv lock --check`: PASS.
-- Source distribution и wheel успешно собраны.
-- Установка wheel в изолированное uv окружение и `family-calendar --help`: PASS.
-- Артефакты проверены на отсутствие `.local`, `outputs`, `.venv`, private keys и journals; ссылки документов проверены.
-- Git ignore закрывает registry, journals, outputs и окружение.
+- The source distribution and wheel were built successfully.
+- Installing the wheel into an isolated uv environment and `family-calendar --help`: PASS.
+- The artifacts were checked for the absence of `.local`, `outputs`, `.venv`, private keys and journals; document links were checked.
+- Git ignore covers the registry, journals, outputs and the environment.
 
-Проверки включают recurrence identities/наборы occurrences, COUNT/UNTIL/infinite split, timezone/DST, DATE/floating fixtures, unknown properties/alarms, ETag 412, redirect credential boundaries, независимые encrypted connections, отсутствие secret traceback, atomic claim, restart/idempotency, timeout после принятого create/delete/trim, условную компенсацию, отказ cleanup при чужой правке и проверку фактического read-back evidence.
+The checks include recurrence identities/occurrence sets, COUNT/UNTIL/infinite split, timezone/DST, DATE/floating fixtures, unknown properties/alarms, ETag 412, redirect credential boundaries, independent encrypted connections, no secret traceback, atomic claim, restart/idempotency, timeout after an accepted create/delete/trim, conditional compensation, cleanup refusal on a foreign edit and verification of the actual read-back evidence.
 
-Тест решений Gate A с mock transport и явно выбранной тестовой меткой environment проверяет только логику; он не является live свидетельством. CI workflow подготовлен, но на GitHub в этом проходе не запускался. Публикации пакетов/remote repository и deployment не выполнялись.
+The Gate A decision test with a mock transport and an explicitly chosen test environment label checks only the logic; it is not live evidence. The CI workflow is prepared but was not run on GitHub in this pass. No package/remote repository publication or deployment was done.
 
-Следующий шаг: локально подключить аккаунт, сделать discovery, выбрать пустой тестовый календарь и запустить матрицу по [инструкции](ICLOUD_PILOT.md). Google/MCP/production backend и реальные семейные события находятся за пределами этого этапа.
+Next step: connect an account locally, run discovery, choose an empty test calendar and run the matrix by the [instructions](ICLOUD_PILOT.md). Google/MCP/production backend and real family events are outside this stage.

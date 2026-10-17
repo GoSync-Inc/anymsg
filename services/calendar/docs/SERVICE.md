@@ -1,28 +1,28 @@
-# Семейный сервис v0.2
+# Family service v0.2
 
-## Аккаунт, человек и календарь
+## Account, person and calendar
 
-`connection_id` — аккаунт провайдера, `person_id` — член семьи, `calendar_ref` — календарь. Календарь ребёнка может храниться в аккаунте родителя: binding учитывает его как источник занятости ребёнка, не меняя владельца аккаунта.
+`connection_id` is a provider account, `person_id` is a family member, `calendar_ref` is a calendar. A child's calendar may be stored in a parent's account: the binding counts it as a source of the child's busy time without changing the account owner.
 
-Apple «Календарь» — приложение. Для событий Google в этом приложении нужен Google OAuth; для iCloud — CalDAV. Сервис не копирует события между провайдерами, не исправляет sharing автоматически и не объединяет вручную созданные дубли в один ресурс. Поиск слотов объединяет пересекающиеся интервалы занятости.
+Apple "Calendar" is an application. Google events in this application require Google OAuth; iCloud requires CalDAV. The service does not copy events between providers, does not fix sharing automatically and does not merge manually created duplicates into one resource. Slot search merges overlapping busy intervals.
 
-## Подключение владельцем
+## Connection by the owner
 
-Подключение, роли, grants, write opt-in и ключи доступны только локальному owner CLI. В MCP/REST этих методов нет.
+Connections, roles, grants, write opt-in and keys are available only through the local owner CLI. MCP/REST have no such methods.
 
-Google: включить Calendar API в своём Cloud проекте, создать desktop/installed OAuth client и сохранить его JSON в приватном файле `0600`:
+Google: enable the Calendar API in your own Cloud project, create a desktop/installed OAuth client and save its JSON in a private file `0600`:
 
 ```sh
 uv run family-calendar service connect-google --id google-parent --owner egor --email ACCOUNT_EMAIL --client .local/service/google-client.json
 ```
 
-Новая ссылка входа временно сохраняется в `.local/service/google-authorization.url`. Открыть её в браузере и подтвердить доступ нужным аккаунтом. Callback слушает loopback до часа; успех показывает `Family Calendar Service connected`. При истёкшем callback начать новый вход. Пароли, коды, callback URL и токены не присылать в чат.
+The new sign-in link is temporarily saved in `.local/service/google-authorization.url`. Open it in a browser and confirm access with the right account. The callback listens on loopback for up to an hour; success shows `Family Calendar Service connected`. If the callback has expired, start a new sign-in. Do not send passwords, codes, callback URLs or tokens in chat.
 
-Scopes: OpenID/email, `calendar.calendarlist.readonly`, `calendar.events`, `calendar.app.created`; Gmail/Drive не запрашиваются. Используется новый OAuth flow с state/PKCE/nonce. Проверяются подписанный Google ID token, audience/issuer, verified email и постоянный `sub`. Под тем же connection ID нельзя подменить аккаунт. Чужие существующие refresh tokens не импортируются.
+Scopes: OpenID/email, `calendar.calendarlist.readonly`, `calendar.events`, `calendar.app.created`; Gmail/Drive are not requested. A new OAuth flow with state/PKCE/nonce is used. The signed Google ID token, audience/issuer, verified email and the permanent `sub` are checked. An account cannot be swapped under the same connection ID. Other people's existing refresh tokens are not imported.
 
-Непроверенное приложение может показать предупреждение. Publishing status конкретного проекта проверяется отдельно. Для External/Testing Calendar refresh token обычно истекает через семь дней; сервис возвращает `reauth_required`, не пустой календарь. [Google OAuth expiration](https://developers.google.com/identity/protocols/oauth2#expiration).
+An unverified application may show a warning. The publishing status of a specific project is checked separately. For External/Testing, a Calendar refresh token usually expires after seven days; the service returns `reauth_required`, not an empty calendar. [Google OAuth expiration](https://developers.google.com/identity/protocols/oauth2#expiration).
 
-iCloud: сначала скрытый ввод app-specific password в legacy registry, затем импорт и свежий discovery:
+iCloud: first enter the app-specific password hidden into the legacy registry, then import and run a fresh discovery:
 
 ```sh
 uv run family-calendar connection add-icloud --id apple-parent
@@ -31,9 +31,9 @@ uv run family-calendar service import-icloud --connection apple-parent --owner e
 uv run family-calendar service discover --connection apple-parent
 ```
 
-`--timezone` — IANA-зона календарей, в которой читаются события на весь день (по умолчанию `Asia/Makassar`). Discover заменяет её зоной из VTIMEZONE календаря, а если её нет, оставляет выбранную при импорте. Импорт не изменяет credentials, journals и allowlists пилота. Сервис имеет свой Vault и отдельный write opt-in; каждый аккаунт использует отдельный транспорт.
+`--timezone` is the IANA zone of the calendars in which all-day events are read (default `Asia/Makassar`). Discover replaces it with the zone from the calendar's VTIMEZONE, and if there is none, keeps the one chosen at import. Import does not change the pilot's credentials, journals and allowlists. The service has its own Vault and a separate write opt-in; each account uses a separate transport.
 
-## Семья и разрешения
+## Family and permissions
 
 ```sh
 uv run family-calendar service member --id partner --label Partner --role adult
@@ -41,93 +41,93 @@ uv run family-calendar service member --id child --label Child --role dependent
 uv run family-calendar service bind --member child --calendar CALENDAR_REF
 ```
 
-| Роль | Действия при наличии явных scopes |
+| Role | Actions given explicit scopes |
 |---|---|
-| group_admin / coordinator | Разрешённые события и обязанности семьи |
-| adult | Разрешённые события и назначение обязанностей себе |
-| dependent / helper | Чтение разрешённых источников; запись событий заблокирована |
+| group_admin / coordinator | Allowed events and the family's duties |
+| adult | Allowed events and assigning duties to themselves |
+| dependent / helper | Reading allowed sources; event writes are blocked |
 
-Администратор не получает доступ к чужим календарям автоматически. Доступ — пересечение scopes ключа, списка календарей агента, grant участника и возможностей провайдера. `busy_only` скрывает названия, описания, места и event/source IDs, блокирует запись.
+An administrator does not get access to other people's calendars automatically. Access is the intersection of the key's scopes, the agent's calendar list, the member's grant and provider capabilities. `busy_only` hides titles, descriptions, places and event/source IDs, and blocks writes.
 
 ```sh
 uv run family-calendar service grant --member egor --calendar CALENDAR_REF --scopes agenda:read,availability:read,event:read,plan:create,plan:execute,event:create,event:update,event:delete
 uv run family-calendar service agent-key --id planner --member egor --calendar CALENDAR_REF --scopes agenda:read,availability:read,event:read,assignment:read,assignment:write,plan:create,plan:execute,event:create,event:update,event:delete --output .local/service/keys/planner.key
 ```
 
-Для нескольких календарей повторять `--calendar`. Новые календари не добавляются автоматически. Каждому агенту выдаётся отдельный ключ, срок — 90 дней; DB хранит только SHA-256. `revoke-agent --id planner` отзывает ключ и незавершённые планы. Для нового ключа использовать новый principal ID. `disconnect --connection ID` отключает аккаунт и write opt-in; подключать его заново с новым connection ID и явными grants.
+For several calendars, repeat `--calendar`. New calendars are not added automatically. Each agent gets a separate key, valid for 90 days; the DB stores only the SHA-256. `revoke-agent --id planner` revokes the key and unfinished plans. For a new key use a new principal ID. `disconnect --connection ID` disconnects the account and the write opt-in; connect it again with a new connection ID and explicit grants.
 
-Запись по умолчанию выключена. Выбор владельца:
+Writing is off by default. The owner's choice:
 
 ```sh
 uv run family-calendar service allow-write --calendar TEST_REF --test-calendar
-# Для календаря, явно выбранного владельцем под реальные операции:
+# For a calendar the owner explicitly chose for real operations:
 uv run family-calendar service allow-write --calendar REVIEWED_REF --reviewed-calendar
 uv run family-calendar service disable-write --calendar CALENDAR_REF
 ```
 
-Write opt-in даёт техническую возможность. Агент должен иметь инструкцию пользователя на конкретное изменение. Тестовые проверки не изменяют обычные события.
+Write opt-in gives a technical capability. The agent must have a user instruction for the specific change. Test checks do not change ordinary events.
 
-## Единый MCP
+## Unified MCP
 
-Официальный Python MCP SDK; Streamable HTTP на `http://127.0.0.1:13232/mcp` с `Authorization: Bearer KEY`. Stdio proxy читает ключ из приватного файла; в конфигурации только его путь. Для Codex использовать абсолютные пути:
+The official Python MCP SDK; Streamable HTTP at `http://127.0.0.1:13232/mcp` with `Authorization: Bearer KEY`. The stdio proxy reads the key from a private file; the configuration holds only its path. For Codex use absolute paths:
 
 ```sh
 codex mcp add family_calendar -- /ABS/REPO/.venv/bin/python -m family_calendar.service.proxy --url http://127.0.0.1:13232/mcp --key-file /ABS/REPO/.local/service/keys/planner.key
 ```
 
-Proxy допускает только loopback URL. Новые чаты загружают MCP из конфигурации; уже открытый чат может требовать обновления соединения. Проверка SDK транспорта не доказывает hot reload текущего чата.
+The proxy allows only a loopback URL. New chats load MCP from the configuration; an already open chat may need its connection refreshed. Checking the SDK transport does not prove hot reload of the current chat.
 
-| Tool | Назначение / REST method |
+| Tool | Purpose / REST method |
 |---|---|
-| family_capabilities | Возможности и ограничения / capabilities |
-| family_calendars | Разрешённые календари / calendars |
-| family_members | Члены семьи и роли / members |
-| family_agenda | Общая повестка с coverage / agenda |
-| family_slots | Свободные интервалы участников / slots |
-| family_plan | Сохранённый preview изменений / plan |
-| family_apply | Admission с постоянным request_id / apply |
-| family_operation | Статус и receipts / operation |
-| family_assignments | Просмотр обязанностей в окне / assignments |
-| family_assignment | Создание/изменение/отмена обязанности / assignment |
+| family_capabilities | Capabilities and limits / capabilities |
+| family_calendars | Allowed calendars / calendars |
+| family_members | Family members and roles / members |
+| family_agenda | Shared agenda with coverage / agenda |
+| family_slots | Free intervals of members / slots |
+| family_plan | Saved preview of changes / plan |
+| family_apply | Admission with a persistent request_id / apply |
+| family_operation | Status and receipts / operation |
+| family_assignments | View duties in a window / assignments |
+| family_assignment | Create/change/cancel a duty / assignment |
 
-REST: `POST /v1/{method}`, те же JSON arguments, ключ и policy layer. Unknown поля отвергаются; Host/Origin ограничены localhost, body — 64 KiB, notification stream выключен. Gateway не получает Vault и не может изменять DB memberships/grants/keys. Оба процесса работают под одним OS пользователем: это **не изоляция от скомпрометированного процесса того же пользователя**. Deployment требует отдельных OS identities и secret store.
+REST: `POST /v1/{method}`, the same JSON arguments, key and policy layer. Unknown fields are rejected; Host/Origin are limited to localhost, the body to 64 KiB, the notification stream is off. The gateway does not get the Vault and cannot change DB memberships/grants/keys. Both processes run under one OS user: this is **not isolation from a compromised process of the same user**. A deployment requires separate OS identities and a secret store.
 
-Пример `family_slots`:
+Example of `family_slots`:
 
 ```json
 {"member_ids":["egor","child"],"start":"2026-10-19T08:00:00+08:00","end":"2026-10-19T20:00:00+08:00","duration_minutes":60,"refresh":true}
 ```
 
-До 31 дня, 32 календарей, 500 событий. Google pagination и CalDAV REPORT должны завершиться полностью. Coverage старше пяти минут, ошибки и непривязанные участники дают `unknown`. `candidate_slots` относятся только к **настроенным и явно выбранным источникам**; неизвестные календари человека не считаются прочитанными. Неподключённый партнёр не позволяет утверждать доступность всей семьи. Polling выполняется по запросу; это не full background/incremental sync.
+Up to 31 days, 32 calendars, 500 events. Google pagination and the CalDAV REPORT must complete in full. Coverage older than five minutes, errors and unbound members give `unknown`. `candidate_slots` relate only to **configured and explicitly chosen sources**; a person's unknown calendars are not counted as read. A partner who is not connected does not allow claiming the availability of the whole family. Polling happens on request; this is not a full background/incremental sync.
 
-`family_members` возвращает `availability_calendar_refs` и `availability_sources_status`
-для каждого участника: `configured`, `unbound` или `inaccessible`. Ссылки на недоступные
-календари скрыты. Перед поиском слотов сверить источники с инструкцией владельца.
-Не включать все видимые календари автоматически: видимость не означает участие в занятости.
+`family_members` returns `availability_calendar_refs` and `availability_sources_status`
+for each member: `configured`, `unbound` or `inaccessible`. References to inaccessible
+calendars are hidden. Before searching for slots, check the sources against the owner's instruction.
+Do not include all visible calendars automatically: visibility does not mean participation in busy time.
 
-`family_slots` принимает необязательный `additional_calendar_refs` — дополнительные явно
-выбранные источники. Они объединяются с bindings, а не заменяют их; общий лимит — 32.
-Ответ `source_selection` перечисляет итоговые источники и привязки каждого участника.
-Дополнительный календарь не устраняет `unbound` другого человека. `verified` относится
-только к указанному набору источников, а не к неизвестным календарям или всей семье.
+`family_slots` accepts an optional `additional_calendar_refs` — additional explicitly
+chosen sources. They are combined with the bindings, not replacing them; the total limit is 32.
+The `source_selection` response lists the resulting sources and each member's bindings.
+An additional calendar does not remove another person's `unbound`. `verified` applies
+only to the specified set of sources, not to unknown calendars or the whole family.
 
-`refresh=true` сначала проверяет весь запрос, затем ставит обновление в очередь.
-Одновременные запросы одного агента на то же окно используют существующее обновление.
-Ожидание ограничено 20 секундами; ответ содержит `refresh.status` (`pending`, `complete`,
-`failed`), безопасные job IDs и `retry_after_seconds`. Для `pending` повторить тот же
-запрос с `refresh=false`: это читает состояние без новых заданий. Пока обновление
-выполняется, старый кэш не становится подтверждением свободного времени. Сбой провайдера
-отражается в coverage даже при отсутствии предыдущего кэша.
+`refresh=true` first validates the whole request, then queues the refresh.
+Concurrent requests of one agent for the same window use the existing refresh.
+The wait is limited to 20 seconds; the response contains `refresh.status` (`pending`, `complete`,
+`failed`), safe job IDs and `retry_after_seconds`. For `pending`, repeat the same
+request with `refresh=false`: this reads the state without new jobs. While the refresh
+is running, the old cache does not become confirmation of free time. A provider failure
+is reflected in coverage even if there was no previous cache.
 
-`family_capabilities.constraints` описывает ограничения записи, свежести, размеров окна
-и планов. `calendars[].allowed_event_actions` учитывает текущие scopes, роль, видимость,
-права провайдера и write opt-in. Отдельный `write_enabled` — только настройка календаря;
-он сам по себе не разрешает агенту запись. В общем MCP используются имена `calendar_*`;
-шлюз дополнительно ограничивает действия выбранными инструментами и grants.
+`family_capabilities.constraints` describes the limits on writes, freshness, window sizes
+and plans. `calendars[].allowed_event_actions` takes into account current scopes, role, visibility,
+provider rights and write opt-in. The separate `write_enabled` is only a calendar setting;
+on its own it does not allow the agent to write. The shared MCP uses `calendar_*` names;
+the gateway additionally limits actions to the chosen tools and grants.
 
-## Изменения и восстановление
+## Changes and recovery
 
-Читать capabilities/agenda, создать `family_plan` на 1–8 действий, проверить preview в пределах инструкции пользователя, вызвать apply с сохранённым `request_id`, читать operation. План живёт десять минут. Права перепроверяются перед admission и отправкой. Update/delete используют `event_ref` из повестки и сохранённый ETag; worker свежим GET проверяет версию.
+Read capabilities/agenda, create a `family_plan` of 1–8 actions, check the preview within the user's instruction, call apply with a saved `request_id`, read the operation. A plan lives ten minutes. Permissions are re-checked before admission and sending. Update/delete use the `event_ref` from the agenda and the saved ETag; the worker checks the version with a fresh GET.
 
 ```json
 {"actions":[{"action":"create","calendar_ref":"CAL_REF","event":{"title":"Lesson","start":"2026-10-19T16:00:00+08:00","end":"2026-10-19T17:00:00+08:00","timezone":"Asia/Makassar"}}]}
@@ -137,50 +137,50 @@ REST: `POST /v1/{method}`, те же JSON arguments, ключ и policy layer. U
 {"plan_id":"PLAN_REF","request_id":"stable-user-request-001"}
 ```
 
-Время события в `plan` — ISO 8601 со смещением или `Z`; без смещения (`YYYY-MM-DDTHH:MM[:SS]`) оно читается как местное время в `event.timezone` (IANA). Несуществующее и двойное местное время перехода DST отклоняются как `invalid_local_time` и `ambiguous_local_time`. Окна agenda/slots/assignments требуют смещения. Ошибки времени содержат фиксированный `hint`, а `capabilities.constraints.time_format` описывает формат. `plan` сохраняет только локальный план и не меняет календари, поэтому помечен как недеструктивный; чтения помечены read-only.
+An event time in `plan` is ISO 8601 with an offset or `Z`; without an offset (`YYYY-MM-DDTHH:MM[:SS]`) it is read as local time in `event.timezone` (IANA). A nonexistent or doubled local time of a DST transition is rejected as `invalid_local_time` and `ambiguous_local_time`. Agenda/slots/assignments windows require an offset. Time errors contain a fixed `hint`, and `capabilities.constraints.time_format` describes the format. `plan` saves only a local plan and does not change calendars, so it is marked non-destructive; reads are marked read-only.
 
-Intent и `sending` сохраняются до сети; operation/resource advisory locks защищают от двух workers. После записи обязателен read-back. Повтор apply с тем же request ID возвращает ту же operation; другой plan под этим ID отклоняется. Crash/unknown сверяется по тому же Google ID или CalDAV href и **не отправляет create повторно**. `service reconcile --operation OP_REF` проверяет отправленные неизвестные шаги; если результат не доказан, остаётся `needs_attention`. После ambiguous шага следующие не отправляются. Между провайдерами нет атомарности; partial не означает rollback.
+The intent and `sending` are saved before the network; operation/resource advisory locks protect against two workers. A read-back is mandatory after writing. Repeating apply with the same request ID returns the same operation; a different plan under that ID is rejected. A crash/unknown is reconciled by the same Google ID or CalDAV href and **does not resend the create**. `service reconcile --operation OP_REF` checks sent unknown steps; if the result is not proven, it stays `needs_attention`. After an ambiguous step the following ones are not sent. There is no atomicity between providers; partial does not mean rollback.
 
-CalDAV create: `If-None-Match`, update/delete: `If-Match`. Google update/delete: `If-Match`; insert: сохранённый client-generated ID, поскольку conditional insert не поддерживается. [Google resource versions](https://developers.google.com/workspace/calendar/api/guides/version-resources).
+CalDAV create: `If-None-Match`, update/delete: `If-Match`. Google update/delete: `If-Match`; insert: the saved client-generated ID, since conditional insert is not supported. [Google resource versions](https://developers.google.com/workspace/calendar/api/guides/version-resources).
 
-Сейчас запись — отдельные неповторяющиеся timed события без гостей/специальных Google типов. Незапрошенные поля и ICS свойства/alarms сохраняются. Recurrence/future из harness не включены в MCP. Обязанности `dropoff/pickup/stay_with_child` хранятся отдельно: assigned занимает слот, proposed — нет. Изменять/отменять по `assignment_id` и `expected_version`. Согласие другого человека не утверждается. Автоматической связи с занятием ребёнка и проекций в календари родителей пока нет.
+Currently writing means separate non-recurring timed events without guests/special Google types. Fields that were not requested and ICS properties/alarms are preserved. Recurrence/future from the harness are not included in MCP. Duties `dropoff/pickup/stay_with_child` are stored separately: assigned takes a slot, proposed does not. Change/cancel by `assignment_id` and `expected_version`. The consent of another person is not asserted. There is no automatic link to the child's activity and no projections into the parents' calendars yet.
 
-## Покрытие и ошибки чтения
+## Coverage and read errors
 
-Повторения iCloud разворачиваются лениво: в одном окне календаря не больше 500 экземпляров, как и в ответах agenda/slots (`event_limit`). Перед разворачиванием каждый RRULE оценивается сверху без генерации: dateutil проходит все экземпляры от DTSTART до конца окна. Больше 100 000 на ресурс или 1 000 000 на календарь дают `coverage_incomplete`, например `FREQ=MINUTELY`/`SECONDLY` или ежечасное событие, идущее больше 11 лет. Ежечасное напоминание даёт 744 события за 31 день, поэтому такое окно остаётся `unknown`, а окно до 20 дней читается полностью. Лимит 500 не повышен: его же применяют agenda и slots, так что больший лимит одного worker не дал бы покрытия. При `coverage_incomplete` из-за плотного календаря запросить более короткое окно.
+iCloud recurrences are expanded lazily: at most 500 instances in one calendar window, the same as in agenda/slots responses (`event_limit`). Before expansion each RRULE is estimated from above without generating: dateutil walks all instances from DTSTART to the end of the window. More than 100 000 per resource or 1 000 000 per calendar give `coverage_incomplete`, for example `FREQ=MINUTELY`/`SECONDLY` or an hourly event running for more than 11 years. An hourly reminder gives 744 events in 31 days, so such a window stays `unknown`, while a window of up to 20 days is read in full. The limit of 500 is not raised: agenda and slots apply the same one, so a larger limit of one worker would not give coverage. On `coverage_incomplete` caused by a dense calendar, request a shorter window.
 
-Событие нулевой длины (например, DTSTART без DTEND) публикуется как момент: `instant=true`, `busy=false`, `end` равен `start`; слоты оно не занимает. В preview плана `before.end` такого события тоже равен `start`. Запись нулевой длины отклоняется с `invalid_window`, поэтому update всегда задаёт событию длительность. Событие, которое кончается раньше начала, даёт coverage `invalid_provider_event_time`, а данные, которые нельзя сохранить, — `invalid_provider_data`. Это ошибки данных календаря, а не `provider_unavailable`.
+A zero-length event (for example, DTSTART without DTEND) is published as a moment: `instant=true`, `busy=false`, `end` equals `start`; it does not occupy slots. In the plan preview the `before.end` of such an event also equals `start`. A zero-length write is rejected with `invalid_window`, so an update always sets a duration on the event. An event that ends before it starts gives coverage `invalid_provider_event_time`, and data that cannot be stored gives `invalid_provider_data`. These are calendar data errors, not `provider_unavailable`.
 
-Если worker перезапустился во время чтения, это обновление становится `failed`, а coverage получает `sync_interrupted`. Повторно оно не запускается: чтение, уронившее процесс, иначе блокировало бы все обновления и операции. Для нового чтения агент снова вызывает agenda/slots с `refresh=true`.
+If a worker restarted during a read, that refresh becomes `failed`, and coverage gets `sync_interrupted`. It is not run again: a read that crashed the process would otherwise block all refreshes and operations. For a new read the agent calls agenda/slots with `refresh=true` again.
 
-## Эксплуатация
+## Operations
 
-`family-calendar-local status/start/stop` управляет только собственными macOS launch agents; PostgreSQL остаётся отдельным persistent container. Docker daemon должен работать. В argv/env не передаются ключи/пароли; логи приватны. На других ОС запускать вручную либо под своим supervisor.
+`family-calendar-local status/start/stop` manages only its own macOS launch agents; PostgreSQL remains a separate persistent container. The Docker daemon must be running. Keys/passwords are not passed in argv/env; logs are private. On other OSes, run it manually or under your own supervisor.
 
-Credentials и raw source cache зашифрованы, но event details, plans и journal содержат приватные данные в DB. Volume этим сервисом не шифруется. Backup должен включать PostgreSQL, Vault/key, приватные DB профили и ключи агентов. Автоматический backup и restore ещё не установлены/не проверены. Это локальный MVP, не публичный multi-tenant deployment.
+Credentials and the raw source cache are encrypted, but event details, plans and the journal contain private data in the DB. This service does not encrypt the volume. A backup must include PostgreSQL, the Vault/key, the private DB profiles and the agents' keys. Automatic backup and restore are not yet installed/verified. This is a local MVP, not a public multi-tenant deployment.
 
-## Границы доступности и предпросмотра
+## Availability and preview boundaries
 
-`slots` перечисляет `checked_member_sources` и итоговый `source_selection`.
-`availability_scope=configured_bindings` при одних bindings; дополнительные явно
-выбранные источники дают `configured_and_explicit_sources`.
-Binding определяет проверенный источник, но не подтверждает, что перечислены все
-календари человека. Поэтому общая `availability` остаётся `unknown`,
-`member_sources_complete=unknown`, а `required_sources_complete=false`. При свежем
-покрытии всех настроенных источников `configured_bindings_availability=verified`,
-`configured_sources_complete=true`, и `candidate_slots` содержит свободные интервалы
-только внутри итогового `source_selection` (bindings плюс дополнительные источники).
-При pending/failed refresh эти поля сбрасываются в unknown/false/пустой список.
-`verified_slots` остаётся пустым. Подключение аккаунта
-само по себе не создаёт binding и не расширяет grants.
+`slots` lists `checked_member_sources` and the resulting `source_selection`.
+`availability_scope=configured_bindings` with bindings alone; additional explicitly
+chosen sources give `configured_and_explicit_sources`.
+A binding defines a verified source but does not confirm that all of a person's
+calendars are listed. Therefore the overall `availability` stays `unknown`,
+`member_sources_complete=unknown`, and `required_sources_complete=false`. With fresh
+coverage of all configured sources, `configured_bindings_availability=verified`,
+`configured_sources_complete=true`, and `candidate_slots` contains free intervals
+only inside the resulting `source_selection` (bindings plus additional sources).
+On a pending/failed refresh these fields are reset to unknown/false/empty list.
+`verified_slots` stays empty. Connecting an account
+does not by itself create a binding and does not widen grants.
 
-Предпросмотр `plan` возвращает изменения полей `diff` и `overlap_check`: полуоткрытые
-интервалы занятости в доступных для чтения календарях, включая busy-only без названий
-и идентификаторов событий. Переносимые/удаляемые ресурсы исключаются из старого
-расписания; пересечения между предложенными шагами показываются отдельно. Отсутствие
-или просроченность покрытия помечает проверку `incomplete`. Это снимок кэша, не блокировка
-времени и не гарантия отсутствия параллельных правок при выполнении.
+The `plan` preview returns field changes in `diff` and an `overlap_check`: half-open
+busy intervals in the calendars available for reading, including busy-only without titles
+and event identifiers. Resources being moved/deleted are excluded from the old
+schedule; overlaps between the proposed steps are shown separately. Missing
+or stale coverage marks the check `incomplete`. This is a snapshot of the cache, not a lock on
+time and not a guarantee that there are no parallel edits at execution.
 
-Календари сохраняют отдельную идентичность ресурса провайдера (`identity_basis`).
-`primary` и `duplicate_of` равны null до явного определения владельцем: одинаковое
-название или другой часовой пояс не доказывают, что это дубли.
+Calendars keep a separate provider resource identity (`identity_basis`).
+`primary` and `duplicate_of` are null until the owner defines them explicitly: the same
+name or a different time zone does not prove that these are duplicates.

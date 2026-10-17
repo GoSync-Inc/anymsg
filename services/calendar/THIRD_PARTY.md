@@ -1,6 +1,6 @@
-# Прямые зависимости
+# Direct dependencies
 
-Лицензии проверены по metadata установленных locked distributions 2026-10-14. Полные тексты лицензий включены в соответствующие upstream packages; собственный MIT не заменяет их условия.
+Licenses were checked against the metadata of the installed locked distributions on 2026-10-14. The full license texts are included in the corresponding upstream packages; our own MIT does not replace their terms.
 
 | Distribution | Locked version | License metadata |
 |---|---|---|
@@ -19,4 +19,4 @@
 | starlette | 0.52.1 | BSD-3-Clause |
 | recurring-ical-events | 3.8.2 | LGPL-3.0-or-later |
 
-Transitive и dev dependencies зафиксированы в uv.lock. python-caldav не включён в зависимости текущего пилота. Перед публичной поставкой бинарного bundle отдельно проверить состав и notices всех включённых distributions; сейчас создаются source/wheel собственного Python package без vendoring библиотек.
+Transitive and dev dependencies are pinned in uv.lock. python-caldav is not included in the dependencies of the current pilot. Before a public delivery of a binary bundle, separately check the composition and notices of all included distributions; for now only the source/wheel of our own Python package is built, without vendoring libraries.
