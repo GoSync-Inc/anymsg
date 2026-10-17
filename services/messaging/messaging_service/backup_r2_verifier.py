@@ -290,7 +290,7 @@ def preflight_disk(config,receipt,docker_root):
 def make_proof(receipt,facts,run):
     if (not isinstance(facts,dict) or set(facts)!={'v','status','schema_version','manifest_sha256','checks'} or
             type(facts['v']) is not int or facts['v']!=1 or facts['status']!='verified' or
-            type(facts['schema_version']) is not int or facts['schema_version'] not in range(2,35) or
+            type(facts['schema_version']) is not int or facts['schema_version'] not in range(2,36) or
             facts['manifest_sha256']!=receipt['wire']['snapshot_sha256'] or not isinstance(facts['checks'],dict) or
             set(facts['checks'])!=r2.CHECKS or any(v is not True for v in facts['checks'].values())):
         raise ValueError('invalid_helper_result')
@@ -314,6 +314,10 @@ def select_candidate(receiver,client,state_fd,marker):
     # candidate authority comes from immutable cloud receipt plus full GET hash.
     for name in os.listdir(state_fd):
         if name=='.receiver.lock':continue
+        # The cold-copy subdirectory (ANYM-297: its lock, journals and their
+        # temporary files) addresses only <prefix>/cold/, which backup
+        # inventory, verification and rotation never touch.
+        if name=='cold' and stat.S_ISDIR(os.stat(name,dir_fd=state_fd,follow_symlinks=False).st_mode):continue
         if not name.endswith('.attempt.json'):raise ValueError('unresolved_upload_required')
         bid=name[:-len('.attempt.json')];r2.valid_id(bid)
         attempt=r2.validate_attempt(receiver,r2.state_read(state_fd,name),bid)

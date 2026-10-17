@@ -1,0 +1,21 @@
+{
+  "v": 1,
+  "transfer": {
+    "host": "backup.example.invalid",
+    "user": "posbackup",
+    "identity_file": "/run/secrets/cold_ssh/cold_ed25519",
+    "known_hosts_file": "/run/secrets/cold_ssh/known_hosts"
+  },
+  "recipients": [
+    "age1qqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqq",
+    "age1pppppppppppppppppppppppppppppppppppppppppppppppppppppppppp"
+  ],
+  "identity_file": "/run/secrets/cold_identity",
+  "age": "/usr/local/bin/age",
+  "archive_after_days": 23,
+  "total_bytes": 42949672960,
+  "pass_bytes": 4294967296,
+  "pass_files": 500,
+  "max_object_bytes": 4294967296,
+  "timeout_seconds": 3600
+}

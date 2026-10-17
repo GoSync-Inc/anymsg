@@ -51,6 +51,7 @@ V32_TABLES={'subscription_consumption':'subscription','subscription_receipts':'r
     'agent_feedback':'id'}
 V33_TABLES={'attachment_residency':'digest','attachment_eviction_journal':'id','attachment_backup_fences':'id'}
 V34_TABLES={'attachment_understanding':'attachment','file_understanding_profiles':'account,kind'}
+V35_TABLES={'attachment_cold_copies':'digest'}
 V26_TABLES={'subscriptions':'id','subscription_sources':'subscription,account,chat',
             'subscription_matches':'subscription,event'}
 V17_TABLES={'message_conflicts':'receipt_digest'}
@@ -60,7 +61,7 @@ V15_TABLES={'message_metadata':'message','attachment_enrichment':'attachment','e
 def database_manifest(c):
     tables={}
     version=int(c.execute("SELECT value FROM probe_metadata WHERE name='schema_version'").fetchone()['value'])
-    if version not in range(2,35): raise ValueError('unsupported_backup_schema')
+    if version not in range(2,36): raise ValueError('unsupported_backup_schema')
     for name,order in {**TABLES,**(V3_TABLES if version>=3 else {}),**(V4_TABLES if version>=4 else {}),
                        **(V5_TABLES if version>=5 else {}),**(V6_TABLES if version>=6 else {}),
                        **(V8_TABLES if version>=8 else {}),**(V9_TABLES if version>=9 else {}),
@@ -70,7 +71,8 @@ def database_manifest(c):
                        **(V23_TABLES if version>=23 else {}),**(V25_TABLES if version>=25 else {}),
                        **(V26_TABLES if version>=26 else {}),**(V27_TABLES if version>=27 else {}),
                        **(V29_TABLES if version>=29 else {}),**(V32_TABLES if version>=32 else {}),
-                       **(V33_TABLES if version>=33 else {}),**(V34_TABLES if version>=34 else {})}.items():
+                       **(V33_TABLES if version>=33 else {}),**(V34_TABLES if version>=34 else {}),
+                       **(V35_TABLES if version>=35 else {})}.items():
         query=sql.SQL('SELECT row_to_json(t) AS record FROM {} t ORDER BY {}').format(
             sql.Identifier(name),sql.SQL(',').join(sql.Identifier(part) for part in order.split(',')))
         sha=hashlib.sha256(); count=0
@@ -86,10 +88,14 @@ def blob_inventory(c,version):
     """Only a completed, matching lifecycle journal may omit an original."""
     if version<33:
         return c.execute('SELECT DISTINCT digest,bytes FROM attachments ORDER BY digest').fetchall(),[]
+    # Schema 35 names each absent original's verified cold copy (ANYM-297).
+    cold=('''LEFT JOIN attachment_cold_copies cc ON cc.digest=a.digest AND cc.bytes=a.bytes AND cc.state='verified' ''' if version>=35
+          else '')
     rows=c.execute('''SELECT DISTINCT a.digest,a.bytes,r.state,r.bytes AS residency_bytes,r.eviction_id,
-        j.state AS eviction_state,j.digest AS eviction_digest,j.bytes AS eviction_bytes
-        FROM attachments a LEFT JOIN attachment_residency r ON r.digest=a.digest
-        LEFT JOIN attachment_eviction_journal j ON j.id=r.eviction_id ORDER BY a.digest,a.bytes''').fetchall()
+        j.state AS eviction_state,j.digest AS eviction_digest,j.bytes AS eviction_bytes'''+
+        (',cc.object_key AS cold_object_key ' if version>=35 else ' ')+
+        '''FROM attachments a LEFT JOIN attachment_residency r ON r.digest=a.digest
+        LEFT JOIN attachment_eviction_journal j ON j.id=r.eviction_id '''+cold+'ORDER BY a.digest,a.bytes').fetchall()
     present=[];absent=[];seen=set()
     for row in rows:
         digest=row['digest'];size=row['bytes']
@@ -101,7 +107,10 @@ def blob_inventory(c,version):
             if (row['eviction_id'] is None or row['eviction_state']!='completed' or
                 row['eviction_digest']!=digest or row['eviction_bytes']!=size):
                 raise RuntimeError('backup_absence_unproven')
-            absent.append({'digest':digest,'bytes':size,'eviction_id':str(row['eviction_id'])})
+            item={'digest':digest,'bytes':size,'eviction_id':str(row['eviction_id'])}
+            # Only a verified cold copy is named; older evictions keep the schema-33 shape.
+            if version>=35 and row['cold_object_key']:item['cold_object_key']=row['cold_object_key']
+            absent.append(item)
         else:present.append({'digest':digest,'bytes':size})
     return present,absent
 
@@ -200,7 +209,7 @@ def create_snapshot(store,destination,dump_command,recovery_config=None,*,captur
 def verify_bundle(directory,*,blob_root=None):
     from .recovery_state import read_manifest,verify_recovery
     directory=Path(directory); manifest=read_manifest(directory)
-    if manifest.get('format') not in (1,2) or manifest.get('schema_version') not in range(2,35): raise ValueError('unsupported_backup')
+    if manifest.get('format') not in (1,2) or manifest.get('schema_version') not in range(2,36): raise ValueError('unsupported_backup')
     verify_recovery(directory,manifest)
     if (directory/'database.dump').is_symlink(): raise ValueError('invalid_backup_file')
     fd=os.open(directory/'database.dump',os.O_RDONLY|os.O_NOFOLLOW|os.O_NONBLOCK)
@@ -216,8 +225,13 @@ def verify_bundle(directory,*,blob_root=None):
         ('absent_blobs' in manifest and manifest['schema_version']<33)):
         raise ValueError('invalid_backup_manifest')
     absent_seen=set()
+    # Schema 35 names an absent original's verified cold copy when one exists.
+    base={'digest','bytes','eviction_id'}
     for item in absent:
-        if (not isinstance(item,dict) or set(item)!={'digest','bytes','eviction_id'} or
+        cold=item.get('cold_object_key') if isinstance(item,dict) else None
+        if (not isinstance(item,dict) or set(item) not in ([base,base|{'cold_object_key'}] if manifest['schema_version']>=35 else [base]) or
+            ('cold_object_key' in item and (not isinstance(cold,str) or not isinstance(item['digest'],str) or
+             not re.fullmatch(r'[a-zA-Z0-9_-]+(?:/[a-zA-Z0-9_-]+)*/cold/'+re.escape(item['digest'])+r'\.age',cold))) or
             type(item['bytes']) is not int or item['bytes']<0 or
             not isinstance(item['digest'],str) or not re.fullmatch(r'[a-f0-9]{64}',item['digest']) or
             item['digest'] in absent_seen or not isinstance(item['eviction_id'],str)):
