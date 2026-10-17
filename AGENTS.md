@@ -52,8 +52,10 @@ change, and higher when its hard or risky part needs it. Agent rules and
 instructions (`AGENTS.md`, `CLAUDE.md`, `.claude/`, process documents) are never
 micro, even for one line: normal by default, higher when a signal or the owner row
 applies. Administration the owner explicitly ordered (permissions, policies,
-settings) needs no Astra or Fable review: the agent records the before→after diff,
-applies it, reads it back and leaves a receipt in the PR description or a log.
+service and repository settings) needs no Astra or Fable review: the agent records
+the before→after diff, applies it, reads it back and leaves a receipt in the PR
+description or a log. Agent rules and instructions (`AGENTS.md`, `CLAUDE.md`,
+`.claude/`, process documents) are not covered and keep their reviews.
 Reviews stay for code and for any access expansion an agent proposes on its own.
 
 | Level | Covers | Review | Merge |
