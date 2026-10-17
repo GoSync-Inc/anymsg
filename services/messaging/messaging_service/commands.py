@@ -54,6 +54,24 @@ def safe_result(value):
     return result
 
 
+def _rejected(*errors):
+    """invalid_operation_parameters naming reviewed fields; submitted values are never returned."""
+    from .messenger_operations import field_error
+    failure=APIError('invalid_operation_parameters');failure.field_errors=[field_error(*e) for e in errors]
+    return failure
+
+
+REVISION='integer of at least 1: the current revision of the target message'
+
+
+def _empty(spec,chat_id,message_id,expected_revision):
+    # Account targets take no chat or message; chat targets take no message.
+    where='an account-level' if spec['target']=='account' else 'a chat-level'
+    names=[n for n,v in (('chat_id',chat_id),('message_id',message_id),('expected_revision',expected_revision))
+        if v and (n!='chat_id' or spec['target']=='account')]
+    return _rejected(*[(n,'unknown_field','empty for '+where+' operation') for n in names])
+
+
 def permitted(p,account,chat):
     return account in p['accounts'] and (p['chat_ids'] is None or chat in p['chat_ids'])
 
@@ -104,11 +122,11 @@ def _chat(c,p,account,chat_id):
     return row
 
 
-def _message(c,p,account,message_id,expected_revision,chat_id=None):
+def _message(c,p,account,message_id,expected_revision,chat_id=None,field='expected_revision'):
     if not isinstance(message_id,str) or not 1<=len(message_id)<=256:
         raise APIError('not_found',404)
     if type(expected_revision) is not int or expected_revision<1:
-        raise APIError('invalid_operation_parameters')
+        raise _rejected((field,'type' if type(expected_revision) is not int else 'minimum',REVISION))
     row=c.execute('SELECT * FROM messages WHERE id=%s AND account=%s AND NOT deleted',
                   (message_id,account)).fetchone()
     if not row or (chat_id is not None and row['chat']!=chat_id) or not permitted(p,account,row['chat']):
@@ -150,7 +168,7 @@ def _registered_file(store,c,p,account,parameters,*,verify=False):
 
 def _resolve(store,c,p,account,operation,chat_id,message_id,expected_revision,parameters,
              *,ready=False,verify_file=False,validate_parameters=True,retained_upload=False):
-    from .messenger_operations import validate_operation,operation_manifest,CATALOG_VERSION
+    from .messenger_operations import validate_operation,operation_manifest,CATALOG_VERSION,ParameterError
     from .whatsapp_capabilities import account_provider
     spec=_spec(operation);account_row=_account(c,p,account)
     provider=account_provider(c,account,account_row['platform'])
@@ -161,16 +179,20 @@ def _resolve(store,c,p,account,operation,chat_id,message_id,expected_revision,pa
         try:parameters=validate_operation(account_row['platform'],operation,parameters,provider=provider)
         except (ValueError,TypeError,UnicodeError) as exc:
             code=str(exc) if str(exc) in ('unsupported_operation','invalid_operation_parameters') else 'invalid_operation_parameters'
-            raise APIError(code) from None
+            failure=APIError(code)
+            if isinstance(exc,ParameterError):failure.field_errors=exc.field_errors
+            raise failure from None
     else:
         # Persisted normalized parameters are immutable. Do not apply a newer
         # normalizer to an idempotent retry or a collector dispatch.
         supported={entry['operation'] for entry in operation_manifest(account_row['platform'],provider=provider) if entry['supported']}
         if operation not in supported:raise APIError('unsupported_operation')
-        if not isinstance(parameters,dict):raise APIError('invalid_operation_parameters')
-    if (not isinstance(chat_id,str) or not isinstance(message_id,str) or
-        type(expected_revision) is not int or expected_revision<0):
-        raise APIError('invalid_operation_parameters')
+        if not isinstance(parameters,dict):raise _rejected(('parameters','type','object'))
+    invalid=[(n,'type','string') for n,v in (('chat_id',chat_id),('message_id',message_id)) if not isinstance(v,str)]
+    if type(expected_revision) is not int or expected_revision<0:
+        invalid.append(('expected_revision','type' if type(expected_revision) is not int else 'minimum',
+                        'integer of at least 0; 0 when the operation has no message target'))
+    if invalid:raise _rejected(*invalid)
     payload={'platform':account_row['platform'],'catalog_version':CATALOG_VERSION,
         'operation':operation,'account':account,**({'adapter':provider} if provider=='whatsmeow' else {}),
         'authorization_binding':{'target':spec['target'],'full_account':spec['full_account'],
@@ -179,7 +201,7 @@ def _resolve(store,c,p,account,operation,chat_id,message_id,expected_revision,pa
         'parameters':parameters,'provider_chat':None,'provider_message_id':None}
     refs=[];provider_chats=[]
     if spec['target']=='account':
-        if chat_id or message_id or expected_revision:raise APIError('invalid_operation_parameters')
+        if chat_id or message_id or expected_revision:raise _empty(spec,chat_id,message_id,expected_revision)
     else:
         chat=_chat(c,p,account,chat_id)
         payload['provider_chat']=chat['provider_chat'];refs.append(chat_id);provider_chats.append(chat['provider_chat'])
@@ -188,9 +210,9 @@ def _resolve(store,c,p,account,operation,chat_id,message_id,expected_revision,pa
             if operation in ('edit_message','delete_message') and message['direction']!='outgoing':
                 raise APIError('forbidden',403)
             payload['provider_message_id']=message['provider_id'];refs.append(message_id)
-        elif message_id or expected_revision:raise APIError('invalid_operation_parameters')
+        elif message_id or expected_revision:raise _empty(spec,chat_id,message_id,expected_revision)
     if operation=='forward_message':
-        source=_message(c,p,account,parameters['source_message_id'],parameters['source_revision'])
+        source=_message(c,p,account,parameters['source_message_id'],parameters['source_revision'],field='source_revision')
         source_chat=_chat(c,p,account,source['chat'])
         payload.update(source_chat_id=source['chat'],source_provider_chat=source_chat['provider_chat'],
             source_provider_message=source['provider_id'])
@@ -211,7 +233,9 @@ def _resolve(store,c,p,account,operation,chat_id,message_id,expected_revision,pa
             provider_chats.append(source_chat['provider_chat']);refs.extend((original['chat'],original['message'],original['id']))
         mode=parameters['mode'];mime=payload['file_mime']
         family={'photo':'image/','video':'video/','video_note':'video/','audio':'audio/','voice':'audio/','sticker':'image/'}.get(mode)
-        if family and not mime.startswith(family):raise APIError('invalid_operation_parameters')
+        if family and not mime.startswith(family):
+            raise _rejected(('mode','format','a mode matching the original MIME family: photo and sticker image/*, '
+                'video and video_note video/*, audio and voice audio/*; document for any file'))
         if account_row['platform']=='telegram' and mode=='photo' and (
             mime not in ('image/jpeg','image/png','image/webp') or payload['file_bytes']>10*1024**2):
             raise APIError('unsupported_operation')
@@ -278,14 +302,14 @@ def _public(row,c=None,p=None):
 
 
 def _input(account,operation,chat_id,message_id,expected_revision,parameters,preview_digest):
-    if parameters is not None and not isinstance(parameters,dict):raise APIError('invalid_operation_parameters')
+    if parameters is not None and not isinstance(parameters,dict):raise _rejected(('parameters','type','object'))
     value={'account':account,'operation':operation,'chat_id':chat_id,'message_id':message_id,
         'expected_revision':expected_revision,'parameters':{} if parameters is None else parameters,'preview_digest':preview_digest}
     try:
         data=canonical(value)
-        if len(data)>16000:raise ValueError()
-        return value,hashlib.sha256(data).hexdigest()
-    except (ValueError,TypeError,UnicodeError):raise APIError('invalid_operation_parameters') from None
+    except (ValueError,TypeError,UnicodeError):raise _rejected(('parameters','type','JSON object of documented parameters')) from None
+    if len(data)>16000:raise _rejected(('parameters','size','canonical request of at most 16000 bytes'))
+    return value,hashlib.sha256(data).hexdigest()
 
 
 def enqueue(store,c,p,account,operation,chat_id='',message_id='',expected_revision=0,parameters=None,

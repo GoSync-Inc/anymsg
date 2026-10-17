@@ -83,3 +83,22 @@ def test_platform_specific_pin_and_label_removal():
     assert validate_operation('whatsapp','set_chat_labels',{'label_ids':[]})=={'label_ids':[]}
     assert operation_spec('send_contact')['full_account']
     assert validate_operation('whatsapp','add_contact',{'phone':'+123456789','first_name':'Synthetic'})['last_name']==''
+
+
+def test_parameter_formats_described():
+    from messaging_service.messenger_operations import OPERATIONS, _fields, parameter_format
+    plain = {'string', 'integer', 'number', 'boolean'}
+    for platform, provider in [('telegram', None), ('whatsapp', None), ('whatsapp', 'whatsmeow')]:
+        for row in operation_manifest(platform, provider=provider):
+            reviewed = _fields(platform, row['operation'], OPERATIONS[row['operation']])
+            for name, descriptor in row['parameters_schema'].items():
+                # Metadata is added; reviewed keys, types and limits stay as they were.
+                assert {k: v for k, v in descriptor.items() if k != 'format'} == reviewed[name]
+                if descriptor['type'] in plain: assert 'format' not in descriptor
+                else: assert descriptor['format'] == parameter_format(platform, descriptor['type']) != None
+    rows = {r['operation']: r for r in operation_manifest('telegram')}
+    assert 'decimal' in rows['create_group']['parameters_schema']['user_ids']['format']
+    assert 'person_' in rows['get_contact']['parameters_schema']['user_id']['format']
+    whatsapp = {r['operation']: r for r in operation_manifest('whatsapp')}
+    assert '@c.us' in whatsapp['get_contact']['parameters_schema']['user_id']['format']
+    assert 'format' not in OPERATIONS['create_group']['fields']['user_ids']
