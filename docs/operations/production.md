@@ -208,6 +208,15 @@ The guard queries GitHub directly. Only the latest successful **push** CI run
 for the exact current `main` SHA qualifies, with successful package, native and
 aggregate jobs from its current attempt. A PR run, manual baseline run, earlier
 successful run followed by failure, missing job or skipped check is refused.
+One exception (ANYM-321): a push run whose `checks / verify` was skipped because
+it reused the merge queue's verification qualifies only when the latest merge
+queue run of the same SHA, from this repository's `gh-readonly-queue/main/`
+queue, completed successfully with one successful `checks / verify` and
+`CI gate` in its latest attempt. Every other required job must still pass in the
+push run itself. Both runs are read again after their jobs, so a rerun that
+starts in between is refused, and run listings are followed across pages. The
+result names the queue run that supplied the test verification next to the
+promoted push run.
 The public repository supports anonymous API reads; optional `GH_TOKEN` may be
 provided by the operator's secret mechanism to increase API limits. Never copy a
 maintainer's broad token onto the host for routine deployment.

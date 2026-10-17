@@ -21,6 +21,10 @@ import urllib.request
 
 REPOSITORY = "GoSync-Inc/deedkit"
 REQUIRED_JOBS = {"checks / verify", "native / synthetic", "images / build (backup)", "CI gate"}
+# A main push run may skip only this job, and only when the merge queue verified the exact commit (ANYM-321).
+QUEUE_VERIFIED_JOB = "checks / verify"
+QUEUE_BRANCH_PREFIX = "gh-readonly-queue/main/"
+MAX_PAGES = 10
 MIN_FREE_BYTES = 15 * 1024**3
 BUILDS = {
     "runtime": (".", "services/messaging/Dockerfile", "runtime", "import messaging_service, telegram_broker, telegram_session_owner, platform_contracts.release"),
@@ -61,37 +65,92 @@ def api(path):
     return json.loads(payload)
 
 
+def latest_run(sha, event, get):
+    """The newest ci.yml run of `event` for `sha`, from a listing followed across pages, or None."""
+    runs = []
+    for page in range(1, MAX_PAGES + 1):
+        query = {"event": event, "head_sha": sha, "per_page": 100, "page": page}
+        if event == "push":
+            query["branch"] = "main"
+        listing = get("actions/workflows/ci.yml/runs?" + urllib.parse.urlencode(query))
+        runs.extend(listing["workflow_runs"])
+        if len(runs) >= listing.get("total_count", len(runs)):
+            # A later failed/pending rerun must supersede a previous successful run.
+            return max(runs, key=lambda value: value["id"]) if runs else None
+        if not listing["workflow_runs"]:
+            break
+    raise Refused("the CI run listing could not be read completely")
+
+
+def attempt_jobs(run, get):
+    jobs = []
+    page = 1
+    while True:
+        chunk = get(f"actions/runs/{run['id']}/attempts/{run['run_attempt']}/jobs?per_page=100&page={page}")["jobs"]
+        jobs.extend(chunk)
+        if len(chunk) < 100:
+            return jobs
+        page += 1
+        if page > MAX_PAGES:
+            raise Refused("too many CI jobs")
+
+
+def job_concluded(jobs, name, conclusion="success"):
+    matches = [job for job in jobs if job["name"] == name]
+    return len(matches) == 1 and matches[0].get("status") == "completed" and matches[0].get("conclusion") == conclusion
+
+
+def unchanged(run, again):
+    """Whether a re-read shows the same run, attempt and result, so no rerun started between the reads."""
+    return again is not None and all(again.get(key) == run.get(key)
+                                     for key in ("id", "run_attempt", "status", "conclusion"))
+
+
+def queue_verification(sha, get):
+    """The merge queue run whose `checks / verify` and `CI gate` verified exactly this commit."""
+    queue = latest_run(sha, "merge_group", get)
+    if queue is None:
+        raise Refused("the main push run skipped checks / verify and no merge queue run verified this commit")
+    if (queue.get("head_sha") != sha or queue.get("event") != "merge_group"
+            or not str(queue.get("head_branch", "")).startswith(QUEUE_BRANCH_PREFIX)
+            or queue.get("status") != "completed" or queue.get("conclusion") != "success"
+            or queue.get("head_repository", {}).get("full_name") != REPOSITORY):
+        raise Refused("latest merge queue run is not a completed success of this repository's main queue for this commit")
+    jobs = attempt_jobs(queue, get)
+    for required in (QUEUE_VERIFIED_JOB, "CI gate"):
+        if not job_concluded(jobs, required):
+            raise Refused(f"merge queue job did not pass: {required}")
+    if not unchanged(queue, latest_run(sha, "merge_group", get)):
+        raise Refused("the merge queue run changed while it was being verified")
+    return queue
+
+
 def verify(sha, get=api):
     if not re.fullmatch(r"[0-9a-f]{40}", sha):
         raise Refused("an exact lowercase 40-character commit SHA is required")
     if get("git/ref/heads/main")["object"]["sha"] != sha:
         raise Refused("candidate is not the current main commit")
-    query = urllib.parse.urlencode({"branch": "main", "event": "push", "head_sha": sha, "per_page": 100})
-    runs = get("actions/workflows/ci.yml/runs?" + query)["workflow_runs"]
-    # A later failed/pending rerun must supersede a previous successful run.
-    if not runs:
+    latest = latest_run(sha, "push", get)
+    if latest is None:
         raise Refused("main has no CI push run for this exact commit")
-    latest = max(runs, key=lambda value: value["id"])
     if (latest.get("head_sha") != sha or latest.get("head_branch") != "main"
             or latest.get("event") != "push" or latest.get("status") != "completed"
             or latest.get("conclusion") != "success"
             or latest.get("head_repository", {}).get("full_name") != REPOSITORY):
         raise Refused("latest main CI run is not a completed success for this repository and commit")
-    jobs = []
-    page = 1
-    while True:
-        chunk = get(f"actions/runs/{latest['id']}/attempts/{latest['run_attempt']}/jobs?per_page=100&page={page}")["jobs"]
-        jobs.extend(chunk)
-        if len(chunk) < 100:
-            break
-        page += 1
-        if page > 10:
-            raise Refused("too many CI jobs")
+    jobs = attempt_jobs(latest, get)
+    verified_by = latest
     for required in REQUIRED_JOBS:
-        matches = [job for job in jobs if job["name"] == required]
-        if len(matches) != 1 or matches[0].get("status") != "completed" or matches[0].get("conclusion") != "success":
+        if required == QUEUE_VERIFIED_JOB and job_concluded(jobs, required, "skipped"):
+            # The push run reused the queue's verification; GitHub, not the push run, must show it passed.
+            verified_by = queue_verification(sha, get)
+        elif not job_concluded(jobs, required):
             raise Refused(f"required job did not pass: {required}")
-    return {"sha": sha, "run_id": latest["id"], "run_attempt": latest["run_attempt"], "url": latest["html_url"]}
+    if not unchanged(latest, latest_run(sha, "push", get)):
+        raise Refused("the main CI push run changed while it was being verified")
+    return {"sha": sha, "run_id": latest["id"], "run_attempt": latest["run_attempt"], "url": latest["html_url"],
+            "verify_run_id": verified_by["id"], "verify_run_attempt": verified_by["run_attempt"],
+            "verify_run_url": verified_by["html_url"]}
 
 
 def read(path):
