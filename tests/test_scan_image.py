@@ -102,7 +102,7 @@ def test_each_layer_becomes_a_tar_matching_its_diff_id_and_nothing_is_extracted(
 @pytest.mark.parametrize("change, message", [
     (dict(diff_ids=["sha256:" + "0" * 64]), "2 layers but 1 diff_ids"),
     (dict(diff_ids=["sha256:" + "0" * 64, "sha256:" + "1" * 64]), "does not match its diff_id"),
-    (dict(raw_layers=[layer_tar({"a": "a"}), layer_tar({"b": "b" * 4096})[:700]]), "unreadable|diff_id"),
+    (dict(raw_layers=[layer_tar({"a": "a"}), layer_tar({"b": "b" * 4096})[:700]]), "unreadable|diff_id|whole number|truncated"),
     (dict(raw_layers=[layer_tar({"a": "a"}), si.ZSTD + b"\x00" * 64]), "zstd"),
 ], ids=["layer-count", "diff-id", "truncated", "zstd"])
 def test_a_layer_that_cannot_be_validated_is_refused_before_any_scan(tmp_path, change, message):
@@ -115,7 +115,7 @@ def test_a_layer_that_cannot_be_validated_is_refused_before_any_scan(tmp_path, c
 def test_a_truncated_layer_with_a_matching_digest_is_refused_by_the_tar_walk(tmp_path):
     truncated = layer_tar({"b": "b" * 4096})[:700]  # its diff_id is computed over the truncated bytes
     archive = image_archive(tmp_path / "image.tar", layers=None, raw_layers=[truncated])
-    with pytest.raises(si.Refused, match="unreadable"):
+    with pytest.raises(si.Refused, match="whole number of tar blocks|truncated"):
         si.prepare(archive, tmp_path / "scan")
 
 
@@ -201,15 +201,24 @@ def test_findings_never_print_the_credential(tmp_path, capsys, monkeypatch):
 @needs_gitleaks
 def test_an_archive_nested_in_a_layer_is_skipped_but_any_other_scanner_message_refuses(tmp_path, monkeypatch):
     nested = gzip.compress(settings(6).encode(), mtime=0)
-    assert findings(tmp_path, layers=[{"usr/share/doc/pkg/changelog.gz": nested}]) == []
-    unreadable = tmp_path / "unreadable"
-    unreadable.mkdir()
+    real, seen = subprocess.run, []
 
-    def run(argv, **kwargs):
-        return subprocess.CompletedProcess(argv, 0, "", "2:00PM WRN skipping file: permission denied path=x\n")
-    monkeypatch.setattr(si.subprocess, "run", run)
-    with pytest.raises(si.Refused, match="permission denied"):
-        si.scan(image_archive(unreadable / "image.tar", layers=[{"a": "a"}]), binary="gitleaks")
+    def spy(argv, **kwargs):
+        result = real(argv, **kwargs)
+        seen.append(result.stderr)
+        return result
+    monkeypatch.setattr(si.subprocess, "run", spy)
+    assert findings(tmp_path, layers=[{"usr/share/doc/pkg/changelog.gz": nested}]) == []
+    assert any(si.EXPECTED_LOG.fullmatch(line.strip()) and "skipping archive" in line
+               for line in seen[0].splitlines())  # the warning was emitted and tolerated
+    for stderr in ("2:00PM WRN skipping file: permission denied path=x\n",
+                   '2:00PM ERR failed path="WRN skipping archive: exceeds max archive depth max_archive_depth=1 path=x"\n'):
+        unreadable = tmp_path / str(len(stderr))
+        unreadable.mkdir()
+        monkeypatch.setattr(si.subprocess, "run", lambda argv, stderr=stderr, **kwargs:
+                            subprocess.CompletedProcess(argv, 0, "", stderr))
+        with pytest.raises(si.Refused, match="reported a problem"):
+            si.scan(image_archive(unreadable / "image.tar", layers=[{"a": "a"}]), binary="gitleaks")
 
 
 @needs_gitleaks
@@ -266,6 +275,12 @@ def test_every_exporting_build_job_scans_the_image_before_keeping_it():
     theirs = re.search(re.escape(ours_url) + r"\s*\\\s*\n\s*([0-9a-f]{64})",
                        (root / ".github/workflows/security.yml").read_text())
     assert theirs and theirs.group(1) == ours_sha
+    # checks / verify runs the real-scanner tests with the same pinned binary.
+    verify = yaml.safe_load((root / ".github/workflows/checks.yml").read_text())["jobs"]["verify"]["steps"]
+    install_tests = next(i for i, s in enumerate(verify) if s.get("name") == "Install the pinned gitleaks for the image-scan tests")
+    python = next(i for i, s in enumerate(verify) if s.get("id") == "python")
+    assert install_tests < python and ours_url in verify[install_tests]["run"] and ours_sha in verify[install_tests]["run"]
+    assert "GITLEAKS=" in verify[install_tests]["run"]
     assert security  # parsed, so the security workflow stays valid YAML
 
 
@@ -288,6 +303,9 @@ def test_a_scan_only_change_still_builds_and_scans_every_image(tmp_path, path):
     ("jwt", "usr/local/lib/python3.13/site-packages/pyjwt-2.15.1.dist-info/METADATA", True),
     ("generic-api-key", "usr/lib/x86_64-linux-gnu/perl/5.36.0/CORE/cop.h", True),
     ("generic-api-key", "usr/lib/python3/dist-packages/apt/package.py", True),
+    ("generic-api-key", "usr/lib/python3/dist-packages/agent_gateway/settings.py", False),
+    ("generic-api-key", "usr/share/doc/age/settings.env", False),
+    ("generic-api-key", "usr/local/bin/tool.sh", False),
     ("generic-api-key", "app/services/gateway/.venv/lib/python3.13/site-packages/agent_gateway/app.py", False),
     ("generic-api-key", "app/.venv/lib/python3.13/site-packages/family_calendar/google_api.py", False),
     ("jwt", "app/.venv/lib/python3.13/site-packages/family_calendar_service-0.1.0.dist-info/METADATA", False),
@@ -298,6 +316,76 @@ def test_a_scan_only_change_still_builds_and_scans_every_image(tmp_path, path):
 ])
 def test_heuristic_rules_skip_only_third_party_distributions(rule, path, dropped):
     assert si.third_party(rule, path) is dropped
+
+
+def test_a_third_party_file_linked_from_our_code_is_not_narrowed(tmp_path):
+    third = "usr/local/lib/python3.13/site-packages/somelib/settings.py"
+    assert si.third_party("generic-api-key", third, [("usr/local/lib/python3.13/site-packages/other/x.py", third)])
+    assert not si.third_party("generic-api-key", third, [("app/settings.py", third)])
+    assert not si.third_party("generic-api-key", third, [("app/agent_gateway/settings.py", third)])
+    layer = tmp_path / "layer.tar"
+    with tarfile.open(layer, "w") as tar:
+        data = b"x = 1\n"
+        info = tarfile.TarInfo(third)
+        info.size = len(data)
+        tar.addfile(info, io.BytesIO(data))
+        hard = tarfile.TarInfo("app/settings.py")
+        hard.type, hard.linkname = tarfile.LNKTYPE, third
+        tar.addfile(hard)
+        soft = tarfile.TarInfo("app/conf/link.py")
+        soft.type, soft.linkname = tarfile.SYMTYPE, "../../" + third
+        tar.addfile(soft)
+    assert si.aliases(layer) == [("app/settings.py", third), ("app/conf/link.py", third)]
+
+
+@needs_gitleaks
+def test_a_hardlink_from_our_code_keeps_a_third_party_finding(tmp_path):
+    third = "app/.venv/lib/python3.13/site-packages/somelib/settings.py"
+    alphabet = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789"
+    rng = random.Random(9)
+    secret = ('service_api_key = "' + "".join(rng.choice(alphabet) for _ in range(40)) + '"\n').encode()
+    buffer = io.BytesIO()
+    with tarfile.open(fileobj=buffer, mode="w") as tar:
+        info = tarfile.TarInfo(third)
+        info.size = len(secret)
+        tar.addfile(info, io.BytesIO(secret))
+        hard = tarfile.TarInfo("app/agent_gateway/settings.py")
+        hard.type, hard.linkname = tarfile.LNKTYPE, third
+        tar.addfile(hard)
+    archive = image_archive(tmp_path / "image.tar", layers=None, raw_layers=[buffer.getvalue()])
+    assert [f[2] for f in si.scan(archive, binary=BINARY)[1]] == [third]
+
+
+def tar_with(*members):
+    """Concatenate raw 512-byte tar blocks."""
+    return b"".join(members)
+
+
+def header_block(name, payload=b"", corrupt_checksum=False):
+    buffer = io.BytesIO()
+    with tarfile.open(fileobj=buffer, mode="w", format=tarfile.USTAR_FORMAT) as tar:
+        info = tarfile.TarInfo(name)
+        info.size = len(payload)
+        tar.addfile(info, io.BytesIO(payload))
+    data = buffer.getvalue()
+    member = data[:512 + -(-len(payload) // 512) * 512]
+    if corrupt_checksum:
+        member = member[:148] + b"0000000\0" + member[156:]
+    return member
+
+
+@pytest.mark.parametrize("layer, message", [
+    (tar_with(header_block("a", b"one"), header_block("b", b"two", corrupt_checksum=True), header_block("c", b"x"), bytes(1024)),
+     "bad checksum"),
+    (tar_with(header_block("a", b"one"), header_block("b", b"t" * 2000)[:1024]), "truncated|end-of-archive"),
+    (tar_with(header_block("a", b"one")), "end-of-archive"),
+    (tar_with(header_block("a", b"one"), bytes(1024), header_block("c", b"hidden")), "data after"),
+    (tar_with(header_block("a", b"one"))[:700], "whole number"),
+], ids=["malformed-middle-header", "truncated-member", "no-end-marker", "data-after-end", "partial-block"])
+def test_a_malformed_layer_is_refused_even_when_its_digest_matches(tmp_path, layer, message):
+    archive = image_archive(tmp_path / "image.tar", layers=None, raw_layers=[layer])
+    with pytest.raises(si.Refused, match=message):
+        si.prepare(archive, tmp_path / "scan")
 
 
 def test_own_package_list_covers_every_project_installed_into_an_image():
@@ -324,9 +412,14 @@ def test_a_heuristic_finding_in_our_own_installed_package_still_fails(tmp_path):
     assert [f[2] for f in found] == [own]
 
 
+PYTHON_GPG = "GPG_KEY=" + "7169605F62C75135" + "6D054A26A821E680E5FA6305"  # public CPython signing-key fingerprint
+
+
 @needs_gitleaks
-@pytest.mark.parametrize("env, allowed", [("GPG_KEY=7169605F62C751356D054A26A821E680E5FA6305", True),
-                                         ("GPG_KEY=0123456789ABCDEF0123456789ABCDEF01234567", False)])
+@pytest.mark.parametrize("env, allowed", [(PYTHON_GPG, True), (PYTHON_GPG + "ABCDEF0123456789", False),
+                                         ("X" + PYTHON_GPG, False),
+                                         ("GPG_KEY=" + "0123456789ABCDEF" + "0123456789ABCDEF01234567", False)],
+                         ids=["exact", "suffixed", "prefixed", "other-key"])
 def test_only_the_base_image_signing_key_fingerprint_is_allowed_in_the_config(tmp_path, env, allowed):
     found = findings(tmp_path, layers=[{"app/clean.txt": "clean"}], env=[env], history=["ENV " + env])
     assert (found == []) is allowed
@@ -343,5 +436,8 @@ def test_only_the_base_image_signing_key_fingerprint_is_allowed_in_the_config(tm
 def test_private_key_allowlists_are_exact_files(tmp_path, path, allowed):
     found = findings(tmp_path, layers=[{path: made_up_private_key(path)}])
     assert (found == []) is allowed
+    # targetRules scope each entry to private-key: another rule in the same file is still found.
+    other = findings(tmp_path / "other", layers=[{path: settings(8)}])
+    assert ("aws-access-token", "layer-0", path, 1) in other
     if not allowed:
         assert [(f[0], f[2]) for f in found] == [("private-key", path)]

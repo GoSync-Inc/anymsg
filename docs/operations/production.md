@@ -191,11 +191,13 @@ merged (proposal ANYM-301).
   `scripts/scan_image.py` and the gitleaks 8.30.1 binary pinned by SHA-256 as in
   `security.yml` (ANYM-303). Every layer is written as its own validated
   `layer-<n>.tar` (layer count and SHA-256 must match the config's `diff_ids`, the
-  tar is read to its end, gzip is decompressed, other encodings are refused) and
+  tar's every header, payload and end marker is checked, gzip is decompressed,
+  other encodings are refused) and
   scanned with the image config (`Env`, labels, history). Nothing is merged or
   extracted, so a file deleted, overwritten or hidden by a later layer is still
   scanned: a public image ships every layer. A finding, any other gitleaks error
-  or any gitleaks log line fails the job, so the commit is not published. Each job
+  or any gitleaks log line except the findings summary and the documented skip of
+  an archive nested inside a layer fails the job, so the commit is not published. Each job
   first scans the committed canary (`tests/fixtures/gitleaks-canary/`) and fails
   if it is not detected. Supported content: text files in every layer and the
   config; files gitleaks classifies as binary are not scanned, and archives inside
@@ -210,14 +212,16 @@ merged (proposal ANYM-301).
   the whole image. The two heuristic rules, `generic-api-key` and `jwt`, match
   ordinary code in hash-locked third-party packages, so they are not applied
   inside installed third-party distributions (`site-packages`, `dist-packages`)
-  and system files (`/usr/lib`, `/usr/share`, `/usr/include`); they still apply to
-  our own packages wherever they are installed (`OWN_PACKAGES` in
-  `scripts/scan_image.py`, kept complete by a test) and to everything else. Any
+  and system files (`/usr/lib`, `/usr/include`); they still apply to our own
+  packages wherever they are installed (`OWN_PACKAGES` in `scripts/scan_image.py`,
+  kept complete by a test), to any third-party file a link from our code points
+  at, and to everything else, including `/usr/share` and `/usr/local`, where our
+  Dockerfiles copy files. Any
   other false positive gets an `[[allowlists]]` entry at the end of
   `.gitleaks-images.toml` with a `description` naming the package and why the
   match is not a secret, its `targetRules`, and an exact file `paths` regex (or an
   exact value); never a whole tree. Current entries: the Python base image's
-  public `GPG_KEY` fingerprint, PEM marker strings in python-rsa and google-auth, and the Debian
+  public `GPG_KEY` fingerprint (exact value), PEM marker strings in python-rsa and google-auth, and the Debian
   snakeoil key in the postgres base image of the backup target (owner risk
   acceptance 2026-10-17). Such a change is reviewed like any CI change and
   rebuilds every image.

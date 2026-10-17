@@ -3184,7 +3184,7 @@ condition = "AND"
 targetRules = ["generic-api-key"]
 paths = ['''(?:^|/)config\.json$''']
 regexTarget = "match"
-regexes = ['''GPG_KEY=7169605F62C751356D054A26A821E680E5FA6305''']
+regexes = ['''^GPG_KEY=7169605F62C751356D054A26A821E680E5FA6305["\\ ]*$''']
 
 [[allowlists]]
 description = "python-rsa (rsa/pem.py): the match is the PEM marker template in its encoder code, not a key."

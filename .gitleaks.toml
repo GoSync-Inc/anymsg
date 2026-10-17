@@ -1,0 +1,10 @@
+# Repository history scan (security.yml `gitleaks git`): gitleaks' default rules plus one exception.
+# The vendored default rule file and the image-scan config are scan policy: they hold rule example
+# patterns and the public CPython signing-key fingerprint, not secrets (ANYM-303).
+
+[extend]
+useDefault = true
+
+[[allowlists]]
+description = "Scan policy files: gitleaks 8.30.1's vendored default rules and the image-scan configuration (rule examples and a public signing-key fingerprint)."
+paths = ['''^config/gitleaks/gitleaks-8\.30\.1-default\.toml$''', '''^\.gitleaks-images\.toml$''']

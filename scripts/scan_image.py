@@ -8,6 +8,7 @@ import hashlib
 import json
 import os
 from pathlib import Path
+import posixpath
 import re
 import shutil
 import subprocess
@@ -15,6 +16,7 @@ import sys
 import tarfile
 import tempfile
 import time
+import zlib
 
 ROOT = Path(__file__).resolve().parents[1]
 CONFIG = ROOT / ".gitleaks-images.toml"
@@ -22,14 +24,20 @@ CANARY = ROOT / "tests/fixtures/gitleaks-canary/image.tar"
 GZIP, ZSTD = b"\x1f\x8b", b"\x28\xb5\x2f\xfd"
 FINDINGS = 2  # gitleaks --exit-code for findings; every other non-zero exit is a scanner error
 CHUNK = 1024 * 1024
-EXPECTED_SKIP = "WRN skipping archive: exceeds max archive depth max_archive_depth=1 path="
+# The only gitleaks log lines a scan may print: the findings summary, and the documented skip of an
+# archive nested inside a layer (.gz, .xz, .whl), which --max-archive-depth 1 does not open.
+EXPECTED_LOG = re.compile(r"\S+ WRN (?:leaks found: \d+|skipping archive: exceeds max archive depth "
+                          r"max_archive_depth=1 path=\S+)")
+BLOCK, ZERO = 512, bytes(512)
+PAYLOAD_FREE = frozenset(b"123456")  # link, device, directory and fifo headers carry no payload
 # The two heuristic rules match ordinary code in hash-locked third-party packages (OAuth helpers,
 # test vectors, API docs), so they do not apply inside installed third-party distributions and
 # system files; every specific rule (private keys, provider tokens) still covers the whole image.
 # This is code rather than a gitleaks allowlist because its RE2 paths cannot exclude our own
 # packages, which uv installs into site-packages (agent_gateway, family_calendar). ANYM-303 C3.
 HEURISTIC_RULES = frozenset({"generic-api-key", "jwt"})
-THIRD_PARTY = re.compile(r"(?:^|/)(?:site|dist)-packages/(?P<top>[^/]+)/|^usr/(?:lib|share|include)/")
+# System files: only /usr/lib and /usr/include, never /usr/share or /usr/local, where our Dockerfiles COPY.
+THIRD_PARTY = re.compile(r"(?:^|/)(?:site|dist)-packages/[^/]+/|^usr/(?:lib|include)/")
 OWN_PACKAGES = frozenset({"agent_gateway", "anymsg", "deedkit_gateway", "deedkit_platform_contracts",
                           "family_calendar", "family_calendar_service", "messaging_service",
                           "personal_os_voice_service", "platform_contracts", "telegram_broker",
@@ -47,17 +55,81 @@ def member(archive, name):
     return handle
 
 
-def read_to_end(path):
-    """Walk every member header and payload, so a truncated or malformed layer is refused here."""
+def number(field):
+    if field[0] & 0x80:  # GNU base-256
+        return int.from_bytes(bytes([field[0] & 0x7F]) + field[1:], "big")
+    text = field.rstrip(b"\0 ").lstrip(b" ")
+    return int(text, 8) if text else 0
+
+
+def pax_size(data):
+    """The `size` record of a PAX extended header, if any."""
+    size, position = None, 0
+    while position < len(data) and data[position:position + 1] != b"\0":
+        length = int(data[position:data.index(b" ", position)])
+        key, _, value = data[data.index(b" ", position) + 1:position + length - 1].partition(b"=")
+        if key == b"size":
+            size = int(value)
+        position += length
+    return size
+
+
+def validate_tar(path):
+    """Refuse a layer unless every header checksums, every payload is complete and only zeros follow the end.
+
+    tarfile stops quietly at a malformed header, which would leave later members unscanned.
+    """
+    total = path.stat().st_size
+    if total % BLOCK:
+        raise Refused(f"{path.name} is not a whole number of tar blocks")
+    override = None
+    with path.open("rb") as layer:
+        while True:
+            header = layer.read(BLOCK)
+            if len(header) < BLOCK:
+                raise Refused(f"{path.name} ends without an end-of-archive marker")
+            if header == ZERO:
+                while chunk := layer.read(CHUNK):
+                    if chunk.count(0) != len(chunk):
+                        raise Refused(f"{path.name} has data after its end-of-archive marker")
+                return
+            try:
+                checksum = number(header[148:156])
+                size = number(header[124:136])
+            except ValueError as exc:
+                raise Refused(f"{path.name} has a malformed header") from exc
+            if checksum != sum(header[:148]) + 8 * 32 + sum(header[156:]):
+                raise Refused(f"{path.name} has a header with a bad checksum")
+            kind = header[156]
+            size = override if override is not None and kind not in b"xgLK" else size
+            override = None
+            if kind in PAYLOAD_FREE:
+                continue
+            blocks = -(-size // BLOCK) * BLOCK
+            if layer.tell() + blocks > total:
+                raise Refused(f"{path.name} has a truncated member")
+            if kind == ord("x"):
+                override = pax_size(layer.read(size))
+                layer.seek(blocks - size, 1)
+            else:
+                layer.seek(blocks, 1)
+
+
+def aliases(path):
+    """(link path, target path) for every hard or symbolic link in a layer, relative to the image root."""
+    links = []
     with tarfile.open(path, "r:") as layer:
         for entry in layer:
-            if entry.isfile():
-                payload = layer.extractfile(entry)
-                while payload is not None and payload.read(CHUNK):
-                    pass
+            if entry.islnk():
+                links.append((entry.name, entry.linkname.lstrip("/")))
+            elif entry.issym():
+                target = entry.linkname if entry.linkname.startswith("/") else \
+                    posixpath.join(posixpath.dirname(entry.name), entry.linkname)
+                links.append((entry.name, posixpath.normpath(target).lstrip("/")))
+    return links
 
 
-def prepare(archive_path, directory):
+def prepare(archive_path, directory, links=None):
     """Write each layer as a validated uncompressed layer-<n>.tar and the config as config.json.
 
     Nothing inside a layer is extracted: the scan sees deleted, overwritten and hidden files of
@@ -89,21 +161,30 @@ def prepare(archive_path, directory):
                         out.write(chunk)
                 if "sha256:" + digest.hexdigest() != diff_id:
                     raise Refused(f"layer {number} does not match its diff_id")
-                read_to_end(target)
-    except (OSError, EOFError, tarfile.TarError, KeyError, TypeError, ValueError) as exc:
+                validate_tar(target)
+                if links is not None:
+                    links.extend(aliases(target))
+    except (OSError, EOFError, zlib.error, tarfile.TarError, KeyError, TypeError, ValueError) as exc:
         raise Refused(f"exported archive {Path(archive_path).name} is unreadable ({type(exc).__name__})") from exc
     (directory / "config.json").write_bytes(config_bytes)
     return len(diff_ids)
 
 
-def third_party(rule, path):
-    """Whether a heuristic finding lies inside an installed third-party distribution or system file."""
-    match = THIRD_PARTY.search(path)
-    if rule not in HEURISTIC_RULES or not match:
-        return False
-    top = match.group("top")
+def own(path):
     # A distribution's metadata directory is named <distribution>-<version>.dist-info.
-    return top is None or re.split(r"-\d", top)[0].replace("-", "_").replace(".", "_").lower() not in OWN_PACKAGES
+    return any(re.split(r"-\d", part)[0].replace("-", "_").replace(".", "_").lower() in OWN_PACKAGES
+               for part in path.split("/"))
+
+
+def third_party(rule, path, links=()):
+    """Whether a heuristic finding lies only inside an installed third-party distribution or system file.
+
+    Our own packages are recognized first, wherever they are installed, and a file that any link
+    outside third-party code points at is not treated as third-party.
+    """
+    if rule not in HEURISTIC_RULES or own(path) or not THIRD_PARTY.search(path):
+        return False
+    return not any(target == path and (own(name) or not THIRD_PARTY.search(name)) for name, target in links)
 
 
 def gitleaks():
@@ -115,9 +196,10 @@ def gitleaks():
 
 def scan(archive_path, *, config=CONFIG, binary=None):
     """Findings as (RuleID, layer, path inside the layer, StartLine); never the secret itself."""
-    with tempfile.TemporaryDirectory() as work:
+    with tempfile.TemporaryDirectory(dir=os.environ.get("RUNNER_TEMP") or None) as work:
         work = Path(work)
-        layers = prepare(archive_path, work / "scan")
+        links = []
+        layers = prepare(archive_path, work / "scan", links)
         (work / "ignore").mkdir()
         report = work / "report.json"
         # The image cannot steer the scan: the config comes from this repository, the ignore path is
@@ -130,13 +212,10 @@ def scan(archive_path, *, config=CONFIG, binary=None):
             capture_output=True, text=True, timeout=1800)
         if result.returncode not in (0, FINDINGS):
             raise Refused(f"gitleaks failed (exit {result.returncode})")
-        # Skipped or unreadable files are only logged, so any log line other than the findings
-        # summary is a scanner problem.
-        # Two messages are expected: the findings summary, and the documented skip of archives
-        # nested inside a layer (.gz, .xz, .whl), which --max-archive-depth 1 does not open.
-        lines = [line for line in result.stderr.splitlines() if line.strip()]
-        problems = [line for line in lines if "WRN leaks found: " not in line and EXPECTED_SKIP not in line]
-        if problems or (result.returncode == 0 and any("WRN leaks found: " in line for line in lines)):
+        # Skipped or unreadable files are only logged, so any other log line is a scanner problem.
+        lines = [line.strip() for line in result.stderr.splitlines() if line.strip()]
+        problems = [line for line in lines if not EXPECTED_LOG.fullmatch(line)]
+        if problems or (result.returncode == 0 and any("leaks found" in line for line in lines)):
             raise Refused("gitleaks reported a problem: " + " | ".join(problems or lines)[-400:])
         findings = []
         for finding in json.loads(report.read_text() or "[]"):
@@ -144,7 +223,7 @@ def scan(archive_path, *, config=CONFIG, binary=None):
             findings.append((finding["RuleID"], Path(outer).name.removesuffix(".tar"), inner, finding["StartLine"]))
         if (result.returncode == FINDINGS) != bool(findings):
             raise Refused("gitleaks exit code and report disagree")
-        return layers, sorted(finding for finding in findings if not third_party(finding[0], finding[2]))
+        return layers, sorted(finding for finding in findings if not third_party(finding[0], finding[2], links))
 
 
 def main(argv=None):
