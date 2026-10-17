@@ -298,3 +298,15 @@ def test_native_and_image_rules_are_untouched_by_the_docs_only_decision():
     assert ci["jobs"]["gate"]["needs"] == ["reuse", "checks", "native", "images"]
     images = yaml.safe_load((ROOT / ".github/workflows/images.yml").read_text())
     assert "docs_only" not in json.dumps(images) and "docs_only" not in json.dumps(ci["jobs"]["publish"])
+
+
+def test_a_scanned_file_that_cannot_be_read_means_full_verification(tmp_path):
+    def dangling(root):
+        (root / "scripts/missing.py").symlink_to("nowhere.py")
+    root = repository(tmp_path)
+    dangling(root)
+    git(root, "add", "-A")
+    git(root, "commit", "-q", "-m", "a tracked link to nothing")
+    head = pull_request(root, edit("docs/guide.md"))
+    assert docs_only.decide(root, "pull_request", head, "") == (
+        False, "scanned code may read a changed document: scripts/missing.py: not scannable")
