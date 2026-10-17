@@ -148,6 +148,50 @@ before preparation. A refusal does not authorize pruning shared Docker objects
 or deleting runtime data. Free capacity through a reviewed, targeted operation
 or add storage before retrying.
 
+## CI-published images
+
+Every `main` push run publishes the eight images its `images / build (<target>)`
+jobs built and smoke-tested as `ghcr.io/gosync-inc/deedkit-<target>:<sha40>`,
+where `<sha40>` is the full source commit. Preparation does not use them yet: it
+still builds on the host as described below, until the pull path is reviewed and
+merged (proposal ANYM-301).
+
+- **Tested bytes, no rebuild.** Each build job saves the image `check-image`
+  tested (`docker save`, a one-day artifact) and dry-runs the publication against
+  a throwaway registry on its runner, on every event. The `publish` job in
+  `ci.yml` runs only on a `main` push after `CI gate`, pushes those archives with
+  `skopeo` and refuses an image whose `org.opencontainers.image.revision`,
+  `org.opencontainers.image.source` or `io.deedkit.production.build` label does not
+  match the commit, or whose pushed manifest does not carry the tested config
+  digest (`scripts/publish_images.py`). There is no `latest` or other moving tag.
+- **Write-once tags.** A tag that already exists is never pushed again. A full
+  rerun reuses an existing attested image of the same commit; an image pushed by
+  an attempt that failed before attesting it is attested only when this attempt
+  still holds the same tested archive. Anything else fails the job without moving
+  the tag. If a tag is left pushed but unattested and its archive expired, the
+  commit has no published images until the owner deletes that package version.
+- **Provenance.** Each newly pushed digest gets a SLSA build-provenance
+  attestation from `actions/attest` with `push-to-registry`, without the
+  organization's artifact storage record. It is signed through public-good
+  Sigstore (the repository is public) and verifiable with
+  `gh attestation verify oci://ghcr.io/gosync-inc/deedkit-<target>@<digest>
+  --repo GoSync-Inc/deedkit --signer-workflow
+  GoSync-Inc/deedkit/.github/workflows/ci.yml --source-ref refs/heads/main
+  --source-digest <sha40> --deny-self-hosted-runners`. The job ends by verifying
+  every target this way.
+- **Permissions.** Only `publish` holds `packages`, `id-token` and `attestations`
+  write, through the job-scoped `GITHUB_TOKEN`; no secret is stored. Pull request,
+  merge queue and dispatch runs never run it.
+- **Failure.** A failed publication fails the `main` push run, so
+  `production.py verify` refuses that commit, and the Tiden release record waits
+  for `publish`. Publishing is not a required check.
+
+Owner actions, not performed by agents: the first publication creates the eight
+packages as private, linked to this repository. Set them public, or give the host
+a read-only token, before preparation pulls them; keep Actions allowed to create
+repository-linked packages in the organization's package settings. Deleting a
+package version is the owner's.
+
 ## Prepare and inspect
 
 ```sh

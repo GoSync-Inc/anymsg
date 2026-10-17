@@ -64,11 +64,118 @@ jobs:
           test "$IMAGES_RESULT" = success
           # A manual baseline of another revision must never turn this commit green.
           test -z "$SOURCE_REF" || test "$SOURCE_REF" = "$EXPECTED_SHA"
+  publish:
+    # The only job with write permissions, and only on a main push after every verification
+    # passed. It ships the images `images / build (<target>)` tested, never a rebuild, and a
+    # tag that already exists is never moved (scripts/publish_images.py, production.md).
+    name: publish
+    needs: [gate]
+    if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    permissions:
+      contents: read  # checkout of this commit's publication script
+      packages: write  # push ghcr.io/gosync-inc/deedkit-<target>:<sha> and its attestation bundle
+      id-token: write  # Sigstore signing certificate for the provenance attestation
+      attestations: write  # store the attestation in this repository's attestation API
+    steps:
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6.1.0
+        with:
+          persist-credentials: false
+          ref: ${{ github.sha }}
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
+        with:
+          pattern: image-*
+          path: ${{ runner.temp }}/images
+      - name: Log in to GHCR with the job token
+        env:
+          GH_TOKEN: ${{ github.token }}
+          ACTOR: ${{ github.actor }}
+        run: printf '%s' "$GH_TOKEN" | docker login ghcr.io --username "$ACTOR" --password-stdin
+      - name: Push each tested image unless its tag already exists
+        id: publish
+        env:
+          GH_TOKEN: ${{ github.token }}
+          SHA: ${{ github.sha }}
+        run: python3 scripts/publish_images.py publish --sha "$SHA" --directory "$RUNNER_TEMP/images"
+      - name: Attest runtime
+        if: steps.publish.outputs.attest_runtime == 'true'
+        uses: actions/attest@1e69f48acb82d1966a394da916b4c1698aa569d6 # v4.2.2
+        with:
+          subject-name: ghcr.io/gosync-inc/deedkit-runtime
+          subject-digest: ${{ steps.publish.outputs.digest_runtime }}
+          push-to-registry: true
+          create-storage-record: false
+      - name: Attest indexer
+        if: steps.publish.outputs.attest_indexer == 'true'
+        uses: actions/attest@1e69f48acb82d1966a394da916b4c1698aa569d6 # v4.2.2
+        with:
+          subject-name: ghcr.io/gosync-inc/deedkit-indexer
+          subject-digest: ${{ steps.publish.outputs.digest_indexer }}
+          push-to-registry: true
+          create-storage-record: false
+      - name: Attest enricher-local
+        if: steps.publish.outputs.attest_enricher_local == 'true'
+        uses: actions/attest@1e69f48acb82d1966a394da916b4c1698aa569d6 # v4.2.2
+        with:
+          subject-name: ghcr.io/gosync-inc/deedkit-enricher-local
+          subject-digest: ${{ steps.publish.outputs.digest_enricher_local }}
+          push-to-registry: true
+          create-storage-record: false
+      - name: Attest whatsapp-native
+        if: steps.publish.outputs.attest_whatsapp_native == 'true'
+        uses: actions/attest@1e69f48acb82d1966a394da916b4c1698aa569d6 # v4.2.2
+        with:
+          subject-name: ghcr.io/gosync-inc/deedkit-whatsapp-native
+          subject-digest: ${{ steps.publish.outputs.digest_whatsapp_native }}
+          push-to-registry: true
+          create-storage-record: false
+      - name: Attest gateway
+        if: steps.publish.outputs.attest_gateway == 'true'
+        uses: actions/attest@1e69f48acb82d1966a394da916b4c1698aa569d6 # v4.2.2
+        with:
+          subject-name: ghcr.io/gosync-inc/deedkit-gateway
+          subject-digest: ${{ steps.publish.outputs.digest_gateway }}
+          push-to-registry: true
+          create-storage-record: false
+      - name: Attest calendar
+        if: steps.publish.outputs.attest_calendar == 'true'
+        uses: actions/attest@1e69f48acb82d1966a394da916b4c1698aa569d6 # v4.2.2
+        with:
+          subject-name: ghcr.io/gosync-inc/deedkit-calendar
+          subject-digest: ${{ steps.publish.outputs.digest_calendar }}
+          push-to-registry: true
+          create-storage-record: false
+      - name: Attest calls
+        if: steps.publish.outputs.attest_calls == 'true'
+        uses: actions/attest@1e69f48acb82d1966a394da916b4c1698aa569d6 # v4.2.2
+        with:
+          subject-name: ghcr.io/gosync-inc/deedkit-calls
+          subject-digest: ${{ steps.publish.outputs.digest_calls }}
+          push-to-registry: true
+          create-storage-record: false
+      - name: Attest backup
+        if: steps.publish.outputs.attest_backup == 'true'
+        uses: actions/attest@1e69f48acb82d1966a394da916b4c1698aa569d6 # v4.2.2
+        with:
+          subject-name: ghcr.io/gosync-inc/deedkit-backup
+          subject-digest: ${{ steps.publish.outputs.digest_backup }}
+          push-to-registry: true
+          create-storage-record: false
+      - name: Require every image to be published with a valid attestation
+        env:
+          GH_TOKEN: ${{ github.token }}
+          SHA: ${{ github.sha }}
+        run: python3 scripts/publish_images.py confirm --sha "$SHA"
+      - name: Log out of GHCR
+        if: ${{ always() }}
+        run: docker logout ghcr.io
   release:
-    # After every verification job and the Tiden publication have passed. Tiden captures
+    # After every verification job, the Tiden publication and the image publication have
+    # passed, so no release is recorded for a SHA whose images were not published. Tiden captures
     # a release gate from the main gate when the release is first created (TIDEN-CI.md).
     name: Tiden release record
-    needs: [gate]
+    needs: [gate, publish]
     if: github.event_name == 'push' && github.ref == 'refs/heads/main'
     runs-on: ubuntu-latest
     timeout-minutes: 8

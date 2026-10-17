@@ -41,6 +41,7 @@ jobs:
             services/messaging/
             whatsapp/
             scripts/production.py
+            scripts/publish_images.py
             .github/workflows/ci.yml
             .github/workflows/images.yml
         run: |
@@ -74,6 +75,11 @@ jobs:
       fail-fast: false
       matrix:
         target: [runtime, indexer, enricher-local, whatsapp-native, gateway, calendar, calls, backup]
+    services:
+      # A throwaway registry for the publication dry run; it holds nothing after the job.
+      registry:
+        image: registry:3@sha256:ddf754342cfc8acc51a56d5d0ab6af06826461864460636d8bd5c546dab2a7b8
+        ports: ['127.0.0.1:5000:5000']
     steps:
       - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6.1.0
         with:
@@ -83,3 +89,25 @@ jobs:
         env:
           TARGET: ${{ matrix.target }}
         run: python3 scripts/production.py check-image --target "$TARGET"
+      # The publish job in ci.yml pushes exactly this archive; it never rebuilds (scripts/publish_images.py).
+      - name: Export the tested image and publish it to a local registry as a dry run
+        env:
+          TARGET: ${{ matrix.target }}
+        run: |
+          sha="$(git rev-parse HEAD)"
+          python3 scripts/publish_images.py export --target "$TARGET" --sha "$sha" --directory "$RUNNER_TEMP/images/image-$TARGET"
+          # First publication pushes; a repeated one finds the tag and does not push again.
+          for expected in push attest; do
+            python3 scripts/publish_images.py publish --local-dry-run --registry localhost:5000/dry-run \
+              --target "$TARGET" --sha "$sha" --directory "$RUNNER_TEMP/images" > "$RUNNER_TEMP/dry-run.json"
+            test "$(python3 -c 'import json, sys; print(json.load(open(sys.argv[1]))[0]["action"])' "$RUNNER_TEMP/dry-run.json")" = "$expected"
+          done
+      - name: Keep the tested image for the publish job
+        if: ${{ github.event_name == 'push' && github.ref == 'refs/heads/main' && inputs.source_ref == '' }}
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: image-${{ matrix.target }}
+          path: ${{ runner.temp }}/images/image-${{ matrix.target }}
+          retention-days: 1
+          overwrite: true
+          if-no-files-found: error

@@ -714,7 +714,9 @@ def test_image_build_job_is_gated_only_by_the_change_decision():
     assert "name" not in build  # production.py finds `images / build (backup)` by the job key
     assert build["strategy"]["matrix"]["target"] == [
         "runtime", "indexer", "enricher-local", "whatsapp-native", "gateway", "calendar", "calls", "backup"]
-    assert build["steps"][-1]["run"] == 'python3 scripts/production.py check-image --target "$TARGET"'
+    # The build and smoke test come first; the publication steps after it only export what was tested.
+    assert build["steps"][1]["run"] == 'python3 scripts/production.py check-image --target "$TARGET"'
+    assert all("docker build" not in step.get("run", "") for step in build["steps"])
 
 
 def dockerfile_sources(dockerfile, stage):
@@ -1031,8 +1033,9 @@ def test_release_workflows_record_only_verified_main_commits(tmp_path):
     assert "tiden_ci.py release" not in json.dumps(checks)
     ci = yaml.safe_load((root / ".github/workflows/ci.yml").read_text())
     job = ci["jobs"]["release"]
-    # Only after the CI gate, so every verification job and the Tiden publication passed.
-    assert job["needs"] == ["gate"]
+    # Only after the CI gate and the image publication, so every verification job, the Tiden
+    # publication and the GHCR publication passed.
+    assert job["needs"] == ["gate", "publish"]
     assert job["if"] == "github.event_name == 'push' && github.ref == 'refs/heads/main'"
     steps = {step.get("name") or step["uses"].split("@")[0]: step for step in job["steps"]}
     record = steps["Record the main release in Tiden"]
