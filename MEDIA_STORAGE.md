@@ -146,7 +146,8 @@ recent messages, never with the dormant backlog. `null` keeps the full history
 scan by design. The retry-exhausted sweep, which marks an expired fifth lease
 `failed`, has no selective index: each collector runs it on its first claim for
 an account and then at most once a minute, and attachment status reports such a
-lease as `retry_exhausted` meanwhile. Expired storage reservations are still
+lease as `retry_exhausted` meanwhile (the operator status media phase still
+counts it as a lease until the sweep). Expired storage reservations are still
 reclaimed on every claim. `tests/test_media_claim_performance.py` checks the
 plans with 30,000 and 60,000 dormant jobs.
 

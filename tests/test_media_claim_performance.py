@@ -54,6 +54,13 @@ def grow_dormant(s, count, offset=0):
         c.execute('ANALYZE messages'); c.execute('ANALYZE media_jobs'); c.execute('ANALYZE media_reservations')
 
 
+def dormant_digest(s):
+    with s.pool.connection() as c:
+        return c.execute('''SELECT md5(string_agg(concat_ws('|',id,state,attempts,next_due,lease_owner,
+            lease_epoch,lease_until,error_code,requested_until,descriptor::text),',' ORDER BY id)) AS digest
+            FROM media_jobs WHERE id LIKE 'dormant-job-%' ''').fetchone()['digest']
+
+
 def dormant_composition(s):
     with s.pool.connection() as c:
         return c.execute('''SELECT state,attempts,requested_until IS NOT NULL AS expired_request,
@@ -136,8 +143,10 @@ def selection_is_indexed(plans):
 
 
 @pytest.fixture()
-def backlog(archive):
+def backlog(archive, monkeypatch):
     ar,s,_,_=archive
+    # A fixed sweep clock: only the first claim sweeps, however slow the runner is.
+    monkeypatch.setattr(archive_module,'monotonic',lambda:1000.0)
     owner='perf-collector'; epoch=ar.acquire(ACCOUNT,owner)
     writer=BlobWriter(s.files,max_bytes=512*1024**2,reserve_bytes=0)
     live=BlobWriter(s.files,max_bytes=LIVE_MAX,reserve_bytes=0)
@@ -194,6 +203,7 @@ def test_idle_claim_work_does_not_grow_with_the_dormant_backlog(backlog, record_
     grow_dormant(s,30_000)
     composition=dormant_composition(s)
     assert sum(r['jobs'] for r in composition)==30_000
+    before=dormant_digest(s)
     assert {(r['state'],r['attempts'],r['expired_request']) for r in composition}=={
         ('queued',0,False),('queued',0,True),('queued',3,False),('leased',4,True)}
     # First claim of the fixture: the sweep and the reaper act, and their plans are bounded too.
@@ -212,7 +222,9 @@ def test_idle_claim_work_does_not_grow_with_the_dormant_backlog(backlog, record_
     # The kept reservation makes the reaper look its job up on every measured claim.
     assert reaper_lookups(small)['media_jobs']['tuples']>=1
     retained={'30000':[{'query':q,'plan':p} for q,p in plans]}
+    assert dormant_digest(s)==before
     grow_dormant(s,30_000,offset=30_000)
+    grown=dormant_digest(s)
     assert sum(r['jobs'] for r in dormant_composition(s))==60_000
     plans=[]; large,elapsed_large=idle_claim(ar,s,claim,plans)
     selection_is_indexed(plans)
@@ -222,7 +234,9 @@ def test_idle_claim_work_does_not_grow_with_the_dormant_backlog(backlog, record_
         for relation in set(before)|set(after):
             b=before.get(relation,{'tuples':0,'buffers':0}); a=after.get(relation,{'tuples':0,'buffers':0})
             assert a['tuples']==b['tuples'] and a['buffers']<=b['buffers']+2,(query,relation,b,a)
-    # Dormant jobs are kept as they were: no attempts, reservations or rewritten errors.
+    # Dormant jobs are kept as they were: no attempts, reservations or rewritten errors,
+    # provider references, due times, leases or requests.
+    assert dormant_digest(s)==grown
     with s.pool.connection() as c:
         assert c.execute('''SELECT count(*) AS n FROM media_jobs WHERE id LIKE 'dormant-job-%' AND (
             attempts<>CASE WHEN replace(id,'dormant-job-','')::int%4 IN (2,3)
