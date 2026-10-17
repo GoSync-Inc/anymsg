@@ -37,8 +37,10 @@ Text sending through existing collectors is available with separate `send` right
 and explicit account opt-in. The acting agent obtains exact owner confirmation;
 there is no server approval gate yet. See [SENDING.md](SENDING.md). Reads do not mark messages
 as read in Telegram or WhatsApp. Empty search results do not prove complete history.
-Durable history-wave execution, cold-file eviction/rehydration and independent
-AI artifact reuse are planned. Optional cloud processing is off until explicitly configured.
+Opt-in managed eviction of unpinned originals and best-effort re-download on an
+explicit original request are implemented (MEDIA_STORAGE.md). Durable history-wave
+execution, a cold archive with verified rehydration and cross-occurrence AI
+artifact reuse are planned. Optional cloud processing is off until explicitly configured.
 
 ## Distribution
 
