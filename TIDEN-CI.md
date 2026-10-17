@@ -91,7 +91,12 @@ The 2026-10-16 cleanup left four Tiden run environments. CI publishes with
 `--environment github-actions-synthetic`, set in `scripts/tiden_ci.py`. A local
 synthetic run, published by hand with `tiden run create` or `tiden run exec`,
 passes `--environment local-synthetic`; no repository script sets it.
-`production` belongs to the live installation (TELEMETRY.md). `synthetic` is
+`production` belongs to the live installation (TELEMETRY.md). After a main push
+run publishes its evidence, the same job records release `deedkit@<sha>` in
+`github-actions-synthetic` with that run's URL, but only while the run is the
+latest completed `main` run, because Tiden captures a release gate from the main
+gate when the release is first created. The `production` release is recorded by
+the dispatch in [production.md](docs/operations/production.md). `synthetic` is
 historical: release 0.9.16 is attached to it, so keep it, but send no new runs
 there. Tiden creates an environment for any unknown slug, so a misspelled or new
 name silently makes a duplicate. One environment per kind of run keeps the

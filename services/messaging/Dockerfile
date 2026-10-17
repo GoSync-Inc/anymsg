@@ -38,6 +38,9 @@ COPY services/messaging/messaging_service ./messaging_service
 COPY services/calls/telegram_broker.py services/calls/telegram_session_owner.py ./
 EXPOSE 8080
 CMD ["python", "-m", "messaging_service", "serve"]
+# Exact source commit for telemetry (TELEMETRY.md); last, so a new commit reuses every cached layer.
+ARG DEEDKIT_SOURCE_SHA
+ENV DEEDKIT_SOURCE_SHA=$DEEDKIT_SOURCE_SHA
 
 FROM python-dependencies AS indexer
 USER root
@@ -46,6 +49,8 @@ RUN apt-get update && apt-get install -y --no-install-recommends poppler-utils t
 COPY services/messaging/messaging_service ./messaging_service
 USER probe
 CMD ["python", "-m", "messaging_service.file_index"]
+ARG DEEDKIT_SOURCE_SHA
+ENV DEEDKIT_SOURCE_SHA=$DEEDKIT_SOURCE_SHA
 
 FROM indexer AS test
 USER root
@@ -91,6 +96,8 @@ COPY services/messaging/requirements-enrichment.lock ./requirements-enrichment.l
 RUN pip install --no-cache-dir --only-binary=:all: --require-hashes -r requirements-enrichment.lock \
     && pip check
 USER probe
+ARG DEEDKIT_SOURCE_SHA
+ENV DEEDKIT_SOURCE_SHA=$DEEDKIT_SOURCE_SHA
 
 # Isolated smoke target. No database, credentials, model downloads or external
 # API calls are needed for native WAV/OGG and mocked provider tests.
@@ -113,6 +120,8 @@ COPY --from=whatsmeow-build /out/licenses /app/whatsmeow-licenses
 COPY services/messaging/messaging_service ./messaging_service
 USER probe
 CMD ["python", "-m", "messaging_service.whatsapp_collector", "--config", "/run/secrets/whatsapp_config"]
+ARG DEEDKIT_SOURCE_SHA
+ENV DEEDKIT_SOURCE_SHA=$DEEDKIT_SOURCE_SHA
 
 # Explicit rollback image for existing browser sessions; never auto-converted.
 FROM python-dependencies AS whatsapp
@@ -144,3 +153,5 @@ COPY services/messaging/messaging_service ./messaging_service
 COPY licenses/age-LICENSE /usr/share/doc/age/LICENSE
 ENTRYPOINT []
 CMD ["python", "-m", "messaging_service.backup_worker", "--config", "/run/secrets/backup_config"]
+ARG DEEDKIT_SOURCE_SHA
+ENV DEEDKIT_SOURCE_SHA=$DEEDKIT_SOURCE_SHA
