@@ -746,3 +746,193 @@ def test_container_check_builds_the_working_tree_without_touching_production_tag
     assert not any(call[:3] == ["docker", "image", "ls"] for call in store.calls)
     p.build_image(tmp_path, SHA, "runtime", check=True)
     assert len(store.built()) == 2
+
+
+def queue_github(*, push_verify="skipped", queue=None, queue_jobs=None, extra_queue_runs=(), pages=None, changes=None):
+    """A main push run that skipped checks / verify plus the merge queue run of the same commit."""
+    push = {"id": 40, "run_attempt": 1, "head_sha": SHA, "head_branch": "main", "event": "push", "status": "completed",
+            "conclusion": "success", "head_repository": {"full_name": p.REPOSITORY}, "html_url": "https://example.invalid/run/40"}
+    group = {"id": 30, "run_attempt": 2, "head_sha": SHA, "head_branch": "gh-readonly-queue/main/pr-86-" + "c" * 40,
+             "event": "merge_group", "status": "completed", "conclusion": "success",
+             "head_repository": {"full_name": p.REPOSITORY}, "html_url": "https://example.invalid/run/30", **(queue or {})}
+    push_jobs = [{"name": name, "status": "completed",
+                  "conclusion": push_verify if name == "checks / verify" else "success"} for name in p.REQUIRED_JOBS]
+    group_jobs = queue_jobs if queue_jobs is not None else [
+        {"name": name, "status": "completed", "conclusion": "success"} for name in ("checks / verify", "CI gate", "checks / load")]
+    reads = {"push": 0, "merge_group": 0}
+
+    def get(path):
+        if path == "git/ref/heads/main":
+            return {"object": {"sha": SHA}}
+        if "/runs?" in path:
+            event = "merge_group" if "event=merge_group" in path else "push"
+            reads[event] += 1
+            runs = [copy.deepcopy(push)] if event == "push" else [copy.deepcopy(group), *extra_queue_runs]
+            if changes and reads[event] > 1:
+                for run in runs:
+                    run.update(changes.get(event, {}))
+            if pages and event == "merge_group":
+                page = int(re.search(r"[?&]page=(\d+)", path).group(1))
+                return {"workflow_runs": pages[page - 1] if page <= len(pages) else [], "total_count": sum(map(len, pages))}
+            return {"workflow_runs": runs}
+        if "runs/40/attempts/1/jobs?" in path:
+            return {"jobs": push_jobs}
+        assert "runs/30/attempts/2/jobs?" in path, path
+        return {"jobs": group_jobs}
+    return get, push, group
+
+
+def test_main_push_that_reused_the_queue_verification_of_the_same_commit_is_promotable():
+    get, push, group = queue_github()
+    result = p.verify(SHA, get)
+    # The push run stays the promoted run; the queue run is named as the source of the test verification.
+    assert (result["run_id"], result["run_attempt"], result["url"]) == (40, 1, push["html_url"])
+    assert (result["verify_run_id"], result["verify_run_attempt"], result["verify_run_url"]) == (30, 2, group["html_url"])
+    # A push run that ran checks / verify itself keeps today's path and names itself as the source.
+    plain, _, _ = github()
+    assert p.verify(SHA, plain)["verify_run_id"] == 12
+
+
+@pytest.mark.parametrize("case", [
+    {"queue": {"conclusion": "failure"}}, {"queue": {"conclusion": "cancelled"}}, {"queue": {"status": "in_progress"}},
+    {"queue": {"head_repository": {"full_name": "fork/deedkit"}}}, {"queue": {"head_branch": "gh-readonly-queue/other/pr-1"}},
+    {"queue": {"head_branch": "feature"}}, {"queue": {"head_sha": "b" * 40}}, {"queue": {"event": "push"}},
+    {"queue_jobs": [{"name": "checks / verify", "status": "completed", "conclusion": "skipped"},
+                    {"name": "CI gate", "status": "completed", "conclusion": "success"}]},
+    {"queue_jobs": [{"name": "CI gate", "status": "completed", "conclusion": "success"}]},
+    {"queue_jobs": [{"name": "checks / verify", "status": "completed", "conclusion": "success"}]},
+    {"queue_jobs": [{"name": "checks / verify", "status": "completed", "conclusion": "success"}] * 2
+                   + [{"name": "CI gate", "status": "completed", "conclusion": "success"}]},
+    {"push_verify": "failure"}, {"push_verify": "cancelled"},
+], ids=["queue-failed", "queue-cancelled", "queue-pending", "other-repository", "other-base-branch", "not-a-queue-branch",
+        "other-commit", "not-a-queue-event", "queue-verify-skipped", "queue-verify-missing", "queue-gate-missing",
+        "queue-verify-duplicated", "push-verify-failed", "push-verify-cancelled"])
+def test_queue_verification_never_stands_in_for_a_failed_unrelated_or_skipped_run(case):
+    get, _, _ = queue_github(**case)
+    with pytest.raises(p.Refused):
+        p.verify(SHA, get)
+
+
+def test_a_newer_failed_queue_run_supersedes_an_older_green_one_and_no_queue_run_refuses():
+    _, _, group = queue_github()
+    newer = {**group, "id": 31, "conclusion": "failure"}
+    get, _, _ = queue_github(extra_queue_runs=[newer])
+    with pytest.raises(p.Refused, match="merge queue run"):
+        p.verify(SHA, get)
+    empty, _, _ = queue_github(pages=[[]])
+    with pytest.raises(p.Refused, match="no merge queue run"):
+        p.verify(SHA, empty)
+
+
+@pytest.mark.parametrize("changes", [{"merge_group": {"run_attempt": 3}}, {"merge_group": {"conclusion": "failure"}},
+                                     {"push": {"run_attempt": 2}}, {"push": {"status": "in_progress"}}],
+                         ids=["queue-rerun", "queue-result-changed", "push-rerun", "push-rerun-pending"])
+def test_a_rerun_between_the_reads_is_refused(changes):
+    get, _, _ = queue_github(changes=changes)
+    with pytest.raises(p.Refused, match="changed while"):
+        p.verify(SHA, get)
+
+
+def test_run_listings_are_followed_across_pages_or_refused():
+    _, _, group = queue_github()
+    older = [{**group, "id": n, "conclusion": "success"} for n in range(1, 101)]
+    # The newest (failed) queue run is on the second page: it must still supersede the green ones.
+    get, _, _ = queue_github(pages=[older, [{**group, "id": 500, "conclusion": "failure"}]])
+    with pytest.raises(p.Refused, match="merge queue run"):
+        p.verify(SHA, get)
+    # A listing that claims more runs than it returns is refused rather than judged on a partial view.
+    truncated, _, _ = queue_github(pages=[older])
+    def short(path):
+        value = truncated(path)
+        if "event=merge_group" in path:
+            value = {**value, "total_count": 250}
+        return value
+    with pytest.raises(p.Refused, match="completely"):
+        p.verify(SHA, short)
+
+
+@pytest.mark.parametrize("pages", [
+    [{"workflow_runs": [{"id": n} for n in range(100)]}, {"workflow_runs": [{"id": 100}], "total_count": 5}],
+    [{"workflow_runs": [{"id": 1}], "total_count": 2}, {"workflow_runs": [{"id": 1}], "total_count": 2}],
+    [{"workflow_runs": [{"id": 1}], "total_count": 3}, {"workflow_runs": [{"id": 2}], "total_count": 2}],
+    [{"workflow_runs": [{"id": 1}, {"id": 2}], "total_count": 1}],
+    [{"workflow_runs": [{"id": 1}], "total_count": "1"}],
+    [{"workflow_runs": [{"id": n} for n in range(100)]}] * 11,
+], ids=["count-appears-late", "repeated-page", "changing-total", "more-than-total", "invalid-total", "endless-full-pages"])
+def test_incomplete_or_inconsistent_run_listings_are_refused(pages):
+    responses = iter(pages + [{"workflow_runs": []}] * 20)
+    with pytest.raises(p.Refused, match="CI listing"):
+        p.complete_listing(lambda page: next(responses), "workflow_runs")
+
+
+def test_a_full_first_page_without_a_count_is_followed_to_the_next_page():
+    first = [{"id": n} for n in range(100)]
+    pages = {1: {"workflow_runs": first}, 2: {"workflow_runs": [{"id": 500}]}}
+    assert len(p.complete_listing(lambda page: pages[page], "workflow_runs")) == 101
+
+
+def test_a_job_listing_that_stops_short_of_its_total_never_hides_a_duplicate_required_job():
+    passed = [{"id": 1, "name": "checks / verify", "status": "completed", "conclusion": "success"},
+              {"id": 2, "name": "CI gate", "status": "completed", "conclusion": "success"}]
+    hidden = {"id": 3, "name": "checks / verify", "status": "completed", "conclusion": "failure"}
+    for second_page in ([], [hidden]):
+        get, _, _ = queue_github()
+        def response(path, second_page=second_page):
+            if "runs/30/attempts/2/jobs?" in path:
+                return {"jobs": passed, "total_count": 3} if path.endswith("&page=1") else {"jobs": second_page, "total_count": 3}
+            return get(path)
+        with pytest.raises(p.Refused):
+            p.verify(SHA, response)
+
+
+@pytest.mark.parametrize("event", ["merge_group", "push"])
+def test_a_newer_run_appearing_between_the_reads_is_refused(event):
+    get, push, group = queue_github()
+    reads = {"push": 0, "merge_group": 0}
+    def response(path):
+        if "/runs?" in path:
+            kind = "merge_group" if "event=merge_group" in path else "push"
+            reads[kind] += 1
+            if kind == event and reads[kind] > 1:
+                # Same attempt, status and conclusion, only a newer run of the same commit.
+                newer = {**(group if kind == "merge_group" else push), "id": 99}
+                return {"workflow_runs": [push if kind == "push" else group, newer]}
+        return get(path)
+    with pytest.raises(p.Refused, match="changed while"):
+        p.verify(SHA, response)
+
+
+def test_after_a_reset_the_newest_push_run_of_the_commit_decides_whether_the_queue_counts():
+    get, push, group = queue_github()
+    ran_itself = {**push, "id": 20, "html_url": "https://example.invalid/run/20"}
+    def response(path, push_runs):
+        if "/runs?" in path and "event=push" in path:
+            return {"workflow_runs": push_runs}
+        if "runs/20/attempts/1/jobs?" in path:
+            return {"jobs": [{"name": name, "status": "completed", "conclusion": "success"} for name in p.REQUIRED_JOBS]}
+        return get(path)
+    # The newest push run (40) skipped verify: an older exact-commit queue run supplies it, however old.
+    reused = p.verify(SHA, lambda path: response(path, [ran_itself, push]))
+    assert reused["run_id"] == 40 and reused["verify_run_id"] == 30
+    # The newest push run (20 renumbered newest) ran verify itself: only its own result counts.
+    newest_ran = {**ran_itself, "id": 50}
+    def own(path):
+        if "runs/50/attempts/1/jobs?" in path:
+            path = path.replace("runs/50/", "runs/20/")
+        return response(path, [push, newest_ran])
+    assert p.verify(SHA, own)["verify_run_id"] == 50
+
+
+def test_a_truncated_push_job_listing_never_hides_a_failed_required_job():
+    get, _, _ = github()
+    passed = [{"id": n, "name": name, "status": "completed", "conclusion": "success"}
+              for n, name in enumerate(sorted(p.REQUIRED_JOBS))]
+    hidden = {"id": 99, "name": "native / synthetic", "status": "completed", "conclusion": "failure"}
+    for second_page in ([], [hidden]):
+        def response(path, second_page=second_page):
+            if "runs/12/attempts/2/jobs?" in path:
+                total = len(passed) + 1
+                return {"jobs": passed, "total_count": total} if path.endswith("&page=1") else {"jobs": second_page, "total_count": total}
+            return get(path)
+        with pytest.raises(p.Refused):
+            p.verify(SHA, response)
