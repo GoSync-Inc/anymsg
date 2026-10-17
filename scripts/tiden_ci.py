@@ -414,12 +414,13 @@ def record_release(directory: Path, sha: str, environment: str, url: str, releas
         gate = {}
     if returncode and not gate:
         print("::warning title=Tiden release gate::no gate was captured for " + version)
+        own_gate = None
     receipt = {"releaseId": release["id"], "version": version, "environment": environment, "url": url,
                "releasedAt": released_at, "createdAt": release["createdAt"], "mainRun": ours["id"],
                "gateRun": captured.get("id"), "gateFromThisCommit": own_gate,
                "gate": gate.get("status"), "gateComputedAt": gate.get("computedAt")}
     (directory / "tiden-release-receipt.json").write_text(json.dumps(receipt, indent=2))
-    if not own_gate:
+    if own_gate is False:
         raise ForeignGate(f"release {version} captured the main gate after run {captured.get('id')} of "
                           f"{captured.get('buildSha')}; do not use its gate for readiness")
     return receipt

@@ -841,7 +841,7 @@ def receipt(tmp_path):
     return json.loads((tmp_path / "tiden-release-receipt.json").read_text())
 
 
-def test_main_push_run_records_its_exact_commit_release_with_its_own_gate(tmp_path, monkeypatch):
+def test_main_push_run_records_its_exact_commit_release_after_publication(tmp_path, monkeypatch):
     calls = release_cli(monkeypatch, [main_run("run-old", "c" * 40, created="2025-12-31T23:00:00.000000Z",
                                                completed="2025-12-31T23:00:05.000000Z"), main_run()])
     main_push_manifest(tmp_path)
@@ -864,8 +864,8 @@ def test_main_push_run_records_its_exact_commit_release_with_its_own_gate(tmp_pa
 
 
 @pytest.mark.parametrize("change", [{"event": "pull_request"}, {"event": "merge_group"}, {"event": "workflow_dispatch"},
-                                    {"git_branch": "codex/feature"}, {"git_branch": "Main"},
-                                    {"tiden_branch": "intent/explicit"}])
+                                    {"git_branch": "codex/feature"}, {"tiden_branch": "intent/explicit"},
+                                    {"git_branch": "Main"}])
 def test_only_a_main_push_run_records_a_ci_release(tmp_path, monkeypatch, change):
     calls = release_cli(monkeypatch)
     main_push_manifest(tmp_path, **change)
@@ -885,23 +885,23 @@ def test_ci_release_takes_no_commit_url_or_time_from_arguments(tmp_path, monkeyp
 OTHER = "b" * 40
 
 
-@pytest.mark.parametrize("runs", [
+@pytest.mark.parametrize("latest", [
     [main_run(), main_run("run-b", OTHER, created="2026-01-01T00:00:01.000000Z", completed="2026-01-01T00:00:06.000000Z")],
-    # Created earlier but completed later: the latest completion, not the latest creation, decides.
-    [main_run(), main_run("run-b", OTHER, created="2025-12-31T23:59:00.000000Z", completed="2026-01-01T00:00:09.000000Z")],
     [main_run(status="failed")],
     [main_run(status="in_progress", completed=None)],
     [],
+    # Created earlier but completed later: the latest completion, not the latest creation, decides.
+    [main_run(), main_run("run-b", OTHER, created="2025-12-31T23:59:00.000000Z", completed="2026-01-01T00:00:09.000000Z")],
 ])
-def test_release_is_not_recorded_unless_this_commit_passed_the_latest_main_run(tmp_path, monkeypatch, capsys, runs):
-    calls = release_cli(monkeypatch, runs)
+def test_release_is_not_recorded_unless_this_commit_passed_the_latest_main_run(tmp_path, monkeypatch, capsys, latest):
+    calls = release_cli(monkeypatch, latest)
     main_push_manifest(tmp_path)
     # A newer main commit records its own CI release, so this run warns and keeps CI green.
     assert run_release(monkeypatch, tmp_path, "--environment", "github-actions-synthetic") == 0
     assert "Tiden release not recorded" in capsys.readouterr().out
     assert not any(call[1:3] == ["release", "create"] for call in calls)
     from scripts.tiden_ci import StaleRelease
-    calls = release_cli(monkeypatch, runs)
+    calls = release_cli(monkeypatch, latest)
     with pytest.raises(StaleRelease):
         run_release(monkeypatch, tmp_path, *PRODUCTION)
     assert not any(call[1:3] == ["release", "create"] for call in calls)
@@ -932,10 +932,18 @@ def test_unbounded_run_listing_fails_closed(tmp_path, monkeypatch):
     assert not any(call[1:3] == ["release", "create"] for call in calls)
 
 
+def test_newer_run_completed_during_creation_fails_the_release(tmp_path, monkeypatch):
+    # Another commit's run completed after the check but before the creation captured the main gate.
+    release_cli(monkeypatch, [main_run(), main_run("run-b", OTHER, created="2026-01-01T00:00:01.000000Z",
+                                                   completed="2999-01-01T00:00:00.000000Z")],
+                created="2999-01-01T00:05:00.000000Z")
+    from scripts.tiden_ci import ForeignGate, record_release
+    with pytest.raises(ForeignGate, match="run-b"):
+        record_release(tmp_path, RELEASE_SHA, "production", RUN_URL, "2026-01-01T00:20:00Z", PRODUCT)
+    assert receipt(tmp_path)["gateRun"] == "run-b" and receipt(tmp_path)["gateFromThisCommit"] is False
+
+
 @pytest.mark.parametrize("runs, created", [
-    # Another commit's run completed between the check and the creation.
-    ([main_run(), main_run("run-b", OTHER, created="2026-01-01T00:00:01.000000Z",
-                           completed="2999-01-01T00:00:00.000000Z")], "2999-01-01T00:05:00.000000Z"),
     # A rerun of this commit is latest now, but the release was first created while another run was latest.
     ([main_run("run-a2", created="2026-01-01T01:00:00.000000Z", completed="2026-01-01T01:00:05.000000Z"),
       main_run("run-b", OTHER, created="2026-01-01T00:00:01.000000Z", completed="2026-01-01T00:00:06.000000Z"),
@@ -988,18 +996,19 @@ def test_production_release_records_apply_time_and_reports_a_missing_gate(tmp_pa
     assert create[create.index("--environment") + 1] == "production"
     assert create[create.index("--released-at") + 1] == "2026-01-01T00:20:00Z"
     assert "no gate was captured" in capsys.readouterr().out
-    assert receipt(tmp_path)["gate"] is None and receipt(tmp_path)["gateFromThisCommit"] is True
+    # Without a captured gate, there is no gate whose origin could be attributed.
+    assert receipt(tmp_path)["gate"] is None and receipt(tmp_path)["gateFromThisCommit"] is None
 
 
 @pytest.mark.parametrize("sha, environment, url, released_at", [
-    ("A" * 40, "production", RUN_URL, "2026-01-01T00:20:00Z"),
-    ("a" * 12, "production", RUN_URL, "2026-01-01T00:20:00Z"),
-    (RELEASE_SHA, "staging", RUN_URL, "2026-01-01T00:20:00Z"),
-    (RELEASE_SHA, "synthetic", RUN_URL, "2026-01-01T00:20:00Z"),
-    (RELEASE_SHA, "production", "https://example.invalid/run/7", "2026-01-01T00:20:00Z"),
-    (RELEASE_SHA, "production", RUN_URL + "/../../evil", "2026-01-01T00:20:00Z"),
-    (RELEASE_SHA, "production", RUN_URL, "2026-01-01 00:20:00"),
-    (RELEASE_SHA, "production", RUN_URL, "2026-01-01T00:20:00+03:00"),
+    ("A" * 40, "production", RUN_URL, "2026-10-17T00:00:30Z"),
+    ("a" * 12, "production", RUN_URL, "2026-10-17T00:00:30Z"),
+    (RELEASE_SHA, "staging", RUN_URL, "2026-10-17T00:00:30Z"),
+    (RELEASE_SHA, "synthetic", RUN_URL, "2026-10-17T00:00:30Z"),
+    (RELEASE_SHA, "production", "https://example.invalid/run/7", "2026-10-17T00:00:30Z"),
+    (RELEASE_SHA, "production", RUN_URL + "/../../evil", "2026-10-17T00:00:30Z"),
+    (RELEASE_SHA, "production", RUN_URL, "2026-10-17 00:00:30"),
+    (RELEASE_SHA, "production", RUN_URL, "2026-10-17T00:00:30+03:00"),
     (RELEASE_SHA, "production", RUN_URL, "2999-01-01T00:00:00Z"),
 ])
 def test_release_rejects_an_unverified_identity_before_any_tiden_call(tmp_path, monkeypatch, sha, environment, url,
