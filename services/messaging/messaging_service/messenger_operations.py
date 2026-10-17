@@ -205,7 +205,8 @@ class ParameterError(ValueError):
     """invalid_operation_parameters with bounded field_errors; never input values."""
     def __init__(self, *errors):
         super().__init__('invalid_operation_parameters')
-        self.field_errors = list(errors)[:MAX_FIELD_ERRORS]
+        seen = set()  # One entry per field path, so fallback paths never crowd out others.
+        self.field_errors = [e for e in errors if not (e['field'] in seen or seen.add(e['field']))][:MAX_FIELD_ERRORS]
 
 
 def _modes(platform):
@@ -215,7 +216,8 @@ def _modes(platform):
 def parameter_format(platform, kind):
     """Reviewed format text for identifier and structured parameter types."""
     if kind == 'contact_id':
-        return ('Telegram user ID as a decimal string of 1-19 digits, such as sender_id from search_people; '
+        return ('Telegram user ID as a decimal string of a positive 64-bit integer (1-19 digits, no leading zero), '
+                'such as sender_id from search_people; '
                 'not person_*, @username or a phone number' if platform == 'telegram' else
                 'WhatsApp user JID digits@c.us or digits@lid, such as sender_id from search_people; '
                 'not person_* or a bare phone number')
@@ -226,7 +228,7 @@ def parameter_format(platform, kind):
         'sha256': '64 lowercase hex characters: the SHA-256 of the exact original',
         'phone': 'international number of 5-20 digits with an optional leading +, no spaces or punctuation',
         'file_mode': 'one of ' + ', '.join(_modes(platform)),
-        'poll_options': '2-10 unique non-blank strings of at most 100 characters',
+        'poll_options': '2-10 unique non-blank strings of at most 100 UTF-16 code units',
         'poll_indices': 'up to 20 unique integers from 0 to 9 (zero-based option positions)',
         'label_ids': 'up to 20 unique label IDs of 1-64 letters, digits, _ or -, from get_labels'}.get(kind)
 
@@ -240,14 +242,16 @@ def _problem(platform, descriptor, value, field):
         if not isinstance(value, str): return fail('type', 'string')
         try: size = len(value.encode('utf-16-le')) // 2
         except UnicodeError: return fail('format', 'valid Unicode text')
-        if size > descriptor['maximum']: return fail('max_length', 'at most %d characters' % descriptor['maximum'])
+        if size > descriptor['maximum']:
+            return fail('max_length', 'at most %d UTF-16 code units; most emoji count as 2' % descriptor['maximum'])
         if any(ord(c) < 32 and c not in '\n\r\t' or ord(c) == 127 for c in value):
             return fail('pattern', 'no control characters except newline, carriage return and tab')
         if descriptor.get('nonempty') and not value.strip(): return fail('blank', 'non-blank text')
         return None
     if kind in ('integer', 'number'):
         if kind == 'integer' and type(value) is not int: return fail('type', 'integer')
-        if kind == 'number' and (type(value) not in (int, float) or not math.isfinite(value)):
+        # An int is always finite; math.isfinite would overflow on a huge one.
+        if kind == 'number' and (type(value) not in (int, float) or type(value) is float and not math.isfinite(value)):
             return fail('type', 'finite number')
         if value < descriptor['minimum']: return fail('minimum', 'at least %s' % descriptor['minimum'])
         if value > descriptor['maximum']: return fail('maximum', 'at most %s' % descriptor['maximum'])
