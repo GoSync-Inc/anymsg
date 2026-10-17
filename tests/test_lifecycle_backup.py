@@ -55,7 +55,7 @@ def test_reference_capture_retains_durable_fence_and_schema_inventory(backup_see
     create_snapshot(store,tmp_path/'capture',[sys.executable,'-c','print("synthetic dump")'],
                     reference_blobs=True,backup_fence='synthetic-reference-backup')
     manifest=verify_bundle(tmp_path/'capture',blob_root=store.files)
-    assert manifest['schema_version']==34
+    assert manifest['schema_version']==35
     assert manifest['backup_fence']=='synthetic-reference-backup'
     assert {'attachment_residency','attachment_eviction_journal','attachment_backup_fences',
             'attachment_understanding','file_understanding_profiles'}<=set(manifest['tables'])
@@ -235,7 +235,7 @@ def test_concurrent_schema_upgrade_cannot_create_unfenced_lifecycle_capture(back
             self.calls+=1
             if self.calls==1:
                 with store.pool.connection() as c:
-                    c.execute("UPDATE probe_metadata SET value='34' WHERE name='schema_version'")
+                    c.execute("UPDATE probe_metadata SET value='35' WHERE name='schema_version'")
     with pytest.raises(RuntimeError,match='backup_capture_unfenced'):
         create_snapshot(SimpleNamespace(pool=UpgradePool(),files=store.files),tmp_path/'capture',
                         [sys.executable,'-c','print("synthetic dump")'])
@@ -279,6 +279,40 @@ def test_uncertain_fence_commit_keeps_originals_protected_for_reconciliation(bac
                         [sys.executable,'-c','print("synthetic dump")'],backup_fence=token)
     with store.pool.connection() as c:
         assert c.execute('SELECT ended_at IS NULL AS active FROM attachment_backup_fences WHERE id=%s',(token,)).fetchone()['active']
+
+
+def test_schema35_absence_names_the_verified_cold_copy(backup_seeded,tmp_path):
+    store,*_=backup_seeded
+    with store.pool.connection() as c:c.execute('DELETE FROM attachment_cold_copies')
+    expected=mark_evicted(store);key='synthetic-owner/cold/'+expected['digest']+'.age'
+    with store.pool.connection() as c:
+        c.execute('''INSERT INTO attachment_cold_copies(digest,bytes,state,object_key,ciphertext_bytes,ciphertext_sha256,
+            recipient_fingerprints,verified_at) VALUES(%s,%s,'verified',%s,%s,%s,%s,clock_timestamp())''',
+            (expected['digest'],expected['bytes'],key,expected['bytes']+200,'c'*64,['d'*64,'e'*64]))
+    try:
+        create_snapshot(store,tmp_path/'capture',[sys.executable,'-c','print("synthetic dump")'])
+        manifest=verify_bundle(tmp_path/'capture')
+        assert manifest['schema_version']==35 and manifest['tables']['attachment_cold_copies']['rows']==1
+        assert manifest['absent_blobs']==[{**expected,'cold_object_key':key}]
+        assert verify_snapshot(store,tmp_path/'capture')['status']=='verified'
+        # The restore check still requires the managed-absent original to be absent.
+        (store.files/expected['digest']).write_bytes(b'x')
+        with pytest.raises(RuntimeError,match='backup_absence_mismatch|restored_blob_inventory_mismatch'):
+            verify_snapshot(store,tmp_path/'capture')
+        (store.files/expected['digest']).unlink()
+    finally:
+        with store.pool.connection() as c:c.execute('DELETE FROM attachment_cold_copies')
+
+
+@pytest.mark.parametrize('cold_key',[None,7,'synthetic-owner/objects/x.age','synthetic-owner/cold/'+'b'*64+'.age','../cold/'+'a'*64+'.age'])
+def test_schema35_absent_entry_rejects_an_invalid_cold_key(tmp_path,cold_key):
+    entry={'digest':'a'*64,'bytes':17,'eviction_id':str(uuid.uuid4()),'cold_object_key':cold_key}
+    directory,_=absent_bundle(tmp_path,schema=35,absent_blobs=[entry])
+    with pytest.raises(ValueError,match='invalid_backup_manifest'):verify_bundle(directory)
+    for schema,key in ((35,'synthetic-owner/cold/'+'a'*64+'.age'),(34,None)):
+        path=tmp_path/str(schema);path.mkdir()
+        valid={k:v for k,v in entry.items() if k!='cold_object_key'}|({'cold_object_key':key} if key else {})
+        assert verify_bundle(absent_bundle(path,schema=schema,absent_blobs=[valid])[0])['absent_blobs']==[valid]
 
 
 def test_invalid_capture_fence_is_rejected_without_cleanup_masking_the_error(backup_seeded,tmp_path):

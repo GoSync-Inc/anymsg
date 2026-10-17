@@ -1,12 +1,17 @@
 # Media storage admission
 
-## Managed original retention (schema 33/34)
+## Managed original retention (schema 33–35)
 
 The separate lifecycle worker can expire **processed, unpinned originals after
 30 days without an original request**. Search and reading retained text do not
 refresh that clock. An authorized original request does. Existing originals get
 a full 30-day grace period when residency tracking is first installed; message
 age alone never authorizes immediate deletion.
+
+Since schema 35 no original is deleted without a **verified cold copy** in the
+private R2 bucket (see [Cold archive](#cold-archive-of-originals-schema-35)).
+Every production entry point of the lifecycle worker enforces this; a candidate
+without one is reported `cold_copy_missing` and stays on disk.
 
 Residency belongs to shared SHA-256 bytes, while descriptions and source links
 belong to individual occurrences. An operator pin protects all occurrences of
@@ -58,7 +63,10 @@ retain their existing unavailable/corruption behavior. Metadata identifies
 uses the existing bounded collector queue and checks the retained digest. It
 does not guarantee that Telegram or WhatsApp can supply an old original.
 Failed/exhausted requests, ACLs, provider cooldowns and storage limits still
-apply. Accepted best-effort recovery does not imply a cold archive exists.
+apply. An original evicted under schema 35 also has a verified encrypted copy in
+R2. Request-time rehydration from that copy before the provider is the next
+increment (ANYM-297 part 2); until it ships, `request_file_download` still uses
+the provider queue, and the cold copy is the operator's recovery source.
 
 Backup fences are durable, without automatic expiry, from capture through
 confirmed delivery. Pending captures from older runtimes must be reconciled
@@ -71,7 +79,8 @@ See [backup streaming](BACKUP_STREAMING.md) for replacement verification and
 
 Apply schemas 033/034 and their role grants through a reviewed release from the
 exact verified main revision, after a fresh compatible backup has been restored
-independently. Keep migrations 001..032 unchanged. Reconcile all older pending
+independently. Schema 035 (cold-copy catalog) follows the same rule and the
+cold-archive activation below. Keep migrations 001..032 unchanged. Reconcile all older pending
 backup jobs and snapshots before enabling retention; do not release a durable
 fence merely because it is old. The receiver must retain a verified protected
 anchor while its replacement is captured, delivered, decrypted and restored.
@@ -105,18 +114,70 @@ current processing evidence continue to occupy disk; enabling TTL alone cannot
 reclaim a backlog of unprocessed videos under the default policy. The explicit
 `--expire-unprocessed` policy can reclaim old originals without that evidence.
 
-### Optional object storage
+### Cold archive of originals (schema 35)
 
-Object storage can be cheaper for originals than another fixed-size block
-volume, but it adds a second copy policy, encryption keys, upload verification,
-rehydration and access controls. It is not enabled by the retention worker.
-As checked on 2026-10-16, Cloudflare R2 Standard lists $0.015/GB-month with a
-10 GB account-level free storage allowance; 34 GB would be about $0.36/month
-for storage if that allowance is available. Requests and taxes are separate.
-R2 Infrequent Access lists $0.01/GB-month with retrieval charges and a 30-day
-minimum, so its lower storage rate alone does not establish a lower total cost.
-See [R2 pricing](https://developers.cloudflare.com/r2/pricing/).
-No new bucket, storage subscription or upload is part of this implementation.
+`messaging_service.cold_archive` copies each idle original (default: 23 days
+without an original request, so a week before it can be due for eviction) to
+`<prefix>/cold/<sha256>.age` in the existing private R2 backup bucket, then
+reads it back. A copy is recorded `verified` only when the object downloaded
+from R2 has the ciphertext size and SHA-256 recorded before its upload was
+committed, and decrypts to exactly the original's SHA-256 and size. Upload
+success alone never counts. A digest shared by many occurrences is archived
+once. The pass never deletes anything, here or in R2.
+
+- **Access.** The producer has no R2 credential. The archiver reaches R2 only
+  through the receiver's `cold` SSH forced command, which stores or reads one
+  object named by a digest and cannot list, delete or overwrite
+  ([BACKUP_R2.md](BACKUP_R2.md#cold-archive-of-originals)).
+- **Encryption.** Each object is age ciphertext to two recipients: the existing
+  backup recovery recipient, so the offline backup key can always restore it,
+  and a dedicated cold recipient. Only the cold identity is placed on the
+  producer, as a private (`0600`), single-link regular file owned by the
+  archiver's runtime user (UID 10001 in the overlay), outside Git, images and
+  logs. Plaintext is read from the CAS and never staged; reports carry no
+  paths, keys or contents.
+- **Existing objects.** An object is never replaced. One already in R2 counts
+  only when it is the ciphertext this archiver recorded, for the current
+  recipients, before the receiver could commit it; decrypting with the cold
+  key alone cannot show that the backup recovery key also opens it. Otherwise
+  the copy is `failed` with `cold_object_unattested` and the original stays
+  resident until an operator reconciles it.
+- **Budget.** `total_bytes` caps the bytes of every copy that may exist in R2:
+  verified and pending copies, and failed ones whose ciphertext was already
+  offered for commit. `pass_files`, `pass_bytes` and `max_object_bytes` bound
+  each pass; failed copies are retried after new candidates. A candidate over
+  any limit is reported `cold_budget` and is not uploaded.
+- **Failure modes.** A receiver, network or R2 error is `cold_unavailable` and
+  ends the pass; a read-back that does not prove the original is
+  `cold_verify_failed`. In every case the original stays resident, and the
+  eviction pass reports it `cold_copy_missing`. A full disk is the visible
+  result of a stopped archive, never data loss. A dry run uploads nothing.
+- **Status.** `--status` prints copy counts and bytes by state, failure codes
+  and the number of due originals without a verified copy.
+- **Manual retrieval.** Until part 2 automates it, an operator can send the
+  line `{"v":1,"op":"get","digest":"<sha256>"}` over the cold SSH key. The reply
+  is one JSON line with `bytes`, followed by exactly that many ciphertext
+  bytes. Decrypt them with the cold or the backup recovery identity, and check
+  the SHA-256 against the digest before using the original.
+- **Cost.** As checked on 2026-10-16, Cloudflare R2 Standard lists
+  $0.015/GB-month, and the 10 GB account allowance is already used by backups:
+  about 16 GB of eviction candidates cost about $0.24/month. Each original
+  needs one HEAD, one write (a few part requests above 64 MiB) and one
+  read-back GET, well within the monthly free request allowances. R2
+  Infrequent Access has retrieval charges and a 30-day minimum and is not
+  used. See [R2 pricing](https://developers.cloudflare.com/r2/pricing/).
+
+Activation: install `cold_archive_role.sql` as the migration owner and grant
+its NOLOGIN role to a dedicated runtime login (`private/cold-archive.dsn`); it
+can record copies but cannot change residency, journals or fences. Re-run
+`file_lifecycle_role.sql`, which grants the eviction role read-only access to
+the copy catalog. Copy [the example](deploy/cold-archive.example.json) to
+`private/cold-archive.json`, place the cold identity at
+`private/cold-archive-identity` and the forced-command key plus pinned
+`known_hosts` under `private/cold-archive-ssh/`. Enable the `cold-archive`
+profile of `deploy/compose.file-lifecycle.yaml` in dry run, inspect the report,
+then add `--apply`. Keep eviction in dry run until the cold-archive status shows
+verified copies for the due originals. The overlay mounts the CAS read-only.
 
 ## Download admission and prefetch
 
@@ -261,8 +322,8 @@ the download receipt or discarding the recorded processing statuses.
 
 The seven-day prefetch window is **not** an eviction TTL. Original expiry is the
 separate opt-in 30-idle-day policy described above. It preserves readable
-text/analysis and requires the documented processing and safety checks; it does
-not require a cold copy under the owner's accepted best-effort recovery policy.
+text/analysis, requires the documented processing and safety checks, and since
+schema 35 requires a verified cold copy in R2 before any deletion.
 Provider history/CDN availability alone is not a durable backup.
 
 Sync status (`get_sync_status`, chat `resolve_reference.sync`, file search evidence)

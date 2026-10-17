@@ -15,3 +15,5 @@ GRANT SELECT,INSERT,UPDATE ON attachment_residency,attachment_eviction_journal
 GRANT EXECUTE ON FUNCTION public.touch_original(text,bigint) TO messaging_file_lifecycle;
 -- No backup fence administration: an eviction operator cannot release a sender's
 -- persistent capture fence to force deletion.
+-- Eviction reads cold-copy proof only; it can never mark a copy verified.
+GRANT SELECT ON attachment_cold_copies TO messaging_file_lifecycle;

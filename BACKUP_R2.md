@@ -2,8 +2,10 @@
 
 This receiver sends the existing age-encrypted `stream_v2` transport to a
 dedicated Cloudflare R2 Standard bucket. The source keeps its upload-only SSH
-key; it receives no R2 credential or read/list/delete interface. R2 credentials
-stay on the separate receiver. An optional root-only verifier on that receiver
+key; it receives no R2 credential or list/delete interface, and its backup key
+cannot read. A separate cold-archive key can only store and read encrypted
+originals by digest under `cold/` ([Cold archive](#cold-archive-of-originals)).
+R2 credentials stay on the separate receiver. An optional root-only verifier on that receiver
 holds the age recovery key and performs independent restores and verified-point
 rotation. Normal scheduled operation requires no Mac or other operator computer.
 The producer never receives that recovery key.
@@ -34,7 +36,7 @@ patch or an ad hoc application image overlay on a host.
    corresponding endpoint, such as `https://<ACCOUNT_ID>.eu.r2.cloudflarestorage.com`
    for EU. [Cloudflare R2 authentication](https://developers.cloudflare.com/r2/api/tokens/).
 4. Do not add lifecycle expiration or storage-class transition rules for committed
-   backups or receipts. Cleanup of **incomplete multipart uploads** is allowed;
+   backups, receipts or `cold/` copies. Cleanup of **incomplete multipart uploads** is allowed;
    it does not replace root-controlled verified-point rotation. Check that no
    existing broad bucket policy expires the protected object.
 
@@ -407,6 +409,65 @@ pruning to cloud objects. Disable the old scheduled count/daily/weekly prune
 before enrollment of this policy. The upload receiver itself does not schedule
 restores. The separately enabled root verifier and timer above establish the
 independent proof before promotion; upload completion alone never rotates.
+
+## Cold archive of originals
+
+The same bucket also holds encrypted cold copies of CAS originals under
+`<prefix>/cold/<sha256>.age`, written by the producer's cold archiver before an
+original may be evicted ([MEDIA_STORAGE.md](MEDIA_STORAGE.md#cold-archive-of-originals-schema-35)).
+The producer still receives no R2 credential. Add a **separate** key to the
+restricted upload account, with its own fixed command:
+
+```text
+restrict,from="SOURCE_ADDRESS",command="/opt/deedkit-backup-r2/venv/bin/python -m messaging_service.backup_r2_receiver --config /etc/deedkit-backup-r2/receive.json cold" ssh-ed25519 REPLACE_WITH_COLD_PUBLIC_KEY
+```
+
+The `cold` mode reads one request line and accepts only `put` or `get` of a
+64-hex digest. It derives the key itself; a request cannot name a path, prefix
+or other verb. It never lists, deletes or overwrites: a `put` for an existing
+key reports `exists` without reading the new ciphertext, and a single-request
+write is conditional (`If-None-Match: *`). Cold state lives in a private
+`cold/` subdirectory of upload state: a separate `.cold.lock`, so a long backup
+upload does not block cold writes, and one `<digest>.json` journal per
+multipart write. The next attempt for that key settles the journal first: an
+upload whose completion was never sent is aborted; a sent completion is
+settled only by its object (`exists`) or by aborting the still-open upload.
+Otherwise the key answers `completion_outcome_unknown` and its original stays
+resident, so an earlier completion can never replace a later object. An
+operator resolves such a journal only after confirming, as root with the
+receiver credential, that the key is still absent and no multipart upload for
+it is open; then the journal file may be removed and the next pass retries. Backup admission and the verifier ignore the `cold/` directory.
+Objects must be age ciphertext; the optional `cold_max_bytes` (default 5 GiB)
+bounds each one and must exceed the archiver's `max_object_bytes` plus age
+overhead. Larger objects use the configured multipart part size.
+
+Backup quota inventory, verified-point rotation and the verifier only address
+`<prefix>/objects/` and `<prefix>/receipts/`: cold copies never occupy a backup
+slot and rotation never deletes them. Cleanup of incomplete multipart uploads
+remains allowed for the whole bucket.
+
+**Bucket lock (owner action).** Add an indefinite lock rule on the cold prefix
+so that R2 itself refuses deletion and overwrite of archived objects, for
+example `npx wrangler r2 bucket lock add <BUCKET> --name cold-originals --prefix <PREFIX>/cold/ --retention-indefinite`
+([Cloudflare bucket locks](https://developers.cloudflare.com/r2/buckets/bucket-locks/)).
+Do not add it to `objects/` or `receipts/`, which rotation must delete.
+Retention of `cold/` after message deletion is a separate, future decision.
+
+**Keys.** Every cold object is encrypted to two recipients: the backup recovery
+recipient (the root-only verifier key and its offline copy can always restore
+it) and a dedicated cold recipient created for the producer. Generate the cold
+identity with `age-keygen` on the producer host, keep it outside Git, images
+and logs as a private (`0600`), single-link regular file owned by the
+archiver's runtime user (UID 10001), and keep an offline copy with the backup
+recovery key.
+Losing the cold identity does not lose data; the backup recovery key still
+decrypts every object.
+
+Before enabling the archiver, run a synthetic drill through the real forced
+command: write a synthetic object, read it back, decrypt it and compare its
+SHA-256, then confirm with the root operator credential that deleting it is
+refused by the bucket lock. Under the locked prefix that small synthetic object
+stays; record its digest with the drill evidence. Use no real originals.
 
 ## Unknown outcomes and migration from local archives
 

@@ -55,6 +55,7 @@ def test_backup_fence_remains_active_after_connection_closes(archive):
 @pytest.fixture(autouse=True)
 def clear_lifecycle_state(database):
     with database.pool.connection() as c:
+        c.execute('DELETE FROM attachment_cold_copies')
         c.execute('UPDATE attachment_residency SET eviction_id=NULL,state=\'resident\',evicted_at=NULL')
         c.execute('DELETE FROM attachment_eviction_journal')
         c.execute('DELETE FROM attachment_backup_fences')
@@ -82,6 +83,15 @@ def processed(archive,*,mid='lifecycle-1',payload=b'Synthetic retained contract'
             indexed_at=clock_timestamp() WHERE attachment=%s""",(source_artifact_hash(source),Jsonb(coverage),'b'*64,'b'*64,fid))
         c.execute("UPDATE attachment_residency SET last_accessed_at=clock_timestamp()-interval '31 days' WHERE digest=%s",(blob.digest,))
     return fid,blob
+
+
+def cold_copy(s,blob,*,state='verified',bytes=None):
+    """A read-back verified R2 copy, as recorded by the cold archiver."""
+    with s.pool.connection() as c:
+        c.execute('''INSERT INTO attachment_cold_copies(digest,bytes,state,object_key,ciphertext_bytes,ciphertext_sha256,
+            recipient_fingerprints,verified_at) VALUES(%s,%s,%s,%s,%s,%s,%s,CASE WHEN %s='verified' THEN clock_timestamp() END)''',
+            (blob.digest,blob.bytes if bytes is None else bytes,state,'synthetic/cold/'+blob.digest+'.age',blob.bytes+200,'c'*64,
+             ['d'*64,'e'*64] if state=='verified' else [],state))
 
 
 def test_processed_idle_original_is_only_candidate_until_apply(archive):
@@ -427,6 +437,7 @@ def test_cli_preview_and_apply_require_explicit_operator_arguments(archive,capsy
     assert api.main(['--dsn-file',__import__('os').environ['PROBE_TEST_DSN_FILE'],'--files',str(s.files)])==0
     assert '"dry_run": true' in capsys.readouterr().out
     assert (s.files/blob.digest).exists()
+    cold_copy(s,blob)
     assert api.main(['--dsn-file',__import__('os').environ['PROBE_TEST_DSN_FILE'],'--files',str(s.files),
         '--apply','--limit','1','--max-bytes',str(blob.bytes)])==0
     assert '"evicted": 1' in capsys.readouterr().out
@@ -807,3 +818,59 @@ def test_restricted_processing_roles_can_defer_managed_absence_but_cannot_change
         with s.pool.connection() as c:
             c.execute(sql.SQL('DROP OWNED BY {}').format(sql.Identifier(role)))
             c.execute(sql.SQL('DROP ROLE {}').format(sql.Identifier(role)))
+
+
+@pytest.mark.parametrize('copy',['absent','pending','failed','other_size','verified'])
+def test_eviction_requires_verified_cold_copy(archive,copy):
+    _,s,_,_=archive;_,blob=processed(archive);api=lifecycle()
+    if copy=='other_size':cold_copy(s,blob,bytes=blob.bytes+1)
+    elif copy!='absent':cold_copy(s,blob,state=copy)
+    preview=api.LifecycleWorker(s,require_cold_copy=True).run_once()
+    report=api.LifecycleWorker(s,require_cold_copy=True).run_once(apply=True)
+    if copy=='verified':
+        assert preview['candidates']==1 and report['evicted']==1
+        assert not (s.files/blob.digest).exists()
+    else:
+        assert preview['reasons']==report['reasons']=={'cold_copy_missing':1} and report['evicted']==0
+        assert (s.files/blob.digest).read_bytes()==b'Synthetic retained contract'
+        with s.pool.connection() as c:assert not api.is_managed_evicted(c,blob.digest,blob.bytes)
+
+
+@pytest.mark.parametrize('change',['deleted','invalidated'])
+def test_cold_copy_lost_between_prepare_and_unlink_cancels_eviction(archive,monkeypatch,change):
+    _,s,_,_=archive;_,blob=processed(archive);api=lifecycle();cold_copy(s,blob)
+    worker=api.LifecycleWorker(s,require_cold_copy=True);prepare=worker._prepare
+    def lost_after_prepare(digest):
+        token,reason=prepare(digest)
+        with s.pool.connection() as c:
+            if change=='deleted':c.execute('DELETE FROM attachment_cold_copies WHERE digest=%s',(digest,))
+            else:c.execute("UPDATE attachment_cold_copies SET state='failed',error_code='cold_verify_failed',verified_at=NULL WHERE digest=%s",(digest,))
+        return token,reason
+    monkeypatch.setattr(worker,'_prepare',lost_after_prepare)
+    report=worker.run_once(apply=True)
+    assert report['evicted']==0 and report['reasons']=={'cold_copy_missing':1}
+    assert (s.files/blob.digest).exists()
+    with s.pool.connection() as c:
+        journal=c.execute('SELECT state,error_code FROM attachment_eviction_journal WHERE digest=%s',(blob.digest,)).fetchone()
+        assert dict(journal)=={'state':'cancelled','error_code':'cold_copy_missing'}
+        assert c.execute('SELECT state FROM attachment_residency WHERE digest=%s',(blob.digest,)).fetchone()['state']=='resident'
+
+
+def test_every_production_entry_point_requires_a_cold_copy(archive,monkeypatch,capsys):
+    from pathlib import Path
+    import yaml
+    _,s,_,_=archive;_,blob=processed(archive);api=lifecycle();seen=[]
+    real=api.LifecycleWorker
+    def recording(*args,**kwargs):
+        seen.append(kwargs.get('require_cold_copy'));return real(*args,**kwargs)
+    monkeypatch.setattr(api,'LifecycleWorker',recording)
+    for flags in ([],['--apply'],['--apply','--expire-unprocessed']):
+        assert api.main(['--dsn-file',__import__('os').environ['PROBE_TEST_DSN_FILE'],'--files',str(s.files),*flags])==0
+    assert seen==[True,True,True]
+    assert '"cold_copy_required": true' in capsys.readouterr().out and (s.files/blob.digest).exists()
+    root=Path(__file__).resolve().parents[1]
+    # Compose runs only the CLI, and no other module constructs a worker.
+    command=yaml.safe_load((root/'deploy/compose.file-lifecycle.yaml').read_text())['services']['file-lifecycle']['command']
+    assert command[:3]==['python','-m','messaging_service.file_lifecycle']
+    package=root/'services/messaging/messaging_service'
+    assert [p.name for p in package.glob('*.py') if 'LifecycleWorker(' in p.read_text()]==['file_lifecycle.py']
