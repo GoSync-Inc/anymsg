@@ -584,3 +584,110 @@ def test_root_shared_lock_rejects_preexisting_wrong_owner_in_uploader_state(oper
         with r2.state_lock(config):pytest.fail('wrong-owner lock was accepted')
     after=lock.stat()
     assert (after.st_uid,after.st_mode,after.st_ino)==(before.st_uid,before.st_mode,before.st_ino)
+
+
+COLD='c'*64
+
+def cold_wire(op,digest=COLD,data=None,extra=None):
+    header={'v':1,'op':op,'digest':digest,**(extra or {})}
+    output=json.dumps(header).encode()+b'\n'
+    if data is not None:
+        for start in range(0,len(data),1024**2):
+            frame=data[start:start+1024**2];output+=struct.pack('!I',len(frame))+frame
+        output+=b'\0'*4+json.dumps({'bytes':len(data),'sha256':sha(data)}).encode()+b'\n'
+    return output
+
+def cold(config,cloud,op,**kw):
+    sink=io.BytesIO();r2.cold_serve(config,io.BytesIO(cold_wire(op,**kw)),sink,client=cloud)
+    lines=sink.getvalue().split(b'\n')
+    return [json.loads(line) for line in lines if line.startswith(b'{')],sink.getvalue()
+
+def test_cold_route_is_prefix_and_verb_scoped(config):
+    cloud=Cloud();data=r2.AGE_HEADER+b'synthetic cold ciphertext'*8
+    key=config['prefix']+'/cold/'+COLD+'.age'
+    responses,_=cold(config,cloud,'put',data=data)
+    assert responses==[{'v':1,'status':'ready','key':key},
+                       {'v':1,'status':'stored','key':key,'bytes':len(data),'sha256':sha(data)}]
+    assert cloud.objects=={key:data}
+    # An existing key is reported and kept: no second upload, no overwrite.
+    other=r2.AGE_HEADER+b'a different encryption of the same original'*4
+    responses,_=cold(config,cloud,'put',data=other)
+    assert responses==[{'v':1,'status':'exists','key':key,'bytes':len(data)}] and cloud.objects=={key:data}
+    responses,raw=cold(config,cloud,'get')
+    assert responses[0]=={'v':1,'status':'found','key':key,'bytes':len(data)} and raw.endswith(data)
+    with pytest.raises(ValueError,match='cold_object_missing'):cold(config,cloud,'get',digest='d'*64)
+    for op,digest,extra in [('list',COLD,None),('delete',COLD,None),('overwrite',COLD,None),('put','../'+COLD[3:],None),
+                            ('get','C'*64,None),('get',COLD[:63],None),('get',COLD+'/x',None),('get',None,None),
+                            ('get',COLD,{'key':'test-owner/objects/x'}),('get',COLD,{'prefix':'other'})]:
+        with pytest.raises(ValueError,match='invalid_cold_request'):cold(config,cloud,op,digest=digest,extra=extra)
+    with pytest.raises(ValueError,match='encrypted_backup_required'):
+        cold(config,cloud,'put',digest='e'*64,data=b'plaintext is never stored'*4)
+    assert set(cloud.objects)=={key}
+    assert not {'delete_object','list_objects_v2','list_multipart_uploads'}&set(cloud.calls)
+
+def test_cold_route_streams_large_objects_through_bounded_multipart(config):
+    cloud=Cloud();data=r2.AGE_HEADER+b'm'*(6*1024**2)
+    responses,_=cold(config,cloud,'put',data=data)
+    assert responses[-1]['status']=='stored' and cloud.objects[config['prefix']+'/cold/'+COLD+'.age']==data
+    assert cloud.calls.count('upload_part')==2 and 'put_object' not in cloud.calls
+    cloud=Cloud()
+    with pytest.raises(ValueError,match='cold_size_limit'):
+        cold({**config,'cold_max_bytes':1024},cloud,'put',data=data)
+    assert cloud.objects=={} and cloud.uploads=={}
+
+def test_backup_prune_ignores_cold_prefix(operator):
+    config,cloud,marker,proof=operator
+    archived={config['prefix']+'/cold/'+d*64+'.age':r2.AGE_HEADER+d.encode()*64 for d in 'abc'}
+    cloud.objects.update(archived)
+    # Cold copies never occupy a backup slot or byte quota.
+    assert set(r2.inventory(config,cloud))==set()
+    _,expected=enroll(operator);candidate=receive(config,cloud);write_json(proof,proof_for(candidate))
+    assert r2.rotate(config,marker,proof,expected_protected_sha256=expected,client=cloud)['status']=='rotated'
+    assert all(cloud.objects[key]==value for key,value in archived.items())
+    assert len([k for k in cloud.objects if '/cold/' not in k])==2
+
+def test_interrupted_cold_multipart_attempt_is_neutralized_before_a_retry(config):
+    cloud=Cloud();data=r2.AGE_HEADER+b'n'*(6*1024**2);key=config['prefix']+'/cold/'+COLD+'.age'
+    journal=Path(config['state_directory'])/'cold'/(COLD+'.json')
+    # 1. A lost create response: the unknown upload can never complete.
+    cloud.fail['created_response']=True
+    with pytest.raises(RuntimeError,match='storage_unavailable'):cold(config,cloud,'put',data=data)
+    assert not journal.exists() and len(cloud.uploads)==1
+    orphan=next(iter(cloud.uploads))
+    # 2. A process dies mid-upload: the journal keeps its upload ID.
+    real=cloud.complete_multipart_upload
+    def died(**kw):raise KeyboardInterrupt('synthetic process death')
+    cloud.complete_multipart_upload=died
+    with pytest.raises(KeyboardInterrupt):cold(config,cloud,'put',data=data)
+    cloud.complete_multipart_upload=real
+    saved=json.loads(journal.read_text())
+    assert saved['phase']=='completing' and saved['upload_id'] in cloud.uploads
+    # 3. The retry first aborts that journaled upload, so it can never land later.
+    responses,_=cold(config,cloud,'put',data=data)
+    assert responses[-1]['status']=='stored' and cloud.objects[key]==data
+    assert saved['upload_id'] not in cloud.uploads and set(cloud.uploads)=={orphan} and not journal.exists()
+
+def test_failed_cold_abort_keeps_the_journal_for_reconciliation(config):
+    cloud=Cloud();data=r2.AGE_HEADER+b'n'*(6*1024**2)
+    journal=Path(config['state_directory'])/'cold'/(COLD+'.json')
+    cloud.fail['complete_multipart_upload']=CloudError(500);cloud.fail['abort_multipart_upload']=CloudError(500)
+    with pytest.raises(RuntimeError,match='completion_outcome_unknown'):cold(config,cloud,'put',data=data)
+    with pytest.raises(RuntimeError,match='storage_unavailable'):cold(config,cloud,'put',data=data)
+    assert json.loads(journal.read_text())['phase']=='completing' and cloud.objects=={}
+    # Backup admission ignores cold journals.
+    assert receive(config,cloud)['status']=='stored'
+
+@pytest.mark.parametrize('age_seconds',[60,30*86400])
+def test_sent_cold_completion_blocks_replacement_until_it_is_settled(config,age_seconds):
+    cloud=Cloud();data=r2.AGE_HEADER+b'synthetic cold ciphertext'*8;key=config['prefix']+'/cold/'+COLD+'.age'
+    cold_dir=Path(config['state_directory'])/'cold';cold_dir.mkdir(mode=0o700);journal=cold_dir/(COLD+'.json')
+    # The completion was sent and its upload is already gone, but no object is visible yet.
+    write_json(journal,{'v':1,'key':key,'phase':'completing','upload_id':'consumed-upload',
+                        'at':datetime.now(timezone.utc).timestamp()-age_seconds})
+    # No age of the evidence settles it: only its object or an operator can.
+    with pytest.raises(RuntimeError,match='completion_outcome_unknown'):cold(config,cloud,'put',data=data)
+    assert journal.exists() and cloud.objects=={}
+    # Its object appearing settles it: the key then answers `exists`, never replaced.
+    cloud.objects[key]=r2.AGE_HEADER+b'the earlier completion landed'*4
+    responses,_=cold(config,cloud,'put',data=data)
+    assert responses==[{'v':1,'status':'exists','key':key,'bytes':len(cloud.objects[key])}] and not journal.exists()

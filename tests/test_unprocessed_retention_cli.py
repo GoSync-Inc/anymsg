@@ -16,12 +16,14 @@ def test_unprocessed_retention_cli_requires_explicit_policy_and_apply(tmp_path,m
         def __init__(self,*args):pass
         def close(self):calls['closed']=True
     class FakeWorker:
-        def __init__(self,value,*,expire_unprocessed):calls['policy']=expire_unprocessed
+        def __init__(self,value,*,expire_unprocessed,require_cold_copy):
+            calls['policy']=expire_unprocessed;calls['cold_copy']=require_cold_copy
         def run_once(self,**kwargs):calls['run']=kwargs;return {'dry_run':not kwargs['apply']}
     monkeypatch.setattr(store,'Store',FakeStore)
     monkeypatch.setattr(file_lifecycle,'LifecycleWorker',FakeWorker)
     assert file_lifecycle.main(['--dsn-file',str(dsn),*options])==0
-    assert calls=={'policy':policy,'run':{'apply':apply,'limit':100,'max_bytes':1024**3},'closed':True}
+    # Neither policy choice can drop the verified cold-copy requirement (ANYM-297).
+    assert calls=={'policy':policy,'cold_copy':True,'run':{'apply':apply,'limit':100,'max_bytes':1024**3},'closed':True}
     assert json.loads(capsys.readouterr().out)['dry_run'] is not apply
 
 

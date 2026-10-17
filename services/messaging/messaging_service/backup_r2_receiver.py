@@ -98,7 +98,8 @@ def load_config(path):
     value = private_json(path)
     required = {'v', 'endpoint', 'bucket', 'prefix', 'state_directory', 'credentials_file'}
     defaults = {'max_bytes': 64 * 1024 ** 3, 'quota_bytes': 128 * 1024 ** 3,
-                'max_objects': 2, 'part_bytes': 64 * MIB, 'timeout_seconds': 7200}
+                'max_objects': 2, 'part_bytes': 64 * MIB, 'timeout_seconds': 7200,
+                'cold_max_bytes': 5 * 1024 ** 3}
     if (not isinstance(value, dict) or not required <= set(value) or set(value) - required - set(defaults) or
             type(value['v']) is not int or value['v'] != 1):
         raise ValueError('invalid_config')
@@ -113,7 +114,8 @@ def load_config(path):
             not 5 * MIB <= value['part_bytes'] <= 64 * MIB or
             not 64 <= value['max_bytes'] <= min(5 * 1024 ** 4, value['part_bytes'] * 10000) or
             not value['max_bytes'] <= value['quota_bytes'] <= 10 * 1024 ** 4 or
-            not 60 <= value['timeout_seconds'] <= 21600):
+            not 60 <= value['timeout_seconds'] <= 21600 or
+            not 64 <= value['cold_max_bytes'] <= min(5 * 1024 ** 4, value['part_bytes'] * 10000)):
         raise ValueError('invalid_limits')
     for key in ('state_directory', 'credentials_file'):
         if not isinstance(value[key], str) or not Path(value[key]).is_absolute() or '..' in Path(value[key]).parts:
@@ -784,11 +786,241 @@ def rotate(config, protected_file, proof_file, *, expected_protected_sha256, cli
                 'duplicate': resumed, 'verification_id': proof['verification']['id']}
 
 
+COLD_HEADER_KEYS = {'v', 'op', 'digest'}
+
+
+def cold_key(config, digest):
+    if not isinstance(digest, str) or not local.DIGEST.fullmatch(digest):
+        raise ValueError('invalid_cold_request')
+    return config['prefix'] + '/cold/' + digest + '.age'
+
+
+@contextmanager
+def cold_lock(config):
+    """Cold copies serialize among themselves, never against backup uploads.
+
+    Their lock and journals live in a private `cold/` subdirectory of upload
+    state, which backup admission and the verifier never read.
+    """
+    with directory_handle(Path(config['state_directory'])) as state_fd:
+        try:
+            os.mkdir('cold', 0o700, dir_fd=state_fd)
+        except FileExistsError:
+            pass
+        cold_fd = os.open('cold', os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW, dir_fd=state_fd)
+        try:
+            info = os.fstat(cold_fd)
+            if info.st_mode & 0o077 or info.st_uid != os.geteuid():
+                raise ValueError('private_receiver_directory_required')
+            fd = os.open('.cold.lock', os.O_RDWR | os.O_CREAT | os.O_NOFOLLOW, 0o600, dir_fd=cold_fd)
+            try:
+                info = os.fstat(fd)
+                if (not stat.S_ISREG(info.st_mode) or info.st_nlink != 1 or info.st_mode & 0o077 or
+                        info.st_uid != os.geteuid()):
+                    raise ValueError('invalid_receiver_lock')
+                try:
+                    fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+                except BlockingIOError:
+                    raise RuntimeError('receiver_busy') from None
+                yield cold_fd
+            finally:
+                os.close(fd)
+        finally:
+            os.close(cold_fd)
+
+
+def cold_attempt_name(key):
+    return key.rsplit('/', 1)[1][:-len('.age')] + '.json'
+
+
+def cold_reconcile(config, client, key, cold_fd):
+    """Settle an earlier interrupted multipart attempt for this key first.
+
+    Before completion was sent, aborting the journaled upload is enough. A sent
+    completion is settled only by its object (then `exists`) or by aborting
+    the still-open upload; otherwise the key stays blocked until an operator
+    resolves the journal, so an older completion can never replace a newer object.
+    """
+    name = cold_attempt_name(key)
+    attempt = state_read(cold_fd, name)
+    if attempt is None:
+        return
+    if (not isinstance(attempt, dict) or set(attempt) != {'v', 'key', 'phase', 'upload_id', 'at'} or
+            attempt['v'] != 1 or attempt['key'] != key or attempt['phase'] not in {'creating', 'uploading', 'completing'} or
+            type(attempt['at']) not in (int, float) or
+            (attempt['phase'] != 'creating' and
+             (not isinstance(attempt['upload_id'], str) or not 1 <= len(attempt['upload_id']) <= 1024))):
+        raise ValueError('invalid_attempt_journal')
+    if attempt['phase'] != 'creating':
+        try:
+            client.abort_multipart_upload(Bucket=config['bucket'], Key=key, UploadId=attempt['upload_id'])
+        except Exception as exc:
+            if code(exc) != 'NoSuchUpload':
+                raise RuntimeError('storage_unavailable') from None
+            # The upload is gone and a sent completion may still publish it.
+            # Nothing observable proves otherwise, so the key stays blocked
+            # until its object appears or an operator resolves the journal.
+            if attempt['phase'] == 'completing' and cold_head(config, client, key) is None:
+                raise RuntimeError('completion_outcome_unknown') from None
+    os.unlink(name, dir_fd=cold_fd); local.fsync_dir(cold_fd)
+
+
+def cold_head(config, client, key):
+    try:
+        head = client.head_object(Bucket=config['bucket'], Key=key)
+    except Exception as exc:
+        if absent(exc):
+            return None
+        raise RuntimeError('storage_unavailable') from None
+    size = head.get('ContentLength')
+    if type(size) is not int or size < 0:
+        raise RuntimeError('storage_unavailable')
+    return size
+
+
+def cold_put(config, client, key, source, respond, state_fd):
+    """Write once under <prefix>/cold/: an existing key is reported, never replaced."""
+    cold_reconcile(config, client, key, state_fd)
+    journal = cold_attempt_name(key)
+    def phase(name, upload):
+        state_write(state_fd, journal, {'v': 1, 'key': key, 'phase': name, 'upload_id': upload,
+                                        'at': datetime.now(timezone.utc).timestamp()})
+    existing = cold_head(config, client, key)
+    if existing is not None:
+        respond({'v': 1, 'status': 'exists', 'key': key, 'bytes': existing})
+        return
+    respond({'v': 1, 'status': 'ready', 'key': key})
+    digest = hashlib.sha256(); size = 0; prefix = b''; buffer = bytearray(); parts = []; upload_id = None
+    def part(data):
+        result = cloud_call(client.upload_part, Bucket=config['bucket'], Key=key, UploadId=upload_id,
+                            PartNumber=len(parts) + 1, Body=data)
+        etag = result.get('ETag')
+        if not isinstance(etag, str) or not 1 <= len(etag) <= 1024:
+            raise ValueError('invalid_part_receipt')
+        parts.append({'PartNumber': len(parts) + 1, 'ETag': etag})
+    try:
+        while True:
+            length = struct.unpack('!I', local.exact_read(source, 4))[0]
+            if length == 0:
+                break
+            if length > MIB:
+                raise ValueError('invalid_backup_frame')
+            if size + length > config['cold_max_bytes']:
+                raise ValueError('cold_size_limit')
+            data = local.exact_read(source, length); size += length; digest.update(data)
+            if len(prefix) < len(AGE_HEADER):
+                prefix += data[:len(AGE_HEADER) - len(prefix)]
+            buffer.extend(data)
+            if len(buffer) >= config['part_bytes']:
+                if upload_id is None:
+                    phase('creating', None)
+                    created = cloud_call(client.create_multipart_upload, Bucket=config['bucket'], Key=key,
+                                         ContentType='application/octet-stream')
+                    created_id = created.get('UploadId')
+                    if not isinstance(created_id, str) or not 1 <= len(created_id) <= 1024:
+                        raise ValueError('invalid_upload_id')
+                    phase('uploading', created_id); upload_id = created_id
+                part(bytes(buffer[:config['part_bytes']])); del buffer[:config['part_bytes']]
+        raw = source.readline(4097)
+        if len(raw) > 4096 or not raw.endswith(b'\n'):
+            raise ValueError('truncated_backup')
+        footer = unique_json(raw)
+        if (not isinstance(footer, dict) or set(footer) != {'bytes', 'sha256'} or
+                type(footer['bytes']) is not int or footer['bytes'] != size or size < 64):
+            raise ValueError('backup_size_mismatch')
+        if footer['sha256'] != digest.hexdigest():
+            raise ValueError('backup_hash_mismatch')
+        if source.read(1):
+            raise ValueError('backup_size_mismatch')
+        if prefix != AGE_HEADER:
+            raise ValueError('encrypted_backup_required')
+        if upload_id is not None and buffer:
+            part(bytes(buffer))
+    except BaseException:
+        # Before completion only. A failed abort keeps the journal for the next
+        # attempt's reconciliation; a successful one clears it.
+        if upload_id is not None:
+            cloud_call(client.abort_multipart_upload, Bucket=config['bucket'], Key=key, UploadId=upload_id)
+        try:
+            os.unlink(journal, dir_fd=state_fd); local.fsync_dir(state_fd)
+        except FileNotFoundError:
+            pass
+        raise
+    if upload_id is None:
+        try:
+            client.put_object(Bucket=config['bucket'], Key=key, Body=bytes(buffer),
+                              ContentType='application/octet-stream', IfNoneMatch='*')
+        except Exception as exc:
+            if code(exc) not in {'412', 'PreconditionFailed'}:
+                raise RuntimeError('storage_unavailable') from None
+            respond({'v': 1, 'status': 'exists', 'key': key, 'bytes': cold_head(config, client, key)})
+            return
+    else:
+        phase('completing', upload_id)
+        try:
+            client.complete_multipart_upload(Bucket=config['bucket'], Key=key, UploadId=upload_id,
+                                             MultipartUpload={'Parts': parts})
+        except Exception:
+            # The journal stays: the next attempt aborts this upload, then re-checks the key.
+            raise RuntimeError('completion_outcome_unknown') from None
+        os.unlink(journal, dir_fd=state_fd); local.fsync_dir(state_fd)
+    respond({'v': 1, 'status': 'stored', 'key': key, 'bytes': size, 'sha256': digest.hexdigest()})
+
+
+def cold_get(config, client, key, respond, sink):
+    try:
+        response = client.get_object(Bucket=config['bucket'], Key=key)
+    except Exception as exc:
+        if absent(exc):
+            raise ValueError('cold_object_missing') from None
+        raise RuntimeError('storage_unavailable') from None
+    body = response['Body']; size = response.get('ContentLength'); sent = 0
+    try:
+        if type(size) is not int or not 0 <= size <= config['cold_max_bytes']:
+            raise RuntimeError('storage_unavailable')
+        respond({'v': 1, 'status': 'found', 'key': key, 'bytes': size})
+        while data := body.read(MIB):
+            sent += len(data)
+            if sent > size:
+                raise RuntimeError('storage_unavailable')
+            sink.write(data)
+        sink.flush()
+    finally:
+        body.close()
+    if sent != size:
+        raise RuntimeError('storage_unavailable')
+
+
+def cold_serve(config, source, sink, *, client=None):
+    """Producer route for cold originals: put or get one digest, nothing else.
+
+    There is no list, delete or overwrite verb, and backup inventory, quota and
+    rotation only ever address <prefix>/objects/ and <prefix>/receipts/.
+    """
+    def respond(value):
+        sink.write(encoded(value)); sink.flush()
+    raw = source.readline(4097)
+    if len(raw) > 4096 or not raw.endswith(b'\n'):
+        raise ValueError('invalid_cold_request')
+    header = unique_json(raw)
+    if (not isinstance(header, dict) or set(header) != COLD_HEADER_KEYS or type(header['v']) is not int or
+            header['v'] != 1 or header['op'] not in {'put', 'get'}):
+        raise ValueError('invalid_cold_request')
+    key = cold_key(config, header['digest'])
+    client = client if client is not None else make_client(config)
+    if header['op'] == 'get':
+        cold_get(config, client, key, respond, sink)
+        return
+    with cold_lock(config) as state_fd:
+        cold_put(config, client, key, source, respond, state_fd)
+
+
 def main(argv=None):
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument('--config', type=Path, required=True)
     commands = parser.add_subparsers(dest='command')
     commands.add_parser('receive')
+    commands.add_parser('cold')
     fetch = commands.add_parser('download')
     fetch.add_argument('--id', required=True)
     fetch.add_argument('--output', type=Path, required=True)
@@ -808,6 +1040,10 @@ def main(argv=None):
         signal.alarm(config['timeout_seconds'])
         # SSH_ORIGINAL_COMMAND is deliberately neither read nor executed.
         # authorized_keys fixes this argv to `... --config ... receive`.
+        if args.command == 'cold':
+            # A separate forced-command key fixes this argv; it writes its own frames.
+            cold_serve(config, sys.stdin.buffer, sys.stdout.buffer)
+            return 0
         if args.command == 'download':
             result = download(config, args.id, args.output)
         elif args.command == 'protect':
@@ -825,7 +1061,8 @@ def main(argv=None):
                 'backup_size_mismatch', 'backup_hash_mismatch', 'encrypted_backup_required', 'invalid_backup_frame',
                 'storage_unavailable', 'receiver_timeout', 'completion_outcome_unknown', 'receipt_outcome_unknown',
                 'creation_outcome_unknown', 'unresolved_upload_required', 'incomplete_upload_aborted_retry',
-                'uploader_lock_initialization_required'}
+                'uploader_lock_initialization_required', 'invalid_cold_request', 'cold_size_limit',
+                'cold_object_missing'}
         error = str(exc) if str(exc) in safe else 'receiver_failed'
         print(json.dumps({'v': 1, 'status': 'error', 'code': error}), flush=True)
         return 1
