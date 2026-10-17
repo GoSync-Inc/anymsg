@@ -187,8 +187,8 @@ def test_the_reviewed_list_classifies_its_documents_as_docs_only_on_the_real_rep
     assert all(path in tracked and reason for path, reason in exclusions.items())
     # The guard runs over the repository's real scan inputs and finds no consumer of any listed document,
     # so it cannot silently turn the fast path off; a consumer added later makes such a run verify in full.
-    for path in sorted(documents):
-        assert docs_only.consumers(ROOT, [path], exclusions) == [], path
+    # One scan for all of them: a hit names the file and line that reads one.
+    assert docs_only.consumers(ROOT, sorted(documents), exclusions) == []
     scanned = docs_only.scan_inputs(ROOT)
     assert {".github/workflows/checks.yml", "scripts/production.py", "tests/test_docs_only.py",
             "services/messaging/hatch_build.py", "services/messaging/Dockerfile"} <= set(scanned)
