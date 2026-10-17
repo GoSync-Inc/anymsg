@@ -306,6 +306,9 @@ def test_a_scan_only_change_still_builds_and_scans_every_image(tmp_path, path):
     ("generic-api-key", "usr/lib/python3/dist-packages/agent_gateway/settings.py", False),
     ("generic-api-key", "usr/share/doc/age/settings.env", False),
     ("generic-api-key", "usr/local/bin/tool.sh", False),
+    ("generic-api-key", "include/settings.py", False),
+    ("generic-api-key", "usr/include/openssl/x509.h", True),
+    ("generic-api-key", "lib/x86_64-linux-gnu/perl/5.36.0/CORE/cop.h", True),
     ("generic-api-key", "app/services/gateway/.venv/lib/python3.13/site-packages/agent_gateway/app.py", False),
     ("generic-api-key", "app/.venv/lib/python3.13/site-packages/family_calendar/google_api.py", False),
     ("jwt", "app/.venv/lib/python3.13/site-packages/family_calendar_service-0.1.0.dist-info/METADATA", False),
@@ -335,7 +338,28 @@ def test_a_third_party_file_linked_from_our_code_is_not_narrowed(tmp_path):
         soft = tarfile.TarInfo("app/conf/link.py")
         soft.type, soft.linkname = tarfile.SYMTYPE, "../../" + third
         tar.addfile(soft)
-    assert si.aliases(layer) == [("app/settings.py", third), ("app/conf/link.py", third)]
+    assert si.resolve_links(si.aliases(layer)) == [("app/settings.py", third), ("app/conf/link.py", third)]
+
+
+@pytest.mark.parametrize("raw, path", [
+    # `..` after a directory symlink applies to the resolved directory, not to the spelling.
+    ([("sym", "usr/lib/current", "vendor/subdir"),
+      ("sym", "app/agent_gateway/settings.py", "../../usr/lib/current/../settings.py")], "usr/lib/vendor/settings.py"),
+    # A link to the image root reaches every file.
+    ([("sym", "app/agent_gateway/root", "../..")], "usr/lib/vendor/settings.py"),
+    ([("sym", "app/root", "/")], "usr/local/lib/python3.13/site-packages/x/s.py"),
+    # A symlink loop is uncertain, so it is treated as reaching everything.
+    ([("sym", "app/a", "b"), ("sym", "app/b", "a")], "usr/lib/vendor/settings.py"),
+], ids=["dotdot-after-directory-symlink", "relative-root", "absolute-root", "loop"])
+def test_symlinks_resolve_like_the_kernel_so_our_code_cannot_reach_a_narrowed_file(raw, path):
+    assert not si.third_party("generic-api-key", path, si.resolve_links(raw))
+
+
+def test_venv_lib64_and_merged_usr_aliases_keep_third_party_files_narrowed():
+    raw = [("sym", "app/.venv/lib64", "lib"), ("sym", "lib", "usr/lib"), ("sym", "usr/lib/current", "vendor")]
+    links = si.resolve_links(raw)
+    assert si.third_party("generic-api-key", "app/.venv/lib/python3.13/site-packages/x/s.py", links)
+    assert si.third_party("generic-api-key", "usr/lib/vendor/settings.py", links)
 
 
 def test_links_are_resolved_transitively_and_through_directories():

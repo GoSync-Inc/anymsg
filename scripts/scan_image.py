@@ -39,7 +39,7 @@ PAYLOAD_FREE = frozenset(b"123456")  # link, device, directory and fifo headers 
 HEURISTIC_RULES = frozenset({"generic-api-key", "jwt"})
 # System files: only /usr/lib and /usr/include (and /lib*, their merged-usr aliases on Debian), never
 # /usr/share or /usr/local, where our Dockerfiles COPY.
-THIRD_PARTY = re.compile(r"(?:^|/)(?:site|dist)-packages/[^/]+/|^(?:usr/)?(?:lib|lib32|lib64|libx32|include)/")
+THIRD_PARTY = re.compile(r"(?:^|/)(?:site|dist)-packages/[^/]+/|^usr/include/|^(?:usr/)?(?:lib|lib32|lib64|libx32)/")
 OWN_PACKAGES = frozenset({"agent_gateway", "anymsg", "deedkit_gateway", "deedkit_platform_contracts",
                           "family_calendar", "family_calendar_service", "messaging_service",
                           "personal_os_voice_service", "platform_contracts", "telegram_broker",
@@ -127,30 +127,68 @@ def clean(path):
 
 
 def aliases(path):
-    """(link path, target path) for every hard or symbolic link in a layer, relative to the image root."""
+    """(kind, link path, raw link target) for every hard ("hard") or symbolic ("sym") link in a layer."""
     links = []
     with tarfile.open(path, "r:") as layer:
         for entry in layer:
             if entry.islnk():
-                links.append((clean(entry.name), clean(entry.linkname)))
+                links.append(("hard", clean(entry.name), entry.linkname))
             elif entry.issym():
-                target = entry.linkname if entry.linkname.startswith("/") else \
-                    posixpath.join(posixpath.dirname(clean(entry.name)), entry.linkname)
-                links.append((clean(entry.name), clean(target)))
+                links.append(("sym", clean(entry.name), entry.linkname))
     return links
+
+
+def resolve(path, symlinks):
+    """The physical path a name reaches, resolving symlinked components one by one as the kernel does.
+
+    `..` applies to the resolved prefix, not to the spelling. None for a symlink loop.
+    """
+    pending = [part for part in path.split("/") if part not in ("", ".")]
+    result, hops = [], 0
+    while pending:
+        part = pending.pop(0)
+        if part == "..":
+            if result:
+                result.pop()
+            continue
+        target = symlinks.get("/".join(result + [part]))
+        if target is None:
+            result.append(part)
+            continue
+        hops += 1
+        if hops > 40:
+            return None
+        if target.startswith("/"):
+            result = []
+        pending[:0] = [piece for piece in target.split("/") if piece not in ("", ".")]
+    return "/".join(result)
+
+
+def resolve_links(raw):
+    """(link path, physical target) pairs; a target that cannot be resolved covers the whole image ("")."""
+    symlinks = {name: target for kind, name, target in raw if kind == "sym"}
+    resolved = []
+    for kind, name, target in raw:
+        if kind == "hard":
+            resolved.append((name, clean(target)))
+        else:
+            physical = resolve(target if target.startswith("/") else posixpath.dirname(name) + "/" + target, symlinks)
+            resolved.append((name, "" if physical is None else physical))
+    return resolved
 
 
 def names_of(path, links):
     """Every path a file is reachable by through hard links and file or directory symlinks, transitively.
 
+    `links` holds resolved (link path, physical target) pairs; an empty target is the image root.
     None when the set grows past MAX_ALIASES, which callers treat as not narrowable.
     """
     names, pending = {path}, [path]
     while pending:
         current = pending.pop()
         for name, target in links:
-            if current == target or current.startswith(target + "/"):
-                alias = name + current[len(target):]
+            if target == "" or current == target or current.startswith(target + "/"):
+                alias = name + ("/" + current if target == "" else current[len(target):])
                 if alias not in names:
                     if len(names) >= MAX_ALIASES:
                         return None
@@ -254,7 +292,8 @@ def scan(archive_path, *, config=CONFIG, binary=None):
             findings.append((finding["RuleID"], Path(outer).name.removesuffix(".tar"), inner, finding["StartLine"]))
         if (result.returncode == FINDINGS) != bool(findings):
             raise Refused("gitleaks exit code and report disagree")
-        return layers, sorted(finding for finding in findings if not third_party(finding[0], finding[2], links))
+        resolved = resolve_links(links)
+        return layers, sorted(finding for finding in findings if not third_party(finding[0], finding[2], resolved))
 
 
 def main(argv=None):
