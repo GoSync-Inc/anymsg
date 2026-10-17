@@ -1245,7 +1245,8 @@ def test_load_gate_runs_in_its_own_parallel_job_and_every_test_job_gates_the_evi
     steps = {step.get("name") or step["uses"].split("@")[0]: step for step in evidence["steps"]}
     assert steps["actions/download-artifact"]["with"]["pattern"] == "ci-evidence-*"
     assert "tiden_ci.py assemble" in steps["Merge the fragments of the tested commit and record every check outcome"]["run"]
-    assert steps["Retain test evidence even when a check fails"]["with"]["name"] == "ci-evidence"
+    retained = steps["Retain test evidence even when a check fails"]["with"]
+    assert retained["name"] == "ci-evidence" and retained["overwrite"] is True  # a rerun attempt replaces it
     require = steps["Require every test job to have succeeded"]
     assert require["if"] == "${{ always() }}"
     assert require["env"] == {"VERIFY_RESULT": "${{ needs.verify.result }}", "LOAD_RESULT": "${{ needs.load.result }}"}
@@ -1291,13 +1292,13 @@ def test_python_suite_reports_its_slowest_tests_and_waits_for_its_background_ima
         path.unlink()
     tools = tmp_path / "bin"
     tools.mkdir()
-    (tools / "docker").write_text('#!/bin/sh\nsleep 2\ntest "$1" = build\n')  # the pull fails, the build succeeds
+    (tools / "docker").write_text('#!/bin/sh\nsleep 5\ntest "$1" = build\n')  # the pull fails, the build succeeds
     (tools / "docker").chmod(0o755)
     env = {"PATH": f"{tools}:/usr/bin:/bin", "RUNNER_TEMP": str(tmp_path), "DEEDKIT_TEST_PYTHON_IMAGE": "synthetic"}
     began = time.monotonic()
     started = subprocess.run(["bash", "-e", "-o", "pipefail", "-c", steps[start]["run"]], cwd=root, capture_output=True,
                              env=env, timeout=10)
-    assert started.returncode == 0 and time.monotonic() - began < 2
+    assert started.returncode == 0 and time.monotonic() - began < 4
     waited = subprocess.run(["bash", "-e", "-c", steps[wait]["run"]], capture_output=True, timeout=30,
                             env={**env, "BACKGROUND_WAIT_SECONDS": "20"})
     assert waited.returncode != 0 and b"python-image" in waited.stdout

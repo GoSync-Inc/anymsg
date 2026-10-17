@@ -180,7 +180,8 @@ def assemble(directory: Path, fragments: Path, ci_url: str, producers: dict) -> 
     `producers` maps each job of FRAGMENTS to its job result and the checkout SHA its job output captured. A
     fragment holds only its own files and checks and must name verify's tested SHA, which is the SHA its job
     captured. A job without a fresh fragment contributes no reports, and its checks take its job result
-    (`skipped` when it succeeded), so it never reads as passed; such jobs are returned in `missing`.
+    (`skipped` when it succeeded), so it never reads as passed; such jobs are returned in `missing`. A stale
+    verify fragment still supplies the run's routing metadata (SHA, Git and Tiden branch), never its outcomes.
     `ci_url` names this assembly's run attempt, which reruns with every producer.
     """
     attempt = RUN_ATTEMPT_URL.fullmatch(ci_url or "")

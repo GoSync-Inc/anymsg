@@ -278,12 +278,14 @@ jobs:
             dist/*.tar.gz
           if-no-files-found: error
           retention-days: 7
+          overwrite: true
       - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
         with:
           name: npm-dist
           path: dist/*.tgz
           if-no-files-found: error
           retention-days: 7
+          overwrite: true
   load:
     # The paired gateway load gate measures its latency and isolation budgets on a runner of its own,
     # in parallel with verify, instead of after the whole suite on the verify runner.
@@ -371,6 +373,8 @@ jobs:
           path: ${{ runner.temp }}/ci-evidence
           if-no-files-found: error
           retention-days: 14
+          # Artifact names are unique per run, so a rerun attempt replaces its earlier evidence.
+          overwrite: true
       - name: Require every test job to have succeeded
         if: ${{ always() }}
         env:
