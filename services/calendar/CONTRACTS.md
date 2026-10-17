@@ -1,39 +1,39 @@
 # Pilot contract v1
 
-Для сервиса v0.2 действует [SERVICE.md](docs/SERVICE.md): PostgreSQL, opaque refs, отдельные principals/grants, официальный MCP и REST с общим policy layer. Targets/credentials не входят в агентский API. Pilot harness ниже остаётся отдельным контрактом; его future/series write не включены в MCP.
+For service v0.2, [SERVICE.md](docs/SERVICE.md) applies: PostgreSQL, opaque refs, separate principals/grants, the official MCP and REST with a shared policy layer. Targets/credentials are not part of the agent API. The pilot harness below remains a separate contract; its future/series write is not included in MCP.
 
-`family_calendar/contracts.py` фиксирует `EventRef(connection_id, calendar_id, resource_id, occurrence_key)`, `Scope=single|future|series` и `WriteReceipt`. Verified receipt требует evidence hash; для подтверждённого удаления используется `absent`. Журнал хранит более подробное внутреннее представление шага, включая payload и фактический read-back, и не является публичным агентским API.
+`family_calendar/contracts.py` fixes `EventRef(connection_id, calendar_id, resource_id, occurrence_key)`, `Scope=single|future|series` and `WriteReceipt`. A verified receipt requires an evidence hash; `absent` is used for a confirmed deletion. The journal stores a more detailed internal representation of a step, including the payload and the actual read-back, and is not a public agent API.
 
-`providers/base.py` — account-bound Protocol текущего пилота: `discover`, `read`, `read_window`, conditional `put` и `delete`. Adapter создаётся с фиксированным connection ID и отдельным транспортом. Credentials не выбираются через глобальный «текущий аккаунт».
+`providers/base.py` is the account-bound Protocol of the current pilot: `discover`, `read`, `read_window`, conditional `put` and `delete`. An adapter is created with a fixed connection ID and a separate transport. Credentials are not chosen through a global "current account".
 
-`Journal.prepare` проверяет mutation intent до сохранения: допустимы create/update/delete; для update/delete обязателен сильный ETag. Executor проверяет принадлежность href выбранной collection и локальный write grant перед новым внешним шагом. Производственный opaque-ref API, sync и compile-change будут расширять эту границу позднее.
+`Journal.prepare` checks the mutation intent before saving: create/update/delete are allowed; update/delete require a strong ETag. The executor checks that the href belongs to the chosen collection and the local write grant before a new external step. The production opaque-ref API, sync and compile-change will extend this boundary later.
 
-## Ограничения
+## Limits
 
-| Значение | Pilot v1 |
+| Value | Pilot v1 |
 |---|---|
 | Python | 3.13 |
-| ICS/HTTP response | максимум 1 MiB |
-| Expansion | максимум 10 000 экземпляров |
-| Создаваемые объекты одного run | максимум 16 |
+| ICS/HTTP response | at most 1 MiB |
+| Expansion | at most 10 000 instances |
+| Objects created in one run | at most 16 |
 | Timezone fixtures | Asia/Makassar, Europe/Berlin, UTC |
-| VTIMEZONE генерация fixtures | 2020–2035 |
+| VTIMEZONE fixture generation | 2020–2035 |
 | Future | simple weekly, COUNT/UNTIL/infinite, preserve_absolute |
-| Network | HTTPS iCloud hosts, проверка сертификатов, без env proxies |
-| Mutation retries | отсутствуют; unknown → reconciliation |
-| Invitations/sharing | не поддержаны |
-| Concurrency | один оператор/процесс на run |
+| Network | HTTPS iCloud hosts, certificate verification, no env proxies |
+| Mutation retries | none; unknown → reconciliation |
+| Invitations/sharing | not supported |
+| Concurrency | one operator/process per run |
 
-`read_window` выдаёт `complete_window` только после корректного CalDAV multistatus с полными ресурсами. 401/403, malformed XML, недостающий calendar-data и лимит ответа — ошибки; не пустой календарь. `series_inventory_complete=false`: это не full sync и не доказательство свободного времени всей семьи.
+`read_window` returns `complete_window` only after a correct CalDAV multistatus with full resources. 401/403, malformed XML, missing calendar-data and the response limit are errors; not an empty calendar. `series_inventory_complete=false`: this is not a full sync and not proof of free time for the whole family.
 
-## Journal и evidence
+## Journal and evidence
 
-Состояния шага: prepared → sending → verified / conflict / unknown / failed / needs_attention. Intent сохраняется транзакцией с synchronous=FULL до HTTP; request ID и payload hash проверяются при повторе. Verified сохраняет реальные read-back bytes, ETag и semantic hash. Unknown/sending не повторяет mutation, а сверяет тот же href.
+Step states: prepared → sending → verified / conflict / unknown / failed / needs_attention. The intent is saved by a transaction with synchronous=FULL before HTTP; the request ID and payload hash are checked on a repeat. Verified stores the real read-back bytes, ETag and semantic hash. Unknown/sending does not repeat the mutation but reconciles the same href.
 
-Expected stale-version 412 отличается от произвольного conflict. После критического auth/permission/grant сбоя матрица не начинает следующие mutations. Длительные settling windows не угадываются: неопределённость остаётся needs_attention и оператор может повторить reconciliation позже.
+An expected stale-version 412 differs from an arbitrary conflict. After a critical auth/permission/grant failure the matrix does not start the next mutations. Long settling windows are not guessed: uncertainty stays needs_attention and the operator can repeat reconciliation later.
 
-Report v1 содержит scope, run/environment, runtime_versions, checks → step_ids, компактные operation receipts, capabilities, generated_at/evidence_as_of и Gate A. До реального server+client PASS capabilities остаются unverified; mocks не принимаются. Проверяющий скрипт сверяет сохранённые bytes и hashes локально; он не заменяет live/client evidence и не предотвращает намеренную подделку владельцем всех файлов.
+Report v1 contains scope, run/environment, runtime_versions, checks → step_ids, compact operation receipts, capabilities, generated_at/evidence_as_of and Gate A. Until a real server+client PASS, capabilities stay unverified; mocks are not accepted. The checker script verifies the stored bytes and hashes locally; it does not replace live/client evidence and does not prevent deliberate forgery by an owner of all the files.
 
-Перечень публичных ошибок задаётся фиксированными кодами, например `reauth_required`, `provider_forbidden`, `version_conflict`, `write_unknown`, `conditional_write_unavailable`, `write_not_enabled`, `unsupported_recurrence`, `invalid_local_time`, `ambiguous_local_time`, `floating_time_requires_timezone`, `run_scope_mismatch`. Тексты provider exceptions, credentials и HTTP bodies в CLI errors не выводятся.
+The list of public errors is given by fixed codes, for example `reauth_required`, `provider_forbidden`, `version_conflict`, `write_unknown`, `conditional_write_unavailable`, `write_not_enabled`, `unsupported_recurrence`, `invalid_local_time`, `ambiguous_local_time`, `floating_time_requires_timezone`, `run_scope_mismatch`. The texts of provider exceptions, credentials and HTTP bodies are not printed in CLI errors.
 
-Файловые форматы v1 ещё не выпущены для боевого сервиса. Миграция ранних экспериментальных SQLite/config схем автоматически не выполняется. PostgreSQL migrations и worker fencing входят в следующий этап.
+The v1 file formats have not been released for a production service. Migration of early experimental SQLite/config schemas is not performed automatically. PostgreSQL migrations and worker fencing belong to the next stage.

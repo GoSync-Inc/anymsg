@@ -1,31 +1,31 @@
-# Повторяющиеся события
+# Recurring events
 
-Исходный VCALENDAR копируется целиком; меняются нужные свойства. VEVENT master, exceptions, VALARM, VTIMEZONE, неизвестные X-properties/parameters сохраняются. Floating time можно записать и прочитать, но expansion и поиск слотов без явной timezone запрещены. All-day сохраняет DATE и исключительную конечную дату.
+The original VCALENDAR is copied whole; the needed properties are changed. The master VEVENT, exceptions, VALARM, VTIMEZONE, unknown X-properties/parameters are preserved. Floating time can be written and read, but expansion and slot search without an explicit timezone are forbidden. All-day keeps DATE and the exclusive end date.
 
-## Single и series
+## Single and series
 
-`move_single` создаёт/меняет exception с исходным RECURRENCE-ID. `cancel_single` отмечает такой exception CANCELLED. `shift_series` сдвигает master, RDATE/EXDATE и recurrence identities. Ранее перемещённые/отменённые exceptions сохраняют фактическое абсолютное время (`preserve_absolute`).
+`move_single` creates/changes an exception with the original RECURRENCE-ID. `cancel_single` marks such an exception CANCELLED. `shift_series` shifts the master, RDATE/EXDATE and recurrence identities. Previously moved/cancelled exceptions keep their actual absolute time (`preserve_absolute`).
 
-Несуществующее и неоднозначное локальное время DST отклоняется. При смене зоны значение получает свой TZID/UTC encoding, а непрозрачные параметры сохраняются. Native RANGE exceptions нельзя молча переписать обычным series shift. Перенос BYDAY series на другой день недели отклоняется, пока преобразование правила не реализовано.
+A nonexistent and an ambiguous local DST time are rejected. When the zone changes, the value gets its own TZID/UTC encoding, and opaque parameters are preserved. Native RANGE exceptions cannot be silently rewritten by an ordinary series shift. Moving a BYDAY series to another weekday is rejected until the rule transformation is implemented.
 
 ## Future split
 
-Граница включительна по исходному identity, а не фактическому времени перемещённой встречи. Поддержан один простой WEEKLY rule с INTERVAL, COUNT либо UNTIL, WKST и, при наличии, единственным BYDAY, совпадающим с DTSTART. Другие правила явно unsupported.
+The boundary is inclusive by the original identity, not by the actual time of a moved meeting. One simple WEEKLY rule is supported with INTERVAL, COUNT or UNTIL, WKST and, if present, a single BYDAY matching DTSTART. Other rules are explicitly unsupported.
 
-1. Сохранить приватный split plan с before/past/future payload, версиями, новой UID/href и remapping exceptions.
-2. Создать новую будущую серию условным PUT на стабильный href.
-3. Условно обрезать прошлую; обе операции проходят общий journal/read-back.
-4. При подтверждённом отказе trim удалить новую часть только при совпадении её версии и содержимого с нашим receipt.
-5. При неизвестном trim сохранить обе части и сверить результат. Компенсация здесь могла бы удалить уже успешно перенесённое будущее.
+1. Save a private split plan with the before/past/future payload, versions, new UID/href and exception remapping.
+2. Create the new future series with a conditional PUT to a stable href.
+3. Conditionally trim the past one; both operations go through the shared journal/read-back.
+4. On a confirmed trim failure, delete the new part only if its version and content match our receipt.
+5. On an unknown trim, keep both parts and reconcile the result. Compensation here could delete a future that was already moved successfully.
 
-COUNT делится по обычным recurrence positions, отмены не увеличивают COUNT. UNTIL корректируется на сдвиг. Бессрочная серия сохраняется как RRULE. EXDATE/RDATE и exceptions распределяются по границе; будущие exception identities remap, фактическое время индивидуальных переносов сохраняется.
+COUNT is divided by ordinary recurrence positions; cancellations do not increase COUNT. UNTIL is adjusted for the shift. An unbounded series is kept as an RRULE. EXDATE/RDATE and exceptions are distributed across the boundary; future exception identities are remapped, the actual time of individual moves is kept.
 
-Это несколько внешних шагов без общей атомарности: временно возможны две перекрывающиеся серии. Receipt раскрывает partial результат. Calendar sharing и invitations не входят в преобразование.
+These are several external steps without common atomicity: two overlapping series are temporarily possible. The receipt reveals a partial result. Calendar sharing and invitations are not part of the transformation.
 
-## Native probe и сравнение
+## Native probe and comparison
 
-Harness отдельно отправляет `RECURRENCE-ID;RANGE=THISANDFUTURE`. Конструкция определена [RFC 5545](https://datatracker.ietf.org/doc/html/rfc5545#section-3.8.4.4); её наличие в ответе не доказывает поведение iCloud/Apple клиента. До визуальной приёмки native capability unverified.
+The harness sends `RECURRENCE-ID;RANGE=THISANDFUTURE` separately. The construct is defined by [RFC 5545](https://datatracker.ietf.org/doc/html/rfc5545#section-3.8.4.4); its presence in a response does not prove the behavior of iCloud/the Apple client. Until visual acceptance the native capability is unverified.
 
-Сравнение семантики допускает перестановку верхних компонентов/свойств и изменения DTSTAMP, LAST-MODIFIED, CREATED, SEQUENCE. Остальные свойства, параметры, timezone definition и alarms сравниваются консервативно. Эквивалентная нормализация провайдером может дать `needs_attention`; это повод исследовать конкретный diff, а не ослаблять сравнение молча.
+The semantic comparison allows reordering of top-level components/properties and changes to DTSTAMP, LAST-MODIFIED, CREATED, SEQUENCE. Other properties, parameters, the timezone definition and alarms are compared conservatively. An equivalent normalization by the provider can give `needs_attention`; this is a reason to investigate the specific diff, not to weaken the comparison silently.
 
-Fixture timezone definitions ограничены 2020–2035. Поддержка произвольных исторических/нестандартных VTIMEZONE и invitation series требует отдельной приёмки. Матрица доказывает конкретные примеры, а не все варианты iCalendar.
+Fixture timezone definitions are limited to 2020–2035. Support for arbitrary historical/non-standard VTIMEZONE and invitation series requires separate acceptance. The matrix proves specific examples, not all variants of iCalendar.

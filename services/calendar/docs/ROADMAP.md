@@ -1,37 +1,37 @@
-# Доставка сервиса
+# Service delivery
 
-Текущая очередь и статусы ведутся только в **[общем BACKLOG](../../../BACKLOG.md)**
-(DK-15–DK-19). Этот документ сохраняет историю этапов и границы пилота.
+The current queue and statuses are kept only in the **[shared BACKLOG](../../../BACKLOG.md)**
+(DK-15–DK-19). This document keeps the history of the stages and the pilot's boundaries.
 
-## Текущий MVP v0.2
+## Current MVP v0.2
 
-Реализованы Google/iCloud connections, PostgreSQL, family/agent grants, роли, bindings, обязанности с версиями, agenda/slots, durable workers/leases/locks, MCP/REST и локальный owner CLI. Live CRUD отдельных событий проверен на тестовых календарях Google и iCloud. Исходный iCloud core/future pilot имеет отдельные приватные receipts и визуальные наблюдения.
+Implemented: Google/iCloud connections, PostgreSQL, family/agent grants, roles, bindings, versioned duties, agenda/slots, durable workers/leases/locks, MCP/REST and the local owner CLI. Live CRUD of individual events has been verified on Google and iCloud test calendars. The original iCloud core/future pilot has separate private receipts and visual observations.
 
-Это часть этапов 2–6, а не принятие всех gates. Оставшаяся реализация и отдельные
-проверки нескольких аккаунтов/deployment/restore перечислены в общем бэклоге.
-Обновление источников — bounded polling; unknown не считается свободным временем.
-[Текущий контракт](SERVICE.md).
+This is part of stages 2–6, not acceptance of all gates. The remaining implementation and separate
+checks of multiple accounts/deployment/restore are listed in the shared backlog.
+Source refresh is bounded polling; unknown is not counted as free time.
+[Current contract](SERVICE.md).
 
-## Этап 1: iCloud pilot
+## Stage 1: iCloud pilot
 
-Код локального harness реализован; матрица ниже сохраняется как история этапа. Live результаты находятся в приватных отчётах владельца; normal tests используют synthetic fixtures и mock transport.
+The local harness code is implemented; the matrix below is kept as the history of the stage. Live results are in the owner's private reports; normal tests use synthetic fixtures and a mock transport.
 
-| Задача | Реализация | Что ещё проверить live |
+| Task | Implementation | What still to check live |
 |---|---|---|
-| 1.1 Bootstrap/contract | Package, lock, account-bound Protocol, intent/receipt validation, limits | Не требуется аккаунт |
-| 1.2 Onboarding/discovery | Hidden input, encrypted local registry, TLS/redirect/privileges checks | Один аккаунт, затем отдельно второй и shared permissions |
-| 1.3 Journal/CRUD | Stable refs, conditional headers, durable read-back, cleanup | CRUD и реальный 412 |
-| 1.4 Single/series/roundtrip | Exceptions, alarms, TZ, unknown props, DATE/floating | Сохранение сервером и поведение Apple клиента |
-| 1.5 Future/faults/gate | Native probe, split COUNT/UNTIL/infinite, saved plan, compensation/reconcile, checker | Future split и native отдельно; owner visual report |
+| 1.1 Bootstrap/contract | Package, lock, account-bound Protocol, intent/receipt validation, limits | No account needed |
+| 1.2 Onboarding/discovery | Hidden input, encrypted local registry, TLS/redirect/privileges checks | One account, then separately a second and shared permissions |
+| 1.3 Journal/CRUD | Stable refs, conditional headers, durable read-back, cleanup | CRUD and a real 412 |
+| 1.4 Single/series/roundtrip | Exceptions, alarms, TZ, unknown props, DATE/floating | Server persistence and Apple client behavior |
+| 1.5 Future/faults/gate | Native probe, split COUNT/UNTIL/infinite, saved plan, compensation/reconcile, checker | Future split and native separately; owner visual report |
 
-Fault injection (timeouts, revocation, conflicts) выполняется на mock; не выдаётся за сбои настоящего iCloud. Полный production schema/provider API из проекта не скопирован в пилот: его текущие границы описаны в CONTRACTS.md. Структура файлов объединяет мелкие modules плана, сохраняя соответствующее поведение.
+Fault injection (timeouts, revocation, conflicts) is done on a mock; it is not passed off as failures of the real iCloud. The full production schema/provider API from the project is not copied into the pilot: its current boundaries are described in CONTRACTS.md. The file structure combines the plan's small modules, keeping the corresponding behavior.
 
-## Границы доставленного MVP
+## Boundaries of the delivered MVP
 
-PostgreSQL, Google OAuth/API, несколько connections, базовые семейные роли/grants,
-agenda/slots, обязанности, durable workers и MCP/REST уже реализованы. Перечень
-старых этапов 2–7 не является списком ещё не написанных возможностей. Серверные
-deployment templates включены в платформу; доказательства конкретного переноса
-и восстановления учитываются отдельно от их наличия в репозитории.
+PostgreSQL, Google OAuth/API, several connections, basic family roles/grants,
+agenda/slots, duties, durable workers and MCP/REST are already implemented. The list of
+old stages 2–7 is not a list of capabilities not yet written. Server
+deployment templates are part of the platform; evidence of a specific cutover
+and restore is counted separately from their presence in the repository.
 
-Future включается после своего PASS. Несколько календарей уже доступны через локальный MCP в явной области разрешений; автоматические переносы связанных семейных занятий и проекций пока не включены.
+Future is enabled after its PASS. Several calendars are already available through the local MCP in an explicit permission scope; automatic moves of linked family activities and projections are not yet enabled.
