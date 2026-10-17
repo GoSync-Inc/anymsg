@@ -115,8 +115,8 @@ reuse of this commit; otherwise `checks / verify` must have tested this commit.
 `tiden_ci.py publish` and `release` accept the record only when it names their
 own job's repository, run, attempt and commit. The Tiden run on `main`, its
 thirteen check row IDs and the release then carry this push run's attempt URL,
-with `tested_in` naming the queue run attempt, while executions and outcomes stay
-the queue run's. Queue evidence without a valid record still publishes and
+with `tested_in`, also kept in the route receipt, naming the queue run attempt,
+while executions and outcomes stay the queue run's. Queue evidence without a valid record still publishes and
 records nothing. After a reuse, rerun a failed `checks / tiden` or `Tiden release
 record` with **Re-run all jobs**: a partial rerun has an attempt the record does
 not name. Validating the artifact does not replace reviewing a fork's workflow

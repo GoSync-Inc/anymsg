@@ -414,7 +414,9 @@ def publish(directory: Path, manifest: dict, branch: str | None, product: str, c
     if branch is None:
         raise ValueError("No Tiden branch mapping, no usable pull request intent link, and the Git branch "
                          "is not a valid Tiden branch name; register this Git branch before publishing evidence")
-    (directory / "tiden-route.json").write_text(json.dumps({"branch": branch, "source": source}))
+    # A reusing main push names, in its retained receipt, the merge queue run attempt that ran the tests.
+    tested_in = {"tested_in": manifest["tested_in"]} if manifest.get("tested_in") else {}
+    (directory / "tiden-route.json").write_text(json.dumps({"branch": branch, "source": source, **tested_in}))
     expected = next((b["id"] for b in branches if b["name"] == branch), None)
     if not expected and routed:
         # Tiden skips live-doc sync for a branch name it does not know, so create it first.

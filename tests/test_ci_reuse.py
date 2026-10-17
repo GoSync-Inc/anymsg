@@ -242,6 +242,13 @@ def rewrite(evidence, name, **change):
     return json.dumps({**json.loads((evidence / name).read_text()), **change}).encode()
 
 
+def producers(evidence, **load):
+    """Change the load producer consistently in both metadata and manifest, so only the producer rule can refuse."""
+    changed = {**json.loads((evidence / "manifest.json").read_text())["producers"]}
+    changed["load"] = {**changed["load"], **load}
+    return {name: rewrite(evidence, name, producers=changed) for name in ("metadata.json", "manifest.json")}
+
+
 @pytest.mark.parametrize("damage, reason", [
     (lambda e: {"source-sha": b"b" * 40}, "SHA field"),
     (lambda e: {"load.json": rewrite(e, "load.json", sha="b" * 40)}, "SHA field"),
@@ -265,13 +272,12 @@ def rewrite(evidence, name, **change):
     (lambda e: {"normalized-python.xml": b'<!DOCTYPE x><testsuite/>'}, "python report is unsafe"),
     (lambda e: {"manifest.json": b"{"}, "not valid JSON"),
     (lambda e: {"ci-checks.json": json.dumps(json.loads((e / "ci-checks.json").read_text())[:12]).encode()}, "thirteen"),
-    (lambda e: {"manifest.json": rewrite(e, "manifest.json", producers={
-        **json.loads((e / "manifest.json").read_text())["producers"], "load": {"result": "success", "sha": SHA,
-                                                                                "attempt": "3"}})},
-     "pinned queue run attempt"),
+    (lambda e: producers(e, attempt="3"), "did not produce passing evidence"),
+    (lambda e: producers(e, result="failure"), "did not produce passing evidence"),
+    (lambda e: producers(e, sha="b" * 40), "did not produce passing evidence"),
 ], ids=["source-sha", "load-report-sha", "metadata-sha", "manifest-sha", "earlier-attempt", "publisher-url", "not-queue",
         "skipped-check", "failed-check-count", "failed-load", "count-mismatch", "failed-test", "only-skipped", "doctype",
-        "malformed", "missing-check-row", "later-attempt-producer"])
+        "malformed", "missing-check-row", "later-attempt-producer", "failed-producer", "other-commit-producer"])
 def test_invalid_queue_evidence_fails_the_push_run_after_the_choice(tmp_path, damage, reason):
     evidence = queue_evidence(tmp_path)
     data = archive(evidence, change=damage(evidence))
@@ -430,6 +436,8 @@ def test_the_push_run_publishes_the_queue_evidence_to_main_under_its_own_run_url
     meta = [create[i + 1] for i, value in enumerate(create) if value == "--client-meta"]
     assert meta == ["git_branch=main", "ci_url=" + PUSH_URL, "tested_in=" + PRODUCER_URL]
     assert create[create.index("--description") + 1] == PUSH_URL
+    assert json.loads((published / "tiden-route.json").read_text()) == {"branch": "main", "source": "explicit",
+                                                                          "tested_in": PRODUCER_URL}
     report = next(call for call in calls if call[1:3] == ["run", "report"])
     names = sorted(Path(path).name for path in report[4:report.index("--product-id")])
     assert names == sorted([f"normalized-{check}.xml" for check in ci_reuse.REPORT_CHECKS] + ["ci-checks-published.json"])
