@@ -93,9 +93,19 @@ starting it.
    current defect, which merges to main after review and acceptance (Current
    truth and future proposals).
 3. **Review.** Astra and Fable review every new card and every spec edit
-   (`AGENTS.md`); the card text goes to them as a file.
-4. **Accept.** The owner accepts the card, or the orchestrator does so relaying
-   the owner's quoted words. Record it on the card.
+   (`AGENTS.md`); the card text goes to them as a file. They first judge whether
+   the card should exist: a real need and value, no duplicate of an existing card
+   or built-in capability, no over-engineering (a smaller or existing solution),
+   and whether it must be built now. They may reject or shrink it; a rejected
+   card gets its reason at its source.
+4. **Accept.** Cards in the categories feature and improvement (owner-visible
+   product behavior) are accepted by the owner, presented in plain words, or by
+   the orchestrator relaying the owner's quoted words. Cards in defect, infra,
+   refactor and research are accepted by the orchestrator once Astra and Fable
+   both approve with no open findings, necessity check included. The orchestrator
+   brings such a card to the owner when the reviewers disagree, it changes
+   product behavior or an escalation condition in `AGENTS.md` applies. Record who
+   accepted on the card.
 5. **Queue.** Accepted cards with a lane and expected paths form the ready queue.
    A wave takes current breakages (defects, unresolved production incidents) and
    hard deadlines first. The rest of the wave is about 70% product (feature,
@@ -124,7 +134,8 @@ Value: <1|2|3|5|8>   Effort: <1|2|3|5|8>   Score: <Value / Effort, two decimals>
 History: <DK-* identity, related specs, source/PR links, as-of SHA>
 How others solve it: <concrete open-source projects or standards; adopt | adapt | build, and why>
 Research: <large items only, by the research rule in AGENTS.md>
-Accepted: <date>, <owner | orchestrator relaying the owner>
+Accepted: <date>, <owner | orchestrator | orchestrator relaying the owner>
+Actual: <time from start to merge; recorded when the work merges>
 ```
 
 Category: defect = current behavior breaks a contract or spec; feature = a new
@@ -134,8 +145,18 @@ behavior change, including enablers a feature needs; research = a time-boxed
 investigation whose output is a decision or cards. An acceptance card takes the
 category of the work it accepts.
 
-Value is the benefit to the owner. Effort is agent work: 1 is about an hour, 3
-about a day, 8 a week or more. Tiden's priority field keeps its meaning (High,
+Value is the benefit to the owner. Effort is in story points (Fibonacci 1, 2, 3,
+5, 8, 13): relative size from the amount of work, complexity and
+uncertainty or risk, estimated by comparison with the reference stories below,
+not in hours and not from human-team experience. Reference stories (merged PRs):
+1 = #59 (one-line-scope release fix); 2 = #66 (small release fix with test);
+3 = #52 (expire unprocessed originals by policy); 5 = #68 (exact source SHA in
+images and release record); 8 = #40 (blue-green HTTP releases). 13 is too big:
+split it into cards of at most 8 before it enters the ready queue, and check
+every 8 for a split. Score stays Value / Effort. When a card's work merges,
+record the actual time on the card; the weekly review computes points per day
+per worker from these pairs, uses it for wave planning and revises the reference
+stories. Tiden's priority field keeps its meaning (High,
 Medium, Low) and still raises review levels; the order within a share comes from Score.
 
 ## Working loop
