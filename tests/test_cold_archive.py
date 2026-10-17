@@ -353,7 +353,11 @@ def test_compose_runs_cold_archive_in_dry_run_without_r2_credentials():
     data=[v for v in service['volumes'] if v['target']=='/data']
     assert data==[{'type':'volume','source':'files','target':'/data','read_only':True}]
     assert all(v['read_only'] for v in service['volumes'])
+    assert {v['target'] for v in service['volumes']}=={'/data','/run/secrets/database_url','/run/secrets/cold_archive',
+                                                        '/run/secrets/cold_identity','/run/secrets/cold_ssh'}
     assert not any('credential' in v['source'] or 'r2' in v['source'] for v in service['volumes'])
+    document=yaml.safe_load((root/'deploy/compose.file-lifecycle.yaml').read_text())
+    assert service['networks']==['backend','cold_archive_egress'] and 'cold_archive_egress' in document['networks']
     backup=(root/'services/messaging/Dockerfile').read_text().split('AS backup',1)[1].split('\nCOPY',1)[0]
     # ssh refuses to start for a UID without a passwd entry; compose runs as 10001.
     assert 'openssh-client' in backup and 'useradd -u 10001' in backup and service['user']=='10001:10001'
