@@ -1,3 +1,4 @@
+from contextvars import ContextVar
 from datetime import datetime, timedelta, timezone
 import asyncio
 import logging
@@ -28,6 +29,8 @@ CALENDAR_CONSTRAINTS = {
 
 
 WARNING_WINDOW_DAYS = 7
+# The holder's expiry from this request's final admission; transports read it after `call`.
+admitted = ContextVar("deedkit_admitted_credential", default=None)
 
 
 def utcnow():
@@ -209,6 +212,7 @@ class Dispatch:
             raise Denied("invalid_arguments", 422) from None
         if tool["module"] == "gateway":
             snapshot, agent, visible, states = await self.discover(key)
+            admitted.set(credential := self.credential(agent))
             return {
                 "service": "deedkit",
                 "version": "0.1.0",
@@ -226,7 +230,7 @@ class Dispatch:
                     not CATALOG[n].get("annotations", {}).get("readOnlyHint", False) for n in visible
                 ),
                 "owner_authorization_verified": False,
-                "credential": self.credential(agent),
+                "credential": credential,
                 "capability": Capability("gateway", "capabilities", snapshot["revision"]).to_dict(),
             }
         module = tool["module"]
@@ -269,6 +273,7 @@ class Dispatch:
         current, principal, _ = self.policy.authorize(key, name)
         if current["revision"] != snapshot["revision"] or principal["id"] != agent["id"]:
             raise Denied("policy_changed", 409)
+        admitted.set(self.credential(principal))
         try:
             result = (
                 caps

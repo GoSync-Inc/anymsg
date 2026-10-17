@@ -35,7 +35,9 @@ unchanged, so declared output schemas still hold. REST `/v1/{tool}` responses ca
 `X-DeedKit-Key-Expires: <expires_at>` in the window. `--check` adds `expiring`: the
 principals in the window or already expired, as `id`, `expires_at` and `expired`
 only. The running gateway logs one warning per principal per UTC day in the window.
-Backend keys have their own expiries, enforced and reported by each backend.
+These warnings cover only the gateway principal's key. Each backend enforces its own
+key expiry and reports none of it to the gateway, so the owner checks the backend
+credentials' expiries separately.
 
 To extend a key, the owner writes a new policy file with a later `expires_at` for
 that principal, the same `key_sha256` and credential binding, and a higher

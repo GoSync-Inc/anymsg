@@ -17,13 +17,13 @@ from starlette.responses import JSONResponse
 from platform_contracts.release import ReleaseRuntime
 
 from .catalog import CATALOG, public
-from .dispatch import Dispatch
+from .dispatch import Dispatch, admitted
 from .http_clients import Clients
 from .policy import Denied, Policy
 from .release import messaging_dial_url
 
 current_key = ContextVar("deedkit_key", default="")
-# The authenticated holder's own expiry, taken at the boundary's admission check.
+# The holder's own expiry at the boundary's admission check; a later admission wins.
 current_credential = ContextVar("deedkit_credential", default=None)
 HEADERS = {"Cache-Control": "no-store", "Referrer-Policy": "no-referrer", "X-Content-Type-Options": "nosniff"}
 NORMAL_BODY_LIMIT = 65536
@@ -121,17 +121,19 @@ def create_app(policy_path, public_url, *, transports=None):
         )
 
     async def call_tool(context, params):
+        token = admitted.set(None)
         try:
             result = await dispatch.call(current_key.get(), params.name, params.arguments or {})
             content = [TextContent(type="text", text=json.dumps(result, ensure_ascii=False))]
-            notice = expiry_notice(current_credential.get())
+            credential = admitted.get()
+            notice = expiry_notice(credential)
             if not notice:
                 return CallToolResult(content=content, structuredContent=result)
             # structuredContent stays exactly the declared outputSchema shape.
             return CallToolResult(
                 content=[*content, TextContent(type="text", text=notice)],
                 structuredContent=result,
-                _meta={"deedkit.credential": current_credential.get()},
+                _meta={"deedkit.credential": credential},
             )
         except Denied as error:
             result = getattr(error, "detail", {"error": error.code})
@@ -140,6 +142,8 @@ def create_app(policy_path, public_url, *, transports=None):
                 structuredContent=result,
                 isError=True,
             )
+        finally:
+            admitted.reset(token)
 
     server = Server(
         "DeedKit",
@@ -186,16 +190,22 @@ def create_app(policy_path, public_url, *, transports=None):
 
     @app.post("/v1/{name}")
     async def rest(name: str, request: Request):
-        headers = expiry_headers(current_credential.get())
+        token = admitted.set(None)
+
+        def headers():
+            return expiry_headers(admitted.get() or current_credential.get())
+
         try:
             value = await request.json()
             result = await dispatch.call(current_key.get(), name, value)
-            return JSONResponse(result, headers=headers)
+            return JSONResponse(result, headers=headers())
         except Denied as error:
             return JSONResponse(getattr(error, "detail", {"error": error.code}), status_code=error.status,
-                                headers=headers)
+                                headers=headers())
         except ValueError:
-            return JSONResponse({"error": "invalid_arguments"}, status_code=422, headers=headers)
+            return JSONResponse({"error": "invalid_arguments"}, status_code=422, headers=headers())
+        finally:
+            admitted.reset(token)
 
     @app.get("/v1/files/{ticket}")
     async def download(ticket: str, request: Request):
@@ -210,7 +220,7 @@ def create_app(policy_path, public_url, *, transports=None):
             if scope["type"] != "http":
                 return await app(scope, receive, send)
             request = Request(scope)
-            response_started = False
+            response_started, credential = False, None
 
             async def protected_send(event):
                 nonlocal response_started
@@ -232,7 +242,7 @@ def create_app(policy_path, public_url, *, transports=None):
                     raise Denied("invalid_origin", 403)
                 if request.url.path == "/healthz" and request.method == "GET":
                     return await app(scope, receive, protected_send)
-                key, credential = "", None
+                key = ""
                 if not request.url.path.startswith("/v1/files/"):
                     auth = request.headers.get("authorization", "")
                     if len(request.headers.getlist("authorization")) != 1 or not auth.startswith("Bearer "):
@@ -303,7 +313,9 @@ def create_app(policy_path, public_url, *, transports=None):
                     # A streaming response must terminate on revocation, never
                     # write a second response or a successful final body.
                     raise RuntimeError("stream_access_revoked") from None
-                await JSONResponse({"error": error.code}, status_code=error.status)(
+                rest_route = request.url.path.startswith("/v1/") and not request.url.path.startswith("/v1/files/")
+                await JSONResponse({"error": error.code}, status_code=error.status,
+                                   headers=expiry_headers(credential) if rest_route else None)(
                     scope, receive, protected_send
                 )
 

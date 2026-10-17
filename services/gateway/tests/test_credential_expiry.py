@@ -227,3 +227,78 @@ def test_expired_key_gets_existing_unauthorized(tmp_path, monkeypatch):
     assert rest.status_code == mcp.status_code == 401
     assert rest.json() == mcp.json() == {"error": "unauthorized"}
     assert "X-DeedKit-Key-Expires" not in rest.headers
+
+
+@pytest.mark.parametrize("before,after", [(6, 30), (30, 6)])
+def test_warning_follows_final_admission_after_policy_reload(tmp_path, frozen, before, after):
+    app, path = gateway(tmp_path, stamp(NOW + timedelta(days=before)))
+    held, original = app.state.policy, app.state.policy.authenticate
+    revision = {"value": 1, "armed": False}
+
+    def write(days):
+        revision["value"] += 1
+        value = json.loads(path.read_text())
+        value["revision"] = revision["value"]
+        value["principals"][0]["expires_at"] = stamp(NOW + timedelta(days=days))
+        path.write_text(json.dumps(value))
+
+    def authenticate(key):
+        # The boundary admits under `before`; the policy changes to `after` before dispatch reads it.
+        result = original(key)
+        if revision["armed"]:
+            revision["armed"] = False
+            write(after)
+        return result
+
+    def request(send):
+        write(before)
+        revision["armed"] = True
+        return send()
+
+    held.authenticate = authenticate
+    warned = after < 7
+    with TestClient(app) as client:
+        rest = request(lambda: client.post("/v1/messages_search", json={"query": "synthetic"}, headers=HEADERS))
+        result = request(lambda: search(client))["result"]
+        capabilities = request(lambda: rpc(
+            client, "tools/call", {"name": "platform_capabilities", "arguments": {}}).json())["result"]
+    assert rest.status_code == 200 and rest.json() == SEARCH
+    assert ("X-DeedKit-Key-Expires" in rest.headers) is warned
+    assert not result["isError"] and result["structuredContent"] == SEARCH
+    assert (len(result["content"]) == 2) is warned and ("_meta" in result) is warned
+    credential = capabilities["structuredContent"]["credential"]
+    assert credential["expiry_warning"] is warned
+    assert credential["expires_at"] == stamp(NOW + timedelta(days=after))
+    assert (capabilities.get("_meta", {}).get("deedkit.credential") == credential) is warned
+
+
+def test_rest_boundary_errors_carry_header(tmp_path, frozen):
+    expires_at = stamp(NOW + timedelta(days=6))
+    app, _ = gateway(tmp_path, expires_at)
+    big = {"query": "x" * 70000}
+    with TestClient(app) as client:
+        oversized = client.post("/v1/messages_search", json=big, headers=HEADERS)
+        unauthenticated = client.post("/v1/messages_search", json={}, headers={"Authorization": "Bearer other"})
+        mcp = client.post("/mcp", json={"jsonrpc": "2.0", "id": 1, "method": "tools/call", "params": big},
+                          headers={**HEADERS, "Accept": "application/json, text/event-stream"})
+    assert oversized.status_code == 413 and oversized.headers["X-DeedKit-Key-Expires"] == expires_at
+    assert unauthenticated.status_code == 401 and "X-DeedKit-Key-Expires" not in unauthenticated.headers
+    assert mcp.status_code == 413 and "X-DeedKit-Key-Expires" not in mcp.headers
+
+
+def test_credential_is_the_calling_principals_own(tmp_path, frozen):
+    app, path = gateway(tmp_path, stamp(NOW + timedelta(days=30)))
+    value = json.loads(path.read_text())
+    other = dict(value["principals"][0], id="agent-b", key_sha256=hashlib.sha256(b"gateway-b").hexdigest(),
+                 expires_at=stamp(NOW + timedelta(days=2)))
+    value["principals"].append(other)
+    value["revision"] = 2
+    path.write_text(json.dumps(value))
+    with TestClient(app) as client:
+        a = client.post("/v1/platform_capabilities", json={}, headers=HEADERS)
+        b = client.post("/v1/platform_capabilities", json={}, headers={"Authorization": "Bearer gateway-b"})
+    assert a.json()["credential"]["expires_at"] == stamp(NOW + timedelta(days=30))
+    assert "X-DeedKit-Key-Expires" not in a.headers and "agent-b" not in a.text
+    assert b.json()["credential"]["expires_at"] == stamp(NOW + timedelta(days=2))
+    assert b.headers["X-DeedKit-Key-Expires"] == stamp(NOW + timedelta(days=2))
+    assert stamp(NOW + timedelta(days=30)) not in b.text
