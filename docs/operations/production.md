@@ -37,12 +37,13 @@ the group commit; queue a fork's pull request only after reviewing its workflow
 changes (TIDEN-CI.md).
 
 A merge through the queue is asynchronous. Once its checks pass, queue the pull
-request with **Merge when ready** or with the GraphQL `enqueuePullRequest`
-mutation, setting `expectedHeadOid` to the reviewed head SHA. It reaches `main`
-only after its group passes; a failed group drops it from the queue unmerged.
-While repository auto-merge is disabled, `gh pr merge` cannot queue a pull
-request: it calls `enablePullRequestAutoMerge` and fails with "Auto merge is not
-allowed" (cli/cli#13398).
+request with `gh pr merge <n> --squash --auto` (repository auto-merge is on),
+**Merge when ready**, or the GraphQL `enqueuePullRequest` mutation with
+`expectedHeadOid` set to the reviewed head SHA. It reaches `main` only after its
+group passes; a failed group drops it from the queue unmerged. If repository
+auto-merge is ever disabled, `gh pr merge` cannot queue a pull request: it calls
+`enablePullRequestAutoMerge` and fails with "Auto merge is not allowed"
+(cli/cli#13398).
 
 `main` is protected by the ruleset `deploy/main-ruleset.json` (live as ruleset
 25274451, with the merge queue); classic branch protection has been removed
