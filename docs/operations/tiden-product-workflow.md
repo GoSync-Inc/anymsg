@@ -104,7 +104,7 @@ starting it.
    refactor and research are accepted by the orchestrator once Astra and Fable
    both approve with no open findings, necessity check included. The orchestrator
    brings such a card to the owner when the reviewers disagree, it changes
-   product behavior or an escalation condition in `AGENTS.md` applies. Record who
+   product behavior beyond restoring the contract or an escalation condition in `AGENTS.md` applies. Record who
    accepted on the card.
 5. **Queue.** Accepted cards with a lane and expected paths form the ready queue.
    A wave takes current breakages (defects, unresolved production incidents) and
@@ -130,12 +130,12 @@ Priority: High | Medium | Low (Tiden's priority field)
 Commitment: committed | conditional | needs a triage decision
 Boundary: <what is already implemented; what remains>
 Evidence to close: <tests and checks; any separately authorized live action>
-Value: <1|2|3|5|8>   Effort: <1|2|3|5|8>   Score: <Value / Effort, two decimals>
+Value: <1|2|3|5|8>   Effort: <1|2|3|5|8; 13 only before the split>   Score: <Value / Effort, two decimals>
 History: <DK-* identity, related specs, source/PR links, as-of SHA>
 How others solve it: <concrete open-source projects or standards; adopt | adapt | build, and why>
 Research: <large items only, by the research rule in AGENTS.md>
 Accepted: <date>, <owner | orchestrator | orchestrator relaying the owner>
-Actual: <time from start to merge; recorded when the work merges>
+Actual: <hours from start to merge; recorded when the work merges>
 ```
 
 Category: defect = current behavior breaks a contract or spec; feature = a new
