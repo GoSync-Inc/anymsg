@@ -392,8 +392,8 @@ def build_image(source, sha, target, *, check=False):
             command = ["docker", "build", "--label", "org.opencontainers.image.revision=" + sha,
                        "--label", "org.opencontainers.image.source=https://github.com/" + REPOSITORY,
                        "--label", "io.deedkit.production.build=" + recipe]
-            for name, value in arguments.items():
-                command += ["--build-arg", f"{name}={value}"]
+            for argument, value in arguments.items():
+                command += ["--build-arg", f"{argument}={value}"]
             command += ["--tag", tag, "--file", str(source / dockerfile)] + (["--target", stage] if stage else [])
             run(command + [str(source / context)])
             image = run(["docker", "image", "inspect", "--format", "{{.Id}}", tag]).strip()

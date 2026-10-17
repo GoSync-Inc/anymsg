@@ -198,9 +198,10 @@ older tool without that digest, or a messaging image without
 `DEEDKIT_SOURCE_SHA`, preparation refuses and changes no tag. Removing such a
 stale tag is a separate operator step, taken only after `docker ps --all` shows
 that no container uses its image. Lookups and builds take
-`/var/lib/deedkit-production/image-build.lock`, so two preparations on the host,
-from either tool or any state directory, never build the same tag at once; the
-second is refused. `check-image` builds the working tree under
+`/var/lib/deedkit-production/image-build.lock`, so two preparations on a host set
+up by this guide, from either tool or any state directory, never build the same
+tag at once; the second is refused. Without that directory, for example on a CI
+runner, no image lock is taken. `check-image` builds the working tree under
 `deedkit-check-<target>:<sha>`, always fresh, and never reuses or touches a
 production tag.
 
