@@ -1,8 +1,9 @@
 # Reviewed docs-only documents (ANYM-323, scripts/docs_only.py). A pull request run whose every changed path is
-# one of these exact repository paths, and whose scan finds no consumer, skips the test jobs. Add an entry only
-# after a review finds that no test, script, packaging file, Dockerfile or workflow reads it, directly or through a
-# composed path such as ROOT / "docs" / "guide.md". README.md, SETUP.md, THIRD_PARTY_NOTICES.md and licenses are
-# never listed. TIDEN-CI.md and docs/operations/production.md are left out because workflows name them.
+# one of these exact repository paths, and whose scan of every tracked non-Markdown file finds no consumer, skips
+# the test jobs. Add an entry only after a review finds that no test, script, packaging file, Dockerfile or workflow
+# of any module reads it, directly or through a composed path such as ROOT / "docs" / "guide.md". README.md,
+# SETUP.md, THIRD_PARTY_NOTICES.md and licenses are never listed. TIDEN-CI.md and docs/operations/production.md are
+# left out because workflows name them, CODEX_ENRICHMENT.md because a messaging module docstring names it.
 .claude/rules/deploy.md
 .claude/rules/migrations.md
 .claude/rules/tests.md
@@ -15,7 +16,6 @@ BACKUP.md
 BACKUP_R2.md
 BACKUP_STREAMING.md
 CLAUDE.md
-CODEX_ENRICHMENT.md
 COLLECTORS.md
 COLLECTOR_STATES.md
 CONTRIBUTING.md

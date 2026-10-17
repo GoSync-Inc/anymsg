@@ -2,18 +2,21 @@
 """Decide whether a pull request run changes only reviewed documentation that nothing reads (ANYM-323).
 
 Such a run skips the test jobs; every other run, and any doubt, verifies in full. A path qualifies only when it is
-named exactly in the reviewed list `.github/docs-only-paths.txt`. As a regression guard, not a proof, the tested
-merge commit's tests, scripts, packaging files, Dockerfiles and workflows are also scanned, outside comments, for
-the changed path, its file name, and any directory or glob read of Markdown.
+named exactly in the reviewed list `.github/docs-only-paths.txt`. As a regression guard, not a proof, every other
+tracked file of the tested merge commit (the tests, scripts, packaging files, Dockerfiles and workflows of every
+module, and anything else) is also scanned, outside unambiguous comments, for the changed path, its file name, and
+any directory or glob read of Markdown.
 """
 from __future__ import annotations
 
+import io
 import json
 import os
 from pathlib import Path, PurePosixPath
 import re
 import subprocess
 import sys
+import tokenize
 
 LIST = ".github/docs-only-paths.txt"
 EXCLUSIONS = "## scan exclusions"
@@ -21,11 +24,16 @@ ROOTS = ("docs/", ".claude/")
 # Shipped in packages and images, or legal texts: never docs-only, whatever the list says.
 NEVER = {"README.md", "SETUP.md", "THIRD_PARTY_NOTICES.md"}
 INTENT_LINE = re.compile(r"Tiden intent branch:", re.IGNORECASE)
-PACKAGING = {"pyproject.toml", "package.json", "hatch_build.py", ".dockerignore"}
-# A directory or glob read that could pick up Markdown: a listing call or an include pattern naming it.
-LISTING = re.compile(r"\b(?:r?glob|iterdir|walk|scandir|listdir|find|ls|include|exclude|only-include|files)\b")
+# A directory or glob read that could pick up Markdown: a listing call, an include pattern or a Docker copy that
+# names it within WINDOW lines, so a call or a list split across lines still counts.
+LISTING = re.compile(r"\b(?:r?glob|iterdir|walk|scandir|listdir|find|ls|include|exclude|only-include|files|COPY|ADD)\b")
 MARKDOWN = re.compile(r"\*\.md\b|(?<![\w-])docs(?![\w-])|\.claude\b")
-COMMENT = {"#": re.compile(r"(?:^|\s)#.*$"), "//": re.compile(r"(?:^|\s)//.*$")}
+WINDOW = 3
+# Only whole-line comments are dropped, except in Python, whose tokenizer separates comments from strings; a
+# comment marker inside a string or after code never hides that code.
+LINE_COMMENT = {"#": (".yml", ".yaml", ".toml", ".sh", ".bash", ".cfg", ".ini", ".conf", ".dockerignore", ".gitignore"),
+                "//": (".js", ".mjs", ".cjs", ".ts", ".go")}
+MAX_SCANNED_BYTES = 8 * 1024 * 1024
 DOCUMENT = 0o100644
 
 
@@ -38,7 +46,7 @@ def read_list(root: Path) -> tuple[set[str], dict[str, str]]:
     documents: set[str] = set()
     exclusions: dict[str, str] = {}
     section: set[str] | dict[str, str] = documents
-    for raw in (root / LIST).read_text().splitlines():
+    for raw in (root / LIST).read_text(encoding="utf-8").splitlines():
         line = raw.strip()
         if line == EXCLUSIONS:
             section = exclusions
@@ -62,34 +70,51 @@ def listable(path: str) -> bool:
 
 
 def scan_inputs(root: Path) -> list[str]:
-    """Tests, scripts, packaging files, Dockerfiles, .dockerignore files and workflows at the tested commit."""
+    """Every tracked file of the tested commit that is not Markdown: the tests, scripts, packaging files,
+    Dockerfiles and workflows of every module, and anything else that could read a document."""
     files = git(root, "ls-files", "-z").split("\0")
-    return sorted(path for path in files if path and not path.endswith(".md") and (
-        path.startswith(("tests/", "scripts/", ".github/workflows/")) or PurePosixPath(path).name in PACKAGING
-        or PurePosixPath(path).name.startswith("Dockerfile")))
+    return sorted(path for path in files if path and not path.endswith(".md") and path != LIST)
 
 
-def code_lines(root: Path, path: str):
-    """The scanned file's lines with comments removed, as (line number, text)."""
-    marker = "//" if path.endswith((".js", ".mjs", ".cjs", ".ts")) else None if path.endswith(".json") else "#"
+def without_python_comments(text: str) -> list[str]:
+    lines = text.splitlines()
     try:
-        text = (root / path).read_text(errors="replace")
+        comments = [token for token in tokenize.generate_tokens(io.StringIO(text).readline)
+                    if token.type == tokenize.COMMENT]
+    except (tokenize.TokenError, SyntaxError):
+        return lines  # unparsable: every comment is kept, so nothing is hidden
+    for token in reversed(comments):
+        (row, start), (_, end) = token.start, token.end
+        lines[row - 1] = lines[row - 1][:start] + lines[row - 1][end:]
+    return lines
+
+
+def code_lines(root: Path, path: str) -> list[str]:
+    """The scanned file's lines with only unambiguous comments removed."""
+    try:
+        text = (root / path).read_bytes()[:MAX_SCANNED_BYTES].decode("utf-8", errors="replace")
     except OSError:
-        return
-    for number, line in enumerate(text.splitlines(), 1):
-        yield number, COMMENT[marker].sub("", line) if marker else line
+        return []
+    if path.endswith(".py"):
+        return without_python_comments(text)
+    name = PurePosixPath(path).name
+    marker = "#" if name.startswith("Dockerfile") else next(
+        (marker for marker, kinds in LINE_COMMENT.items() if name.endswith(kinds)), None)
+    return ["" if marker and line.lstrip().startswith(marker) else line for line in text.splitlines()]
 
 
 def consumers(root: Path, changed: list[str], exclusions: dict[str, str]) -> list[str]:
-    """Where scanned code names a changed document or reads Markdown by directory or glob."""
+    """Where scanned files name a changed document or read Markdown by directory or glob."""
     names = [re.compile(r"(?<![\w.-])" + re.escape(value) + r"(?![\w-])")
              for value in {*changed, *(PurePosixPath(path).name for path in changed)}]
     hits = []
     for path in scan_inputs(root):
         if path in exclusions:
             continue
-        for number, line in code_lines(root, path):
-            if any(name.search(line) for name in names) or (LISTING.search(line) and MARKDOWN.search(line)):
+        lines = code_lines(root, path)
+        for number, line in enumerate(lines, 1):
+            nearby = "\n".join(lines[max(0, number - 1 - WINDOW):number + WINDOW])
+            if any(name.search(line) for name in names) or (LISTING.search(line) and MARKDOWN.search(nearby)):
                 hits.append(f"{path}:{number}")
     return hits
 
@@ -133,7 +158,7 @@ def main() -> int:
     root = Path.cwd()
     event = os.environ.get("EVENT_NAME", "")
     try:
-        payload = json.loads(Path(os.environ["GITHUB_EVENT_PATH"]).read_text())
+        payload = json.loads(Path(os.environ["GITHUB_EVENT_PATH"]).read_text(encoding="utf-8"))
         body = (payload.get("pull_request") or {}).get("body") or ""
         docs_only, reason = decide(root, event, os.environ.get("HEAD_SHA", ""), body if isinstance(body, str) else "")
     except Exception as exc:  # any doubt means full verification, never a failed run

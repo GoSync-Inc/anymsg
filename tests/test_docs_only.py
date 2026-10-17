@@ -104,7 +104,19 @@ def test_anything_but_listed_unread_documents_verifies_in_full(tmp_path, change,
     ({"services/x/Dockerfile": "FROM scratch\nCOPY docs/guide.md /app/\n"}, "services/x/Dockerfile:2"),
     ({".github/workflows/x.yml": "jobs:\n  x:\n    run: cat NOTES.md\n"}, ".github/workflows/x.yml:3"),
     ({"packages/x/package.json": '{"files": ["docs/guide.md"]}\n'}, "packages/x/package.json:1"),
-], ids=["glob", "docs-directory", "composed-path", "packaging-include", "dockerfile", "workflow", "package-files"])
+    ({"services/x/tests/test_doc.py": 'TEXT = open("docs/guide.md").read()\n'}, "services/x/tests/test_doc.py:1"),
+    ({"whatsapp/tests/doc.test.mjs": 'import fs from "node:fs";\nfs.readFileSync("NOTES.md");\n'},
+     "whatsapp/tests/doc.test.mjs:2"),
+    ({"scripts/hash.py": 'prefix = " # "; text = open("docs/guide.md").read()\n'}, "scripts/hash.py:1"),
+    ({"scripts/slash.mjs": 'const prefix = " // "; const text = read("NOTES.md");\n'}, "scripts/slash.mjs:1"),
+    ({"scripts/split.py": 'import pathlib\nfiles = pathlib.Path(".").rglob(\n    "*.md"\n)\n'}, "scripts/split.py:2"),
+    ({"packages/y/package.json": '{\n  "files": [\n    "docs"\n  ]\n}\n'}, "packages/y/package.json:2"),
+    ({"services/y/Dockerfile": "FROM scratch\nCOPY docs/ /app/docs/\n"}, "services/y/Dockerfile:2"),
+    ({"deploy/config.json": '{"guide": "docs/guide.md"}\n'}, "deploy/config.json:1"),
+    ({"scripts/broken.py": 'TEXT = open("docs/guide.md"  # unterminated\n'}, "scripts/broken.py:1"),
+], ids=["glob", "docs-directory", "composed-path", "packaging-include", "dockerfile", "workflow", "package-files",
+        "module-test", "module-node-test", "hash-in-a-string", "slashes-in-a-string", "split-glob-call",
+        "split-json-files-list", "docker-directory-copy", "other-file-type", "unparsable-python-keeps-comments"])
 def test_a_consumer_found_by_the_scan_means_full_verification(tmp_path, code, hit):
     docs_only_run, why = decide(tmp_path, edit("docs/guide.md", "NOTES.md"), code=code)
     assert docs_only_run is False and why == "scanned code may read a changed document: " + hit
