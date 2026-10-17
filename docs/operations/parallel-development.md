@@ -22,9 +22,9 @@ under Review levels in [AGENTS.md](../../AGENTS.md). Do not restate those rules 
 
 ## Unit of work
 
-A story is **ready** when its Tiden record has the fields the Tiden workflow
-requires (acceptance criteria, dependencies, priority, evidence to close) plus its
-**lane** and expected paths. Stories that are not ready go back to the owner. A
+A story is **ready** when its Tiden card was accepted through the card intake in
+the Tiden workflow and has the template's fields, including its Score, **lane**
+and expected paths. Stories that are not ready go back to the owner. A
 change that takes `tiden intent skip` has no story; its brief names the goal and
 paths instead.
 
@@ -96,8 +96,10 @@ at least important (`AGENTS.md`). Prefer splitting it.
 - Who merges follows the review level in `AGENTS.md`; a worker also waits for the
   orchestrator's "ok" (Worker protocol). Enqueueing a pull request is merging it.
   Never bypass required checks or use administrator merges.
-- Merging the Git pull request never merges its Tiden branch. That branch merges
-  separately, under the same review level and conditions.
+- Merging the Git pull request never merges its Tiden branch. Merge both in the
+  same step, under the same review level and conditions: check the Tiden merge
+  preview before merging and read back Tiden main after it, so nothing of the
+  change is left unmerged.
 
 ## Schema compatibility
 
@@ -137,7 +139,8 @@ at least important (`AGENTS.md`). Prefer splitting it.
 
 ## Orchestrator loop
 
-1. Read Tiden main and open proposal branches; list ready stories by priority.
+1. Read Tiden main and open proposal branches; list ready stories by Score,
+   current breakages and hard deadlines first.
 2. List open pull requests and intent branches; compute busy lanes.
 3. Dispatch every story whose paths fit a free lane; there is no fixed number of
    workers. The real limits are file overlap (lanes), the GitHub CI queue and the
@@ -186,7 +189,7 @@ work; the orchestrator picks them for each worker:
 | Orchestrator | Opus, high |
 | Code and CI | Opus, high; xhigh only for an autonomous task longer than about 30 minutes |
 | Security, unclear root cause | Opus, xhigh, or Fable, high |
-| Tiden specs and backlog | Opus, medium |
+| Tiden specs and backlog | Opus, high, or Fable, high |
 | Documents and settings | Sonnet, medium |
 | Code exploration | Haiku or Sonnet, low |
 

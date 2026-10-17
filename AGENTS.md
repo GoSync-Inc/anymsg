@@ -69,31 +69,53 @@ comments, including that code's documentation, and when a product contract
 document (SENDING.md, ACCESS.md, SEARCH.md and the like) changes meaning, because
 its spec changes with it.
 
-Backlog and specs are reviewed too, on top of the level's reviews. A new proposal
-branch or spec edit needs Fable: clear, testable acceptance criteria, no
-duplicates, right component, priority and dependencies. A bulk backlog import or
-restructuring needs Astra and Fable. Without a code PR, a spec edit in Tiden is
-normal, and Fable's review is enough for it; a bulk restructuring is important.
-Signals and the owner row raise either, as for a PR, and the agent merges under
-the conditions below. A proposal branch for future requirements stays open until
-implemented instead of merging to register it
-(docs/operations/tiden-product-workflow.md). Deleting or moving cards is the
-owner's. Research before building: every new card gets, when created, a short
-note sized to the task on how others solve it. For a new module or component, an
-infrastructure mechanism, an external integration or more than ~300 new lines, the
-card holds the main research (30–60 min: open source, standards, built-ins of
-Docker, Caddy, Postgres or GitHub; decision adopt, adapt or build), Fable reviews
-it, and the executor re-checks it for freshness (10–15 min) before starting.
+Spec impact. Every pull request that changes code or a contract document lists
+under `Spec impact:` in its description every spec anchored to its changed files
+and every spec in the session delta of `tiden intent progress`, built as the Tiden
+workflow describes: one line per spec, `ANYM-n: updated` or
+`ANYM-n: no behavior change — <reason>`. The list is a floor: also name a spec
+whose behavior changed without an anchor match, and add anchors for new files to
+the specs they implement; without a local CLI, say so under `Spec impact:`. A skip
+is invalid when it changes code beyond comments in a file anchored to a spec.
+Reviewers receive the current text of every listed spec, not only the
+promised ones, and check each disposition; "no behavior change" on a spec whose
+criteria the diff changes is a finding. Before `tiden intent close`, every
+session-delta spec has a disposition in that list; a passing linked test does not
+make spec text current. Merge the Tiden branch in the same step as the Git PR:
+check `tiden branch merge-preview` before merging and read back Tiden main after
+it, so nothing of the change is left unmerged, and set a card to its delivered
+status when its code merges.
+
+Backlog and specs are reviewed too, on top of the level's reviews. Cards enter
+Tiden through the card intake in docs/operations/tiden-product-workflow.md.
+Opus or Fable at high effort writes every new card and spec text. Astra and Fable
+both review every new card and every spec edit, single or bulk: Fable for clear,
+testable acceptance criteria, no duplicates, right component, priority,
+dependencies and score; Astra for whether the problem and criteria match the code,
+edge cases, security and the research note. Only the owner, or the orchestrator
+relaying the owner, accepts a card into the ready queue. Without a code PR, a spec
+edit in Tiden is normal and a bulk restructuring is important. Signals and the
+owner row raise either, as for a PR, and the agent merges under the conditions
+below. A proposal branch for future requirements stays open until implemented
+instead of merging to register it (docs/operations/tiden-product-workflow.md).
+Deleting or moving cards is the owner's. Research before building: every new card
+gets, when created, a short note sized to the task on how others solve it. For a
+new module or component, an infrastructure mechanism, an external integration or
+more than ~300 new lines, the card holds the main research (30–60 min: open
+source, standards, built-ins of Docker, Caddy, Postgres or GitHub; decision adopt,
+adapt or build), reviewed with the card, and the executor re-checks it for
+freshness (10–15 min) before starting.
 
 Order: code and local tests; push and open the PR, which starts CI; reviews in
 parallel with CI, once on the ready PR; fixes, rechecked by the same reviewer on
-the fix diff only; settle, with Fable reviewing any spec text it wrote;
+the fix diff only; settle, with Astra and Fable reviewing any spec text it wrote;
 `tiden intent progress`, `tiden intent close`; merge.
 Reviewers get the intent goal and promises (the task goal for a skip), the current
-text of the affected Tiden specs with acceptance criteria, the diff and the PR
-description. They have no Tiden access, so specs go to them as a file. Fable
-checks conformance to specs and promises, scenarios and data integrity; Astra
-checks correctness, security and edge cases. Run Astra as
+text with acceptance criteria of the promised specs and of every spec under
+`Spec impact:`, the diff and the PR description. They have no Tiden access, so
+specs go to them as a file. Fable checks conformance to specs and promises,
+scenarios and data integrity; Astra checks correctness, security and edge cases.
+Run Astra as
 `codex exec -m gpt-6-astra "<task with the spec file and commit range>" </dev/null`,
 because `review --base` does not accept its own task; without `</dev/null` it hangs
 on stdin from a background shell. Run Fable as a Claude subagent with
