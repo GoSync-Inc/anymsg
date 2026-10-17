@@ -32,9 +32,12 @@ every successful MCP `tools/call` result gets one extra text item, "DeedKit gate
 key expires at <ts> (in N days). Ask the owner to extend it.", and the same fields
 under `_meta["deedkit.credential"]`; `structuredContent` and the first text item are
 unchanged, so declared output schemas still hold. REST `/v1/{tool}` responses carry
-`X-DeedKit-Key-Expires: <expires_at>` in the window. `--check` adds `expiring`: the
+`X-DeedKit-Key-Expires: <expires_at>` in the window, errors after authentication
+included; a `401` never does. All of these follow the request's latest authentication,
+so a policy replaced mid-request cannot contradict them. `--check` adds `expiring`: the
 principals in the window or already expired, as `id`, `expires_at` and `expired`
-only. The running gateway logs one warning per principal per UTC day in the window.
+only. In the window, a principal's first request each UTC day logs one warning per
+gateway process; an idle principal logs nothing, so use `--check` for an overview.
 These warnings cover only the gateway principal's key. Each backend enforces its own
 key expiry and reports none of it to the gateway, so the owner checks the backend
 credentials' expiries separately.

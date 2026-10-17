@@ -29,7 +29,7 @@ CALENDAR_CONSTRAINTS = {
 
 
 WARNING_WINDOW_DAYS = 7
-# The holder's expiry from this request's final admission; transports read it after `call`.
+# The holder's expiry from this request's latest authentication; transports read it after `call`.
 admitted = ContextVar("deedkit_admitted_credential", default=None)
 
 
@@ -204,8 +204,14 @@ class Dispatch:
             "backend_tool_manifests": manifests,
         }
 
+    def admit(self, key, name):
+        """`Policy.authorize`, recording the authenticated holder's expiry before the tool check."""
+        snapshot, agent = self.policy.authenticate(key)
+        admitted.set(self.credential(agent))
+        return self.policy.authorize_agent(snapshot, agent, name)
+
     async def call(self, key, name, values):
-        snapshot, agent, tool = self.policy.authorize(key, name)
+        snapshot, agent, tool = self.admit(key, name)
         try:
             args = arguments(tool, values)
         except ValueError:
@@ -270,10 +276,9 @@ class Dispatch:
         started = datetime.now(timezone.utc).timestamp()
         # Admission is rechecked after all local work; a cached MCP session is
         # never authority. ACK is not retried if its network outcome is unknown.
-        current, principal, _ = self.policy.authorize(key, name)
+        current, principal, _ = self.admit(key, name)
         if current["revision"] != snapshot["revision"] or principal["id"] != agent["id"]:
             raise Denied("policy_changed", 409)
-        admitted.set(self.credential(principal))
         try:
             result = (
                 caps

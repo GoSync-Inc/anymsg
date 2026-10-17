@@ -302,3 +302,50 @@ def test_credential_is_the_calling_principals_own(tmp_path, frozen):
     assert b.json()["credential"]["expires_at"] == stamp(NOW + timedelta(days=2))
     assert b.headers["X-DeedKit-Key-Expires"] == stamp(NOW + timedelta(days=2))
     assert stamp(NOW + timedelta(days=30)) not in b.text
+
+
+def test_key_revoked_during_request_gets_plain_unauthorized(tmp_path, frozen):
+    app, path = gateway(tmp_path, stamp(NOW + timedelta(days=6)))
+    held, original = app.state.policy, app.state.policy.authenticate
+    armed = {"value": True}
+
+    def authenticate(key):
+        # The boundary admits the key; the owner disables it before dispatch reads the policy.
+        result = original(key)
+        if armed["value"]:
+            armed["value"] = False
+            value = json.loads(path.read_text())
+            value["revision"] = 2
+            value["principals"][0]["enabled"] = False
+            path.write_text(json.dumps(value))
+        return result
+
+    held.authenticate = authenticate
+    with TestClient(app) as client:
+        rest = client.post("/v1/messages_search", json={"query": "synthetic"}, headers=HEADERS)
+    assert rest.status_code == 401 and rest.json() == {"error": "unauthorized"}
+    assert "X-DeedKit-Key-Expires" not in rest.headers
+
+
+@pytest.mark.parametrize("before,after", [(6, 30), (30, 6)])
+def test_rest_error_header_follows_latest_authentication(tmp_path, frozen, before, after):
+    app, path = gateway(tmp_path, stamp(NOW + timedelta(days=before)))
+    held, original = app.state.policy, app.state.policy.authenticate
+    armed = {"value": True}
+
+    def authenticate(key):
+        # The boundary admits under `before`; dispatch authenticates under `after`, then rejects the arguments.
+        result = original(key)
+        if armed["value"]:
+            armed["value"] = False
+            value = json.loads(path.read_text())
+            value["revision"] = 2
+            value["principals"][0]["expires_at"] = stamp(NOW + timedelta(days=after))
+            path.write_text(json.dumps(value))
+        return result
+
+    held.authenticate = authenticate
+    with TestClient(app) as client:
+        rest = client.post("/v1/messages_search", json={"limit": "x"}, headers=HEADERS)
+    assert rest.status_code == 422 and rest.json() == {"error": "invalid_arguments"}
+    assert rest.headers.get("X-DeedKit-Key-Expires") == (stamp(NOW + timedelta(days=after)) if after < 7 else None)

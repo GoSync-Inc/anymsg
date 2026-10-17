@@ -200,8 +200,9 @@ def create_app(policy_path, public_url, *, transports=None):
             result = await dispatch.call(current_key.get(), name, value)
             return JSONResponse(result, headers=headers())
         except Denied as error:
+            # A key revoked or expired during the request gets the plain 401.
             return JSONResponse(getattr(error, "detail", {"error": error.code}), status_code=error.status,
-                                headers=headers())
+                                headers=headers() if error.status != 401 else None)
         except ValueError:
             return JSONResponse({"error": "invalid_arguments"}, status_code=422, headers=headers())
         finally:
