@@ -1,4 +1,6 @@
 # Config for the DCO GitHub App (https://github.com/apps/dco).
-# Commits by organization members are not checked; outside contributors must sign off.
+# Commits authored and signed by organization members are not checked (the app's
+# wording: "signed", i.e. GitHub-verified signatures); unverified commits need a
+# Signed-off-by line. Outside contributors must always sign off.
 require:
   members: false

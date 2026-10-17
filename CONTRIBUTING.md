@@ -36,7 +36,8 @@ test DSN. Some OCR tests need `pdftotext` and Tesseract; audio tests explicitly 
 when native prerequisites are absent. CI installs those tools. Never use production
 credentials in tests. The services under `services/` and `whatsapp/whatsmeow` have
 their own test commands; the full list CI runs is in
-[`.github/workflows/checks.yml`](.github/workflows/checks.yml).
+[`checks.yml`](.github/workflows/checks.yml) and
+[`whatsmeow.yml`](.github/workflows/whatsmeow.yml).
 
 Keep applied SQL migrations unchanged. Add a new migration for schema changes,
 update backup table inventory/restore ceilings and check roles/ACL and repeat migration.
@@ -73,6 +74,6 @@ git push --force-with-lease
    approve the first run.
 2. The DCO check verifies the sign-off on every commit.
 3. A maintainer reviews the change and may ask for edits.
-4. The project owner merges once checks and review are green.
+4. A maintainer merges once the required checks and review are green.
 
 Maintainers handle the project's internal tracking; you do not need a Tiden account.
