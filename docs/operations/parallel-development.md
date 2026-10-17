@@ -77,24 +77,20 @@ at least important (`AGENTS.md`). Prefer splitting it.
 
 ## Merging
 
-- **Merge queue: not applied yet.** CI already runs the required checks on the
-  `merge_group` event, and a queue run publishes nothing to Tiden
-  ([TIDEN-CI.md](../../TIDEN-CI.md)). As of 2026-10-16 the repository has no
-  ruleset: `main` keeps the classic protection in `deploy/main-protection.json`,
-  with strict up-to-date branches. Moving `main` to a ruleset with the merge queue
-  changes branch protection, so it is an owner-level change in the `release-infra`
-  lane, together with `deploy/main-protection.json`. Update this section when it
-  lands.
-- Until then a pull request must be up to date with `main` to merge. Update a
-  branch only when that blocks its merge, to resolve a real conflict or when a
-  review asks for it, never just to stay current. A worker whose branch is behind
-  `main` brings it up to date before "ready to merge", waits for CI and then
-  closes the intent session on its own commit range
-  ([Claude Code guide](claude-code-tiden.md)). If `main`
-  moves again after the "ok", the branch is updated and merged once CI is green;
-  a conflict goes back to the orchestrator. With the queue, each pull request is
-  tested against the latest `main` plus the pull requests ahead of it, and a
-  branch is updated only for a conflict or a review.
+- **Merge queue.** `main` is protected by the ruleset `deploy/main-ruleset.json`
+  (live as ruleset 25274451): squash, `ALLGREEN`, build concurrency 3, one merge at
+  a time, and `CI gate` plus `checks / verify` required. A pull request does not
+  need to be up to date with `main`. The queue tests it against the latest `main`
+  plus the pull requests ahead of it, and CI runs the required checks on
+  `merge_group`; a queue run publishes nothing to Tiden
+  ([TIDEN-CI.md](../../TIDEN-CI.md)).
+- Enqueue with `gh pr merge <n> --squash --auto` (repository auto-merge is on).
+  The merge is asynchronous: confirm it landed, not that the command returned. A
+  failed group check drops the pull request from the queue; fix it and enqueue
+  again. Update a branch only for a real conflict or when a review asks for it,
+  never just to stay current. A worker closes the intent session on its own commit
+  range before "ready to merge" ([Claude Code guide](claude-code-tiden.md)); a
+  conflict after the "ok" goes back to the orchestrator.
 - Merge method: **squash** only; merge commits and rebase merges are disabled in
   the repository settings (2026-10-16). One story becomes one commit on `main`.
 - Who merges follows the review level in `AGENTS.md`; a worker also waits for the
@@ -121,16 +117,17 @@ at least important (`AGENTS.md`). Prefer splitting it.
   never implies a deploy. A release in flight holds merges from prepare to apply,
   because apply checks again that its SHA is the current `main`
   ([production.md](production.md)). The release owner tells the orchestrator
-  before prepare and after apply, and the orchestrator gives no "ok" in between.
+  before prepare and after apply, and the orchestrator gives no "ok" in between;
+  it lets already enqueued pull requests merge or dequeues them before the release
+  SHA is chosen.
 - The release owner promotes the exact current `main` SHA by
   [production.md](production.md), after that SHA's own push run succeeds; never
   an earlier SHA. The readiness decision in the Tiden workflow is recorded for
   that SHA first, and live-session authority exists where the changed service
   requires it.
-- A new `main` push cancels the push run still in progress (`ci.yml`
-  concurrency), so a SHA merged shortly before another gets no `main` result.
-  Until a `release-infra` change stops cancelling `main` runs, wait for the
-  latest SHA's run when merges come quickly.
+- `main` push runs are never cancelled (`ci.yml` concurrency, since PR #60), so
+  every merged SHA keeps a complete result. Promote only a SHA whose own push run
+  succeeded.
 - The release owner keeps one release in flight, from prepare to acceptance. The
   host deployment lock only stops two deployment commands from running at once.
 - Release often; the target is several times a day. Once automatic deployment
@@ -149,7 +146,8 @@ at least important (`AGENTS.md`). Prefer splitting it.
    acceptance criteria, checks to run, the evidence to return and the final result
    its level requires.
 5. Answer workers' questions and check each pull request before its "ok" (Worker
-   protocol).
+   protocol). Read a waiting worker's terminal with `superset terminals read` and
+   give the owner exactly what it asks, so the owner need not open worker terminals.
 6. After merge: confirm the worker's post-merge check, update the story, free the
    lane.
 7. Escalate to the owner: priority conflicts, owner-level pull requests, every
@@ -162,6 +160,12 @@ still reach their final result: merge, post-merge check, archive. The orchestrat
 keeps all its state in a handoff file and updates it after every decision, so a
 compaction or a new session loses nothing. A new orchestrator session first reads
 the handoff file and the list of live sessions.
+
+Questions to the owner use plain names, never internal codes alone. Each states
+what it is, why it matters to the owner, what it costs, the options with their
+consequences and a recommendation. There is no limit on how many are asked; "да на
+всё" accepts every recommendation except an owner-level merge, which still needs
+an explicit "merge <n>".
 
 The orchestrator keeps a log of the owner's decisions: its recommendation, the
 owner's choice and whether they matched, so autonomy grows on facts. At the end
