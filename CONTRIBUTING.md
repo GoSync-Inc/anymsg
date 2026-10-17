@@ -73,7 +73,7 @@ git push --force-with-lease
    workspace (see [TIDEN-CI.md](TIDEN-CI.md)). GitHub may ask a maintainer to
    approve the first run.
 2. The DCO check verifies the sign-off on every commit.
-3. A maintainer reviews the change and may ask for edits.
-4. A maintainer merges once the required checks and review are green.
+3. A maintainer (currently the project owner) reviews the change and may ask for edits.
+4. The same maintainer merges once the required checks and review are green.
 
 Maintainers handle the project's internal tracking; you do not need a Tiden account.
