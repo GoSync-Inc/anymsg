@@ -63,7 +63,8 @@ changed paths of open pull requests (`gh pr diff <n> --name-only`).
 | `messaging-store` | `services/messaging/messaging_service/store.py` | 1 |
 | `telegram-ops` | `services/messaging/messaging_service/telegram_operations.py`, `telegram_collector.py` | 1 |
 | `whatsapp-native` | `whatsapp/whatsmeow/` | 1 |
-| `release-infra` | `deploy/`, `scripts/production.py`, `scripts/seamless_release.py`, `services/release-router/`, `.github/workflows/`, Dockerfiles, lock files | 1 |
+| `ci` | `.github/workflows/`, Dockerfiles, lock files, scripts used only by CI | 1 |
+| `release-host` | `deploy/` (including systemd units and timers), `scripts/production.py`, `scripts/seamless_release.py`, `services/release-router/` | 1 |
 | `process-docs` | `AGENTS.md`, `CLAUDE.md`, `.claude/`, `TIDEN-CI.md`, `BACKLOG.md`, `docs/operations/` | 2, disjoint files |
 | module lanes | `services/calendar/`, `services/calls/`, `services/gateway/`, `packages/`, `whatsapp/` browser collector | 2 each, disjoint files |
 
@@ -72,6 +73,8 @@ parallel edits collide: `create_app` holds every messaging MCP tool, provider
 operations live in one dispatcher per provider, and migration numbers are
 sequential with immutable checksums. Splitting those functions is itself a
 `messaging-mcp` / provider-lane story and would raise the limits afterwards.
+`ci` and `release-host` are separate because CI files affect every pull request,
+while `scripts/production.py` is one large file.
 
 A story that needs two lanes holds both, and several lanes make its review level
 at least important (`AGENTS.md`). Prefer splitting it.
