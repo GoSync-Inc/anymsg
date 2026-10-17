@@ -164,7 +164,7 @@ the handoff file and the list of live sessions.
 Questions to the owner use plain names, never internal codes alone. Each states
 what it is, why it matters to the owner, what it costs, the options with their
 consequences and a recommendation. There is no limit on how many are asked; "да на
-всё" accepts every recommendation except an owner-level merge, which still needs
+всё" ("yes to all") accepts every recommendation except an owner-level merge, which still needs
 an explicit "merge <n>".
 
 The orchestrator keeps a log of the owner's decisions: its recommendation, the
