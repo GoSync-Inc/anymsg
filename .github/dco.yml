@@ -1,0 +1,4 @@
+# Config for the DCO GitHub App (https://github.com/apps/dco).
+# Commits by organization members are not checked; outside contributors must sign off.
+require:
+  members: false
