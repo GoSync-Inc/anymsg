@@ -195,7 +195,7 @@ FIELD_PATH = re.compile(r'[A-Za-z_][A-Za-z0-9_]{0,63}(/[0-9]{1,2})?')
 
 
 def field_error(field, reason, expected=None, allowed=None):
-    if reason not in FIELD_ERROR_REASONS or not FIELD_PATH.fullmatch(field) or len(field) > 128:
+    if reason not in FIELD_ERROR_REASONS or not FIELD_PATH.fullmatch(field):
         raise ValueError('invalid_field_error')
     return {'field': field, 'reason': reason, **({'expected': expected} if expected else {}),
             **({'allowed': list(allowed)} if allowed else {})}
@@ -226,7 +226,7 @@ def parameter_format(platform, kind):
         'attachment_id': 'archive attachment ID att_ plus 32 lowercase hex characters, from message attachments or search_files',
         'upload_id': 'own upload ID up_ plus 32 lowercase hex characters, from prepare_file_upload',
         'sha256': '64 lowercase hex characters: the SHA-256 of the exact original',
-        'phone': 'international number of 5-20 digits with an optional leading +, no spaces or punctuation',
+        'phone': 'international number of 5-20 digits, the first 1-9, with an optional leading +, no spaces or punctuation',
         'file_mode': 'one of ' + ', '.join(_modes(platform)),
         'poll_options': '2-10 unique non-blank strings of at most 100 UTF-16 code units',
         'poll_indices': 'up to 20 unique integers from 0 to 9 (zero-based option positions)',
@@ -286,10 +286,6 @@ def _problem(platform, descriptor, value, field):
     return fail('type')
 
 
-def _valid(platform, descriptor, value):
-    return _problem(platform, descriptor, value, 'value') is None
-
-
 def validate_operation(platform, operation, parameters, *, provider=None):
     spec = operation_spec(operation)
     if not _supported(platform, operation, spec, provider): raise ValueError('unsupported_operation')
@@ -310,7 +306,7 @@ def validate_operation(platform, operation, parameters, *, provider=None):
             if problem: errors.extend(problem)
             else: output[name] = value
         # Only a bounded identifier name is returned; the submitted value never is.
-        allowed = 'only ' + (', '.join(fields) or 'no parameters')
+        allowed = 'only ' + ', '.join(fields) if fields else 'no parameters'
         for name in parameters:
             if name not in fields:
                 errors.append(field_error(name if FIELD_NAME.fullmatch(str(name)) else 'parameters', 'unknown_field', allowed))

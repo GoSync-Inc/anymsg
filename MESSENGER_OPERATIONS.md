@@ -139,7 +139,7 @@ persisted parameters do not change.
 | `attachment_id` | `att_` plus 32 lowercase hex characters (archive attachment ID) |
 | `upload_id` | `up_` plus 32 lowercase hex characters, from `prepare_file_upload` |
 | `sha256` | 64 lowercase hex characters, the SHA-256 of the exact original |
-| `phone` | 5–20 digits with an optional leading `+`, no spaces or punctuation |
+| `phone` | 5–20 digits, the first 1–9, with an optional leading `+`, no spaces or punctuation |
 | `file_mode` | `document`, `photo`, `video`, `audio`, `voice`, plus `video_note` (Telegram) or `sticker` (WhatsApp) |
 | `poll_options` | 2–10 unique non-blank strings of at most 100 UTF-16 code units |
 | `poll_indices` | Up to 20 unique integers from 0 to 9 |
@@ -148,9 +148,10 @@ persisted parameters do not change.
 A rejected request keeps the error `invalid_operation_parameters` and
 `next_action: check_parameters`, and adds `field_errors`: a list of
 `{field, reason, expected?, allowed?}`, identical on REST, MCP and through the
-gateway. `field` is a parameter name, a list element such as `user_ids/0`, an
-outer argument (`chat_id`, `message_id`, `expected_revision`) or `parameters` for
-the whole object. `reason` is one of `required`, `unknown_field`, `type`, `enum`,
+gateway. `field` is a parameter name (including `mode` for a MIME-family mismatch
+and `source_revision` for a forward source), a list element such as `user_ids/0`,
+an outer argument (`chat_id`, `message_id`, `expected_revision`) or `parameters`
+for the whole object. `reason` is one of `required`, `unknown_field`, `type`, `enum`,
 `min_length`, `max_length`, `pattern`, `minimum`, `maximum`, `min_items`,
 `max_items`, `unique`, `format`, `blank`, `size`. `expected` is a reviewed hint and
 `allowed` lists values from the catalog. String limits count UTF-16 code units, so

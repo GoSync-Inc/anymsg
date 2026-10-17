@@ -294,6 +294,8 @@ def test_operation_field_errors_cover_validators(operations):
     crowded = errors('telegram', 'rename_group', {'title': 'ok', **{'bad-%d' % i: 1 for i in range(25)}, 'foo': 1})
     assert [e['field'] for e in crowded] == ['parameters', 'foo']
     assert errors('telegram', 'get_contact', {'user_id': str(2**63)})[0]['reason'] == 'format'
+    assert errors('telegram', 'chat_info', {'seconds': 1}) == [
+        {'field': 'seconds', 'reason': 'unknown_field', 'expected': 'no parameters'}]
     # At most 20 entries, in schema order.
     many = errors('telegram', 'create_group', {'user_ids': ['person_%d' % i for i in range(20)]})
     assert len(many) == 20 and many[0]['field'] == 'title' and many[-1]['field'] == 'user_ids/18'

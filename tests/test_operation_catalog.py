@@ -95,7 +95,7 @@ def test_parameter_formats_described():
                 # Metadata is added; reviewed keys, types and limits stay as they were.
                 assert {k: v for k, v in descriptor.items() if k != 'format'} == reviewed[name]
                 if descriptor['type'] in plain: assert 'format' not in descriptor
-                else: assert descriptor['format'] == parameter_format(platform, descriptor['type']) != None
+                else: assert descriptor['format'] and descriptor['format'] == parameter_format(platform, descriptor['type'])
     rows = {r['operation']: r for r in operation_manifest('telegram')}
     assert 'decimal' in rows['create_group']['parameters_schema']['user_ids']['format']
     assert 'person_' in rows['get_contact']['parameters_schema']['user_id']['format']
