@@ -155,7 +155,7 @@ def verify(sha, get=api):
         raise Refused("latest main CI run is not a completed success for this repository and commit")
     jobs = attempt_jobs(latest, get)
     verified_by = latest
-    for required in REQUIRED_JOBS:
+    for required in sorted(REQUIRED_JOBS):
         if required == QUEUE_VERIFIED_JOB and job_concluded(jobs, required, "skipped"):
             # The push run reused the queue's verification; GitHub, not the push run, must show it passed.
             verified_by = queue_verification(sha, get)
