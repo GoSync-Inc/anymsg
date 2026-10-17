@@ -1,5 +1,7 @@
-from datetime import datetime, timezone
+from contextvars import ContextVar
+from datetime import datetime, timedelta, timezone
 import asyncio
+import logging
 from platform_contracts import Capability, safe_error
 from .adapters.calls import receipt_reference
 
@@ -26,9 +28,58 @@ CALENDAR_CONSTRAINTS = {
 }
 
 
+WARNING_WINDOW_DAYS = 7
+# The holder's expiry from this request's latest authentication; transports read it after `call`.
+admitted = ContextVar("deedkit_admitted_credential", default=None)
+
+
+def utcnow():
+    return datetime.now(timezone.utc)
+
+
+def expiry_of(agent):
+    return datetime.fromisoformat(agent["expires_at"].replace("Z", "+00:00")).astimezone(timezone.utc)
+
+
+def credential_expiry(agent, now=None):
+    """The holder's own expiry; never another principal's or any key material."""
+    expiry = expiry_of(agent)
+    remaining = expiry - (now or utcnow())
+    warning = remaining < timedelta(days=WARNING_WINDOW_DAYS)
+    return {
+        "expires_at": expiry.isoformat().replace("+00:00", "Z"),
+        "expires_in_days": max(remaining.days, 0),
+        "expiry_warning": warning,
+        "warning_window_days": WARNING_WINDOW_DAYS,
+        "next_action": "ask_owner_to_extend_gateway_key" if warning else "none",
+    }
+
+
+def expiring(snapshot, now=None):
+    """Operator view: principals in the warning window or expired, by id and date only."""
+    now = now or utcnow()
+    return [
+        {"id": agent["id"], "expires_at": info["expires_at"], "expired": expiry_of(agent) <= now}
+        for agent in snapshot["principals"]
+        if (info := credential_expiry(agent, now))["expiry_warning"]
+    ]
+
+
 class Dispatch:
     def __init__(self, policy, clients, tickets=None):
         self.policy, self.clients, self.tickets = policy, clients, tickets
+        self.warned = {}
+
+    def credential(self, agent):
+        """Expiry for the authenticated holder; logs one warning per principal per UTC day."""
+        now = utcnow()
+        info = credential_expiry(agent, now)
+        if info["expiry_warning"] and self.warned.get(agent["id"]) != now.date():
+            self.warned[agent["id"]] = now.date()
+            logging.getLogger("agent_gateway").warning(
+                "gateway key for principal %s expires at %s", agent["id"], info["expires_at"]
+            )
+        return info
 
     def actions(self, snapshot, agent, caps, account=None):
         """Intersect reviewed grants with explicit current account implementation support.
@@ -105,7 +156,7 @@ class Dispatch:
         return result
 
     async def discover(self, key):
-        snapshot, agent = self.policy.authenticate(key)
+        snapshot, agent = self.authenticate(key)
         visible = self.policy.visible(snapshot, agent)
         modules = sorted({CATALOG[name]["module"] for name in visible} - {"gateway"})
 
@@ -122,7 +173,7 @@ class Dispatch:
         states = {module: state for module, _, state in results}
         # Recheck current local policy after discovery; a slow backend does not
         # let the old policy snapshot survive a revocation.
-        current, principal = self.policy.authenticate(key)
+        current, principal = self.authenticate(key)
         if current["revision"] != snapshot["revision"]:
             raise Denied("policy_changed", 409)
         visible = [n for n in visible if n in self.policy.visible(current, principal)]
@@ -153,14 +204,24 @@ class Dispatch:
             "backend_tool_manifests": manifests,
         }
 
+    def authenticate(self, key):
+        """`Policy.authenticate`, recording the holder's expiry as the request's latest."""
+        snapshot, agent = self.policy.authenticate(key)
+        admitted.set(self.credential(agent))
+        return snapshot, agent
+
+    def admit(self, key, name):
+        return self.policy.authorize_agent(*self.authenticate(key), name)
+
     async def call(self, key, name, values):
-        snapshot, agent, tool = self.policy.authorize(key, name)
+        snapshot, agent, tool = self.admit(key, name)
         try:
             args = arguments(tool, values)
         except ValueError:
             raise Denied("invalid_arguments", 422) from None
         if tool["module"] == "gateway":
             snapshot, agent, visible, states = await self.discover(key)
+            credential = admitted.get()
             return {
                 "service": "deedkit",
                 "version": "0.1.0",
@@ -178,6 +239,7 @@ class Dispatch:
                     not CATALOG[n].get("annotations", {}).get("readOnlyHint", False) for n in visible
                 ),
                 "owner_authorization_verified": False,
+                "credential": credential,
                 "capability": Capability("gateway", "capabilities", snapshot["revision"]).to_dict(),
             }
         module = tool["module"]
@@ -217,7 +279,7 @@ class Dispatch:
         started = datetime.now(timezone.utc).timestamp()
         # Admission is rechecked after all local work; a cached MCP session is
         # never authority. ACK is not retried if its network outcome is unknown.
-        current, principal, _ = self.policy.authorize(key, name)
+        current, principal, _ = self.admit(key, name)
         if current["revision"] != snapshot["revision"] or principal["id"] != agent["id"]:
             raise Denied("policy_changed", 409)
         try:

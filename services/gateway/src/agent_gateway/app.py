@@ -17,16 +17,32 @@ from starlette.responses import JSONResponse
 from platform_contracts.release import ReleaseRuntime
 
 from .catalog import CATALOG, public
-from .dispatch import Dispatch
+from .dispatch import Dispatch, admitted
 from .http_clients import Clients
 from .policy import Denied, Policy
 from .release import messaging_dial_url
 
 current_key = ContextVar("deedkit_key", default="")
+# The holder's own expiry at the boundary's admission check; a later admission wins.
+current_credential = ContextVar("deedkit_credential", default=None)
 HEADERS = {"Cache-Control": "no-store", "Referrer-Policy": "no-referrer", "X-Content-Type-Options": "nosniff"}
 NORMAL_BODY_LIMIT = 65536
 UPLOAD_BODY_LIMIT = 360448
 UPLOAD_CHUNK_TOOL = "messages_upload_file_chunk"
+
+
+def expiry_notice(credential):
+    """In-band warning for the key holder, only inside the warning window."""
+    if not credential or not credential["expiry_warning"]:
+        return None
+    return (
+        f"DeedKit gateway key expires at {credential['expires_at']} "
+        f"(in {credential['expires_in_days']} days). Ask the owner to extend it."
+    )
+
+
+def expiry_headers(credential):
+    return {"X-DeedKit-Key-Expires": credential["expires_at"]} if expiry_notice(credential) else {}
 
 
 def is_chunk_call(path, body):
@@ -105,11 +121,19 @@ def create_app(policy_path, public_url, *, transports=None):
         )
 
     async def call_tool(context, params):
+        token = admitted.set(None)
         try:
             result = await dispatch.call(current_key.get(), params.name, params.arguments or {})
+            content = [TextContent(type="text", text=json.dumps(result, ensure_ascii=False))]
+            credential = admitted.get()
+            notice = expiry_notice(credential)
+            if not notice:
+                return CallToolResult(content=content, structuredContent=result)
+            # structuredContent stays exactly the declared outputSchema shape.
             return CallToolResult(
-                content=[TextContent(type="text", text=json.dumps(result, ensure_ascii=False))],
+                content=[*content, TextContent(type="text", text=notice)],
                 structuredContent=result,
+                _meta={"deedkit.credential": credential},
             )
         except Denied as error:
             result = getattr(error, "detail", {"error": error.code})
@@ -118,6 +142,8 @@ def create_app(policy_path, public_url, *, transports=None):
                 structuredContent=result,
                 isError=True,
             )
+        finally:
+            admitted.reset(token)
 
     server = Server(
         "DeedKit",
@@ -164,14 +190,23 @@ def create_app(policy_path, public_url, *, transports=None):
 
     @app.post("/v1/{name}")
     async def rest(name: str, request: Request):
+        token = admitted.set(None)
+
+        def headers():
+            return expiry_headers(admitted.get() or current_credential.get())
+
         try:
             value = await request.json()
             result = await dispatch.call(current_key.get(), name, value)
-            return JSONResponse(result)
+            return JSONResponse(result, headers=headers())
         except Denied as error:
-            return JSONResponse(getattr(error, "detail", {"error": error.code}), status_code=error.status)
+            # A key revoked or expired during the request gets the plain 401.
+            return JSONResponse(getattr(error, "detail", {"error": error.code}), status_code=error.status,
+                                headers=headers() if error.status != 401 else None)
         except ValueError:
-            return JSONResponse({"error": "invalid_arguments"}, status_code=422)
+            return JSONResponse({"error": "invalid_arguments"}, status_code=422, headers=headers())
+        finally:
+            admitted.reset(token)
 
     @app.get("/v1/files/{ticket}")
     async def download(ticket: str, request: Request):
@@ -186,7 +221,7 @@ def create_app(policy_path, public_url, *, transports=None):
             if scope["type"] != "http":
                 return await app(scope, receive, send)
             request = Request(scope)
-            response_started = False
+            response_started, credential = False, None
 
             async def protected_send(event):
                 nonlocal response_started
@@ -216,7 +251,7 @@ def create_app(policy_path, public_url, *, transports=None):
                     key = auth[7:]
                     if len(key) > 512 or not key or any(c.isspace() for c in key):
                         raise Denied("unauthorized", 401)
-                    policy.authenticate(key)
+                    credential = dispatch.credential(policy.authenticate(key)[1])
                 if request.method == "GET" and request.url.path.rstrip("/") == "/mcp":
                     return await JSONResponse(
                         {"error": "server_notifications_not_supported"},
@@ -229,7 +264,9 @@ def create_app(policy_path, public_url, *, transports=None):
                     mcp_route = request.url.path.rstrip("/") == "/mcp"
                     if chunk_route or mcp_route:
                         try:
-                            policy.authorize(key, UPLOAD_CHUNK_TOOL)
+                            snapshot, agent = policy.authenticate(key)
+                            credential = dispatch.credential(agent)
+                            policy.authorize_agent(snapshot, agent, UPLOAD_CHUNK_TOOL)
                             limit = UPLOAD_BODY_LIMIT
                         except Denied:
                             if chunk_route:
@@ -268,17 +305,21 @@ def create_app(policy_path, public_url, *, transports=None):
                         return await original_receive()
 
                     receive = replay
-                token = current_key.set(key)
+                token, held = current_key.set(key), current_credential.set(credential)
                 try:
                     await app(scope, receive, protected_send)
                 finally:
+                    current_credential.reset(held)
                     current_key.reset(token)
             except Denied as error:
                 if response_started:
                     # A streaming response must terminate on revocation, never
                     # write a second response or a successful final body.
                     raise RuntimeError("stream_access_revoked") from None
-                await JSONResponse({"error": error.code}, status_code=error.status)(
+                rest_route = (request.url.path.startswith("/v1/") and not request.url.path.startswith("/v1/files/")
+                              and error.status != 401)
+                await JSONResponse({"error": error.code}, status_code=error.status,
+                                   headers=expiry_headers(credential) if rest_route else None)(
                     scope, receive, protected_send
                 )
 

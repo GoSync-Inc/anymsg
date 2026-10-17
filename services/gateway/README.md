@@ -22,6 +22,32 @@ increase `revision`, and keep the same principal/backend key binding when rotati
 only a gateway key. Backend URL changes require a restart. Existing subscription
 owners are backend credential identities, not gateway session IDs.
 
+Every principal's `expires_at` is enforced at admission: from that instant the key
+gets the same `401 unauthorized` as an unknown key. `platform_capabilities.credential`
+reports the calling principal's own expiry and never another principal's:
+`expires_at` (UTC), whole `expires_in_days` left, `warning_window_days: 7`,
+`expiry_warning` (true when fewer than 7 × 24 hours remain) and `next_action`
+(`ask_owner_to_extend_gateway_key` in the window, otherwise `none`). In the window
+every successful MCP `tools/call` result gets one extra text item, "DeedKit gateway
+key expires at <ts> (in N days). Ask the owner to extend it.", and the same fields
+under `_meta["deedkit.credential"]`; `structuredContent` and the first text item are
+unchanged, so declared output schemas still hold. REST `/v1/{tool}` responses carry
+`X-DeedKit-Key-Expires: <expires_at>` in the window, errors after authentication
+included; a `401` never does. All of these follow the request's latest authentication,
+so a policy replaced mid-request cannot contradict them. `--check` adds `expiring`: the
+principals in the window or already expired, as `id`, `expires_at` and `expired`
+only. In the window, a principal's first request each UTC day logs one warning per
+gateway process; an idle principal logs nothing, so use `--check` for an overview.
+These warnings cover only the gateway principal's key. Each backend enforces its own
+key expiry and reports none of it to the gateway, so the owner checks the backend
+credentials' expiries separately.
+
+To extend a key, the owner writes a new policy file with a later `expires_at` for
+that principal, the same `key_sha256` and credential binding, and a higher
+`revision`; runs `--check` on it; and replaces the live file atomically (write a
+`0600` file beside it, then rename it over the old one). The next request uses
+the new date without a restart. Agents cannot extend their own keys.
+
 `POST /mcp` uses the official SDK transport and lifespan. `GET /mcp` returns 405;
 notifications/SSE are disabled. `POST /v1/{selected_tool}` uses the same authorization
 and argument schema. There is no generic arbitrary backend executor. Unknown writes
