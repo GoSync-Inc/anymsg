@@ -153,16 +153,26 @@ def backlog(archive):
 
 
 def housekeeping(ar, s):
-    """A small fixed population that the claim must still clean up outside the window."""
+    """A small fixed population that the claim must still clean up outside the window.
+
+    Returns the exhausted lease's message, the jobs of an expired and of an unexpired
+    stale reservation (both reaped) and the job whose valid reservation is kept.
+    """
     exhausted=message(ar,'exhausted',40*86400)
-    reaped=message(ar,'reaped',50*86400)
+    jobs=[]
     with s.pool.connection() as c:
         c.execute('''UPDATE media_jobs SET state='leased',attempts=5,lease_owner='crashed',lease_epoch=5,
             lease_until=clock_timestamp()-interval '1 minute' WHERE message=%s''',(exhausted,))
-        job=c.execute('SELECT id FROM media_jobs WHERE message=%s',(reaped,)).fetchone()['id']
-        c.execute('''INSERT INTO media_reservations(job,volume_key,lease_epoch,reserved_bytes,expires_at)
-            VALUES(%s,'fs:synthetic',1,4,clock_timestamp()-interval '1 minute')''',(job,))
-    return exhausted,job
+        for name,expires in (('reaped-expired','-1 minute'),('reaped-stale','1 hour'),('kept','1 hour')):
+            mid=message(ar,name,50*86400)
+            job=c.execute('SELECT id FROM media_jobs WHERE message=%s',(mid,)).fetchone()['id']
+            if name=='kept':c.execute('''UPDATE media_jobs SET state='leased',attempts=1,lease_owner='live-worker',
+                lease_epoch=2,lease_until=clock_timestamp()+interval '1 hour' WHERE id=%s''',(job,))
+            # The stale reservation is unexpired, but its job holds no matching lease.
+            c.execute('''INSERT INTO media_reservations(job,volume_key,lease_epoch,reserved_bytes,expires_at)
+                VALUES(%s,'fs:synthetic',2,4,clock_timestamp()+%s::interval)''',(job,expires))
+            jobs.append(job)
+    return exhausted,*jobs
 
 
 def idle_claim(ar, s, claim, plans):
@@ -174,9 +184,13 @@ def idle_claim(ar, s, claim, plans):
     return assert_bounded(plans,indexes),elapsed
 
 
-def test_idle_claim_work_does_not_grow_with_the_dormant_backlog(backlog):
+def reaper_lookups(measured):
+    return next(totals for query,totals in measured if query.startswith('DELETE FROM media_reservations'))
+
+
+def test_idle_claim_work_does_not_grow_with_the_dormant_backlog(backlog, record_property):
     ar,s,claim,_=backlog
-    exhausted,reaped=housekeeping(ar,s)
+    exhausted,expired,stale,kept=housekeeping(ar,s)
     grow_dormant(s,30_000)
     composition=dormant_composition(s)
     assert sum(r['jobs'] for r in composition)==30_000
@@ -189,15 +203,21 @@ def test_idle_claim_work_does_not_grow_with_the_dormant_backlog(backlog):
     with s.pool.connection() as c:
         assert c.execute('SELECT state,error_code FROM media_jobs WHERE message=%s',(exhausted,)).fetchone()=={
             'state':'failed','error_code':'retry_exhausted'}
-        assert c.execute('SELECT count(*) AS n FROM media_reservations WHERE job=%s',(reaped,)).fetchone()['n']==0
+        assert [r['job'] for r in c.execute('SELECT job FROM media_reservations').fetchall()]==[kept]
+    assert expired!=stale
     # Later idle claims skip the sweep; every remaining statement is index-driven and bounded.
     plans=[]; small,elapsed_small=idle_claim(ar,s,claim,plans)
     assert not any('retry_exhausted' in q for q,_ in plans)
     selection_is_indexed(plans)
+    # The kept reservation makes the reaper look its job up on every measured claim.
+    assert reaper_lookups(small)['media_jobs']['tuples']>=1
+    retained={'30000':[{'query':q,'plan':p} for q,p in plans]}
     grow_dormant(s,30_000,offset=30_000)
     assert sum(r['jobs'] for r in dormant_composition(s))==60_000
     plans=[]; large,elapsed_large=idle_claim(ar,s,claim,plans)
     selection_is_indexed(plans)
+    assert reaper_lookups(large)['media_jobs']['tuples']>=1
+    retained['60000']=[{'query':q,'plan':p} for q,p in plans]
     for (query,before),(_,after) in zip(small,large):
         for relation in set(before)|set(after):
             b=before.get(relation,{'tuples':0,'buffers':0}); a=after.get(relation,{'tuples':0,'buffers':0})
@@ -209,8 +229,12 @@ def test_idle_claim_work_does_not_grow_with_the_dormant_backlog(backlog):
                 THEN 1+replace(id,'dormant-job-','')::int%4 ELSE 0 END
             OR error_code IS DISTINCT FROM CASE WHEN replace(id,'dormant-job-','')::int%2=0 THEN 'paused_storage' END
             OR state NOT IN ('queued','leased'))''').fetchone()['n']==0
-        assert c.execute('SELECT count(*) AS n FROM media_reservations').fetchone()['n']==0
+        assert [r['job'] for r in c.execute('SELECT job FROM media_reservations').fetchall()]==[kept]
         settings=c.execute("SELECT version() AS v,current_setting('work_mem') AS w,current_setting('random_page_cost') AS r").fetchone()
+    # Both complete JSON plans are retained in the JUnit report (CI evidence artifact).
+    record_property('media_claim_plans',json.dumps({'settings':settings,'cache':'warm',
+        'composition':composition,'elapsed_ms':{'30000':elapsed_small*1000,'60000':elapsed_large*1000},
+        'work':{'30000':small,'60000':large},'plans':retained},default=str))
     print(f'\n{settings} warm cache; 30k idle claim {elapsed_small*1000:.1f} ms, 60k {elapsed_large*1000:.1f} ms;'
         f' composition {composition}; work 30k {small}; 60k {large}')
 
@@ -219,7 +243,7 @@ def test_sweep_runs_again_after_the_interval(backlog, monkeypatch):
     ar,s,claim,_=backlog
     clock=[1000.0]; monkeypatch.setattr(archive_module,'monotonic',lambda:clock[0])
     assert claim() is None
-    exhausted,_=housekeeping(ar,s)
+    exhausted,*_=housekeeping(ar,s)
     clock[0]+=archive_module.MEDIA_SWEEP_SECONDS-1
     assert claim() is None
     with s.pool.connection() as c:
@@ -233,7 +257,7 @@ def test_sweep_runs_again_after_the_interval(backlog, monkeypatch):
 
 def test_failed_claim_does_not_count_as_a_sweep(backlog):
     ar,s,claim,_=backlog
-    exhausted,_=housekeeping(ar,s)
+    exhausted,*_=housekeeping(ar,s)
     with pytest.raises(RuntimeError,match='collector_lease_lost'): claim(collector_lease=('perf-collector',999))
     assert claim() is None
     with s.pool.connection() as c:
@@ -329,3 +353,13 @@ def test_window_path_keeps_collection_safety(backlog, change):
         elif change=='cooldown':c.execute("UPDATE media_jobs SET next_due=clock_timestamp()+interval '1 hour' WHERE message=%s",(mid,))
         elif change=='attempts':c.execute('UPDATE media_jobs SET attempts=5 WHERE message=%s',(mid,))
     assert claim() is None
+
+
+def test_concurrent_claims_do_not_repeat_a_due_sweep(backlog):
+    ar,_,_,_=backlog
+    with ar._media_sweep(ACCOUNT) as first:
+        with ar._media_sweep(ACCOUNT) as second: assert first and not second
+    with pytest.raises(RuntimeError):
+        with ar._media_sweep('archive-other') as due:
+            assert due; raise RuntimeError('rolled_back')
+    with ar._media_sweep('archive-other') as due: assert due

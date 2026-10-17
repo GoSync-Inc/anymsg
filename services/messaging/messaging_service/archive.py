@@ -6,6 +6,7 @@ import os
 import stat
 import re
 import secrets
+import threading
 from time import monotonic
 
 from psycopg.types.json import Jsonb
@@ -20,7 +21,8 @@ MEDIA_SWEEP_SECONDS = 60
 
 
 class Archive:
-    def __init__(self,store): self.store=store; self._media_sweeps={}
+    def __init__(self,store):
+        self.store=store; self._media_sweeps={}; self._media_sweep_lock=threading.Lock()
 
     def set_sending(self,account,enabled):
         """Operator-only opt-in; never changes account discovery or agent scopes."""
@@ -339,11 +341,21 @@ class Archive:
 
     @contextmanager
     def _media_sweep(self,account):
-        # A due sweep counts only after its claim transaction has committed.
-        at=monotonic(); last=self._media_sweeps.get(account)
-        due=last is None or at-last>=MEDIA_SWEEP_SECONDS
-        yield due
-        if due:self._media_sweeps[account]=at
+        # Takes a due sweep atomically, so concurrent claims do not repeat it; a
+        # claim transaction that fails gives it back for the next claim.
+        at=monotonic()
+        with self._media_sweep_lock:
+            last=self._media_sweeps.get(account)
+            due=last is None or at-last>=MEDIA_SWEEP_SECONDS
+            if due:self._media_sweeps[account]=at
+        try:yield due
+        except BaseException:
+            if due:
+                with self._media_sweep_lock:
+                    if self._media_sweeps.get(account)==at:
+                        if last is None:del self._media_sweeps[account]
+                        else:self._media_sweeps[account]=last
+            raise
 
     @staticmethod
     def job_fence(c,job):
