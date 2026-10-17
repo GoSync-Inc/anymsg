@@ -90,11 +90,23 @@ def _identity(info):
     return (info.st_dev,info.st_ino,info.st_size,info.st_mtime_ns,info.st_ctime_ns)
 
 
+def cold_copy_verified(c,digest,bytes):
+    """Read-back proof of the encrypted R2 copy (ANYM-297); caller holds lifecycle_lock."""
+    return c.execute("""SELECT EXISTS(SELECT FROM attachment_cold_copies WHERE digest=%s AND bytes=%s
+        AND state='verified' AND ciphertext_sha256 IS NOT NULL AND verified_at IS NOT NULL) AS verified""",
+        (_digest(digest),bytes)).fetchone()['verified']
+
+
 class LifecycleWorker:
-    """One bounded pass, dry-run unless apply=True; never scans directories."""
-    def __init__(self,store,*,expire_unprocessed=False):
+    """One bounded pass, dry-run unless apply=True; never scans directories.
+
+    Production entry points pass require_cold_copy=True: no original is
+    unlinked without a verified cold copy. The default exists for fixtures.
+    """
+    def __init__(self,store,*,expire_unprocessed=False,require_cold_copy=False):
         if type(expire_unprocessed) is not bool:raise ValueError('invalid_retention_policy')
-        self.store=store;self.expire_unprocessed=expire_unprocessed
+        if type(require_cold_copy) is not bool:raise ValueError('invalid_retention_policy')
+        self.store=store;self.expire_unprocessed=expire_unprocessed;self.require_cold_copy=require_cold_copy
 
     def _lock_sources(self,c,digest):
         return c.execute('SELECT public.lock_lifecycle_sources(%s) AS locked',(digest,)).fetchone()['locked']
@@ -104,6 +116,9 @@ class LifecycleWorker:
         if row['pinned']:return 'pinned'
         old=c.execute("SELECT %s::timestamptz<=clock_timestamp()-interval '30 days' AS old",(row['last_accessed_at'],)).fetchone()['old']
         if not old:return 'recently_requested'
+        # Rechecked under the lock by _complete, so a copy invalidated after
+        # prepare cancels the journal before unlink.
+        if self.require_cold_copy and not cold_copy_verified(c,row['digest'],row['bytes']):return 'cold_copy_missing'
         if not self._lock_sources(c,row['digest']):return 'occurrence_limit'
         # The default policy requires usable detail for every occurrence.
         # The explicit unprocessed policy instead requires every source to be old.
@@ -264,7 +279,7 @@ class LifecycleWorker:
         if (type(apply) is not bool or type(limit) is not int or not 1<=limit<=1000
                 or type(max_bytes) is not int or not 1<=max_bytes<=1024**4):
             raise ValueError('invalid_lifecycle_limit')
-        result={'dry_run':not apply,'expire_unprocessed':self.expire_unprocessed,'candidates':0,'candidate_bytes':0,'evicted':0,'evicted_bytes':0,'blocked':0,'reasons':{}}
+        result={'dry_run':not apply,'expire_unprocessed':self.expire_unprocessed,'cold_copy_required':self.require_cold_copy,'candidates':0,'candidate_bytes':0,'evicted':0,'evicted_bytes':0,'blocked':0,'reasons':{}}
         def blocked(reason):
             result['blocked']+=1;result['reasons'][reason]=result['reasons'].get(reason,0)+1
         with self.store.pool.connection() as c:
@@ -355,7 +370,7 @@ def main(argv=None):
     parser.add_argument('--files',default=os.environ.get('PROBE_FILES','/data/files'))
     parser.add_argument('--apply',action='store_true',help='explicitly enable original deletion')
     parser.add_argument('--expire-unprocessed',action='store_true',
-        help='allow old unprocessed originals to expire; retain existing text, with best-effort provider recovery')
+        help='allow old unprocessed originals to expire; retain existing text; a verified cold copy is still required')
     parser.add_argument('--limit',type=int,default=100)
     parser.add_argument('--max-bytes',type=int,default=1024**3)
     parser.add_argument('--interval-seconds',type=int,help='repeat until SIGTERM/SIGINT; omit for one pass')
@@ -379,7 +394,7 @@ def main(argv=None):
             with store.pool.connection() as c:result=pin_original(c,args.digest,args.pin)
             print(json.dumps({'operation':'pin' if args.pin else 'unpin',**result}),flush=True)
             return 0
-        worker=LifecycleWorker(store,expire_unprocessed=args.expire_unprocessed)
+        worker=LifecycleWorker(store,expire_unprocessed=args.expire_unprocessed,require_cold_copy=True)
         while not stopped.is_set():
             try:result=worker.run_once(apply=args.apply,limit=args.limit,max_bytes=args.max_bytes)
             except Exception:

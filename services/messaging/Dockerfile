@@ -139,9 +139,10 @@ CMD ["python", "-m", "messaging_service.whatsapp_collector", "--config", "/run/s
 
 # Operator-only image; no Docker socket or SSH key. The producer receives no
 # recovery key; only the isolated restore helper gets an explicit read-only key.
+# The cold archiver mounts its own forced-command SSH key at runtime only.
 FROM ${POSTGRES_IMAGE} AS backup
 USER root
-RUN apt-get update && apt-get install -y --no-install-recommends ca-certificates \
+RUN apt-get update && apt-get install -y --no-install-recommends ca-certificates openssh-client \
     libsqlite3-0 libbz2-1.0 libffi8 liblzma5 libexpat1 libreadline8 libncursesw6 libgdbm6 \
     && rm -rf /var/lib/apt/lists/*
 COPY --from=python-dependencies /usr/local /usr/local
