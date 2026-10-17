@@ -8,6 +8,7 @@ from pathlib import Path
 import random
 import re
 import shutil
+import subprocess
 import tarfile
 import tomllib
 
@@ -197,6 +198,20 @@ def test_findings_never_print_the_credential(tmp_path, capsys, monkeypatch):
 
 
 @needs_gitleaks
+def test_an_archive_nested_in_a_layer_is_skipped_but_any_other_scanner_message_refuses(tmp_path, monkeypatch):
+    nested = gzip.compress(settings(6).encode(), mtime=0)
+    assert findings(tmp_path, layers=[{"usr/share/doc/pkg/changelog.gz": nested}]) == []
+    unreadable = tmp_path / "unreadable"
+    unreadable.mkdir()
+
+    def run(argv, **kwargs):
+        return subprocess.CompletedProcess(argv, 0, "", "2:00PM WRN skipping file: permission denied path=x\n")
+    monkeypatch.setattr(si.subprocess, "run", run)
+    with pytest.raises(si.Refused, match="permission denied"):
+        si.scan(image_archive(unreadable / "image.tar", layers=[{"a": "a"}]), binary="gitleaks")
+
+
+@needs_gitleaks
 def test_a_clean_image_passes(tmp_path):
     assert findings(tmp_path, layers=[{"app/clean.txt": "nothing to see"}]) == []
 
@@ -238,6 +253,8 @@ def test_every_exporting_build_job_scans_the_image_before_keeping_it():
     assert export < install < scan < upload
     assert steps[install]["if"] == steps[scan]["if"] == steps[export]["if"]
     assert "continue-on-error" not in steps[install] and "continue-on-error" not in steps[scan]
+    # A pipe must not hide the scan's exit code (GitHub's default shell has no pipefail).
+    assert steps[scan]["run"].splitlines()[0] == "set -o pipefail" and "shell" not in steps[scan]
     assert "python3 scripts/scan_image.py --canary" in steps[scan]["run"]
     assert 'python3 scripts/scan_image.py "$RUNNER_TEMP/images/image-$TARGET/image.tar"' in steps[scan]["run"]
     # The same release URL and SHA-256 as security.yml's pinned download.

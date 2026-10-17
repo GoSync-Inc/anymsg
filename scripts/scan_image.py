@@ -21,6 +21,7 @@ CANARY = ROOT / "tests/fixtures/gitleaks-canary/image.tar"
 GZIP, ZSTD = b"\x1f\x8b", b"\x28\xb5\x2f\xfd"
 FINDINGS = 2  # gitleaks --exit-code for findings; every other non-zero exit is a scanner error
 CHUNK = 1024 * 1024
+EXPECTED_SKIP = "WRN skipping archive: exceeds max archive depth max_archive_depth=1 path="
 
 
 class Refused(RuntimeError):
@@ -109,9 +110,12 @@ def scan(archive_path, *, config=CONFIG, binary=None):
             raise Refused(f"gitleaks failed (exit {result.returncode})")
         # Skipped or unreadable files are only logged, so any log line other than the findings
         # summary is a scanner problem.
+        # Two messages are expected: the findings summary, and the documented skip of archives
+        # nested inside a layer (.gz, .xz, .whl), which --max-archive-depth 1 does not open.
         lines = [line for line in result.stderr.splitlines() if line.strip()]
-        if (result.returncode == 0 and lines) or any("leaks found" not in line for line in lines):
-            raise Refused("gitleaks reported a problem: " + " | ".join(lines)[-400:])
+        problems = [line for line in lines if "WRN leaks found: " not in line and EXPECTED_SKIP not in line]
+        if problems or (result.returncode == 0 and any("WRN leaks found: " in line for line in lines)):
+            raise Refused("gitleaks reported a problem: " + " | ".join(problems or lines)[-400:])
         findings = []
         for finding in json.loads(report.read_text() or "[]"):
             outer, _, inner = finding["File"].partition("!")
