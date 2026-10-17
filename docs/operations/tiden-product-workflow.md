@@ -79,8 +79,9 @@ server includes that status in traceability/gates.
 New work reaches Tiden from four sources: the owner; agent feedback recorded
 through DeedKit `submit_feedback`; production issue triage (`triage-issues`); and
 audits. `list_feedback` returns only the calling key's records (SUBSCRIPTIONS.md),
-so the session holding that key relays its feedback to the orchestrator. A worker that finds work
-outside its task reports it to the orchestrator instead of starting it.
+so the session holding that key relays its feedback to the orchestrator. A worker
+that finds work outside its task reports it to the orchestrator instead of
+starting it.
 
 1. **Triage.** Search Tiden main and open branches (`product-context`,
    `tiden spec list`). A match, merged or not, is updated rather than duplicated.
