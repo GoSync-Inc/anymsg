@@ -11,6 +11,11 @@ on:
       tiden_branch:
         type: string
         default: ''
+      reuse_queue_evidence:
+        # Set only by ci.yml on a main push whose `reuse` job validated the merge queue's evidence of this commit
+        # and uploaded it as `ci-evidence`: the test jobs are skipped and `tiden` publishes that evidence.
+        type: boolean
+        default: false
     outputs:
       source_sha:
         description: Exact commit these checks tested
@@ -22,6 +27,7 @@ permissions:
   contents: read
 jobs:
   verify:
+    if: ${{ !inputs.reuse_queue_evidence }}
     runs-on: ubuntu-latest
     timeout-minutes: 30
     env:
@@ -299,6 +305,7 @@ jobs:
   load:
     # The paired gateway load gate measures its latency and isolation budgets on a runner of its own,
     # in parallel with verify, instead of after the whole suite on the verify runner.
+    if: ${{ !inputs.reuse_queue_evidence }}
     runs-on: ubuntu-latest
     timeout-minutes: 10
     outputs:
@@ -346,7 +353,7 @@ jobs:
     # failure itself is recorded (TIDEN-CI.md). A missing, failed, cancelled or skipped test job fails
     # this job whether or not Tiden reporting is configured.
     needs: [verify, load]
-    if: ${{ always() }}
+    if: ${{ always() && !inputs.reuse_queue_evidence }}
     runs-on: ubuntu-latest
     timeout-minutes: 5
     steps:

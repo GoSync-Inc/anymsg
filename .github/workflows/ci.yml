@@ -28,11 +28,60 @@ concurrency:
   group: ci-${{ github.event_name == 'merge_group' && format('merge-queue-{0}', github.run_id) || github.event_name == 'push' && format('main-push-{0}', github.run_id) || github.event.pull_request.number || github.ref }}
   cancel-in-progress: ${{ github.event_name != 'merge_group' && github.event_name != 'push' }}
 jobs:
+  reuse:
+    # A main push of a commit the merge queue verified reuses that run's verification instead of testing the
+    # commit again; production.py verify accepts it by the same queue rules (ANYM-321, ANYM-322, TIDEN-CI.md).
+    # Any doubt before the choice runs the full suite; pinned queue evidence that fails validation fails the run.
+    name: Reuse the merge queue verification
+    if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    permissions:
+      contents: read  # checkout of this commit's decision script
+      actions: read  # read the queue run of this commit and download its evidence artifact
+    outputs:
+      decision: ${{ steps.decide.outcome == 'success' && steps.decide.outputs.decision || 'full' }}
+      validated_sha: ${{ steps.adopt.outputs.validated_sha }}
+    steps:
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6.1.0
+        with:
+          persist-credentials: false
+          ref: ${{ github.sha }}
+      - name: Choose reuse only for a passed queue run of this commit with one current evidence artifact
+        id: decide
+        continue-on-error: true
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: python3 scripts/ci_reuse.py decide
+      - name: Validate the pinned queue evidence of this commit
+        id: adopt
+        if: steps.decide.outcome == 'success' && steps.decide.outputs.decision == 'reuse'
+        env:
+          GH_TOKEN: ${{ github.token }}
+          QUEUE_RUN_ID: ${{ steps.decide.outputs.run_id }}
+          QUEUE_RUN_ATTEMPT: ${{ steps.decide.outputs.run_attempt }}
+          QUEUE_ARTIFACT_ID: ${{ steps.decide.outputs.artifact_id }}
+          QUEUE_ARTIFACT_DIGEST: ${{ steps.decide.outputs.artifact_digest }}
+        run: python3 scripts/ci_reuse.py adopt --directory "$RUNNER_TEMP/ci-evidence"
+      - name: Publish the validated evidence as this run's evidence
+        if: steps.adopt.outcome == 'success'
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: ci-evidence
+          path: ${{ runner.temp }}/ci-evidence
+          if-no-files-found: error
+          retention-days: 14
+          overwrite: true
   checks:
+    # After the decision: a validated reuse skips the test jobs and publishes the queue's evidence; every other
+    # run verifies in full. A reuse that failed validation leaves checks skipped, so the gate fails.
+    needs: reuse
+    if: ${{ !cancelled() && (needs.reuse.outputs.decision != 'reuse' || needs.reuse.result == 'success') }}
     uses: ./.github/workflows/checks.yml
     with:
       source_ref: ${{ inputs.source_ref || '' }}
       tiden_branch: ${{ inputs.tiden_branch || '' }}
+      reuse_queue_evidence: ${{ needs.reuse.outputs.decision == 'reuse' }}
     secrets:
       # A queued group can hold a fork's unmerged code, so it never gets the credential.
       TIDEN_API_TOKEN: ${{ github.event_name != 'merge_group' && secrets.TIDEN_API_TOKEN || '' }}
@@ -46,7 +95,7 @@ jobs:
       source_ref: ${{ inputs.source_ref || '' }}
   gate:
     name: CI gate
-    needs: [checks, native, images]
+    needs: [reuse, checks, native, images]
     if: ${{ always() }}
     runs-on: ubuntu-latest
     timeout-minutes: 2
@@ -64,6 +113,28 @@ jobs:
           test "$IMAGES_RESULT" = success
           # A manual baseline of another revision must never turn this commit green.
           test -z "$SOURCE_REF" || test "$SOURCE_REF" = "$EXPECTED_SHA"
+      - name: Require this commit's own verification or its validated merge queue verification
+        env:
+          DECISION: ${{ needs.reuse.outputs.decision }}
+          REUSE_RESULT: ${{ needs.reuse.result }}
+          REUSED_SHA: ${{ needs.reuse.outputs.validated_sha }}
+          VERIFIED_SHA: ${{ needs.checks.outputs.source_sha }}
+          EVENT_NAME: ${{ github.event_name }}
+          REF: ${{ github.ref }}
+          EXPECTED_SHA: ${{ github.sha }}
+        run: |
+          if [ "$DECISION" = reuse ]; then
+            # checks / verify was skipped by the reuse decision: only the validated queue evidence of this commit counts.
+            test "$EVENT_NAME" = push
+            test "$REF" = refs/heads/main
+            test "$REUSE_RESULT" = success
+            test "$REUSED_SHA" = "$EXPECTED_SHA"
+            test -z "$VERIFIED_SHA"
+          else
+            # Otherwise checks / verify tested this commit; one skipped for any other reason fails the gate.
+            test -n "$VERIFIED_SHA"
+            test "$VERIFIED_SHA" = "$EXPECTED_SHA"
+          fi
   publish:
     # The only job with write permissions, and only on a main push after every verification
     # passed. It ships the images `images / build (<target>)` tested, never a rebuild, and a

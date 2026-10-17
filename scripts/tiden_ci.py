@@ -55,6 +55,10 @@ RUN_WINDOW = timedelta(minutes=10)
 # Tiden recomputes the main gate seconds after a completed run's live-doc sync.
 GATE_SETTLE = timedelta(seconds=60)
 MAX_RUN_PAGES = 10
+# A main push run that reused the merge queue's verification of its commit (scripts/ci_reuse.py) publishes that
+# run's unchanged evidence with this record of itself as publisher, and these check rows under its own run URL.
+PUBLICATION = "publication.json"
+PUBLISHED_CHECKS = "ci-checks-published.json"
 
 
 def source_path(value: str, root: Path) -> str:
@@ -242,6 +246,42 @@ def assemble(directory: Path, fragments: Path, ci_url: str, producers: dict) -> 
     return {**metadata, "missing": missing}
 
 
+def published_manifest(directory: Path, manifest: dict) -> dict:
+    """The manifest this run publishes: its own, or with a publication record the merge queue run's evidence.
+
+    The record must name this job's main push run, attempt and commit from its environment, and the evidence must
+    be the queue run's of that commit. Test executions, outcomes and identities stay the queue run's; the event,
+    Git branch, CI URL and check row IDs become this push run's, and `tested_in` names the queue run attempt.
+    """
+    if not (directory / PUBLICATION).exists() and not (directory / PUBLICATION).is_symlink():
+        return manifest
+    repository, run_id, attempt, sha = (os.environ.get(name, "") for name in (
+        "GITHUB_REPOSITORY", "GITHUB_RUN_ID", "GITHUB_RUN_ATTEMPT", "GITHUB_SHA"))
+    ci_url = f"https://github.com/{repository}/actions/runs/{run_id}/attempts/{attempt}"
+    try:
+        record = json.loads(control_file(directory, PUBLICATION))
+        producer = record["producer"]
+        valid = (bool(RUN_ATTEMPT_URL.fullmatch(ci_url)) and re.fullmatch(r"[a-f0-9]{40}", sha) is not None
+                 and {key: record.get(key) for key in ("schema", "event", "git_branch", "repository", "run_id",
+                                                       "run_attempt", "sha", "ci_url")}
+                 == {"schema": 1, "event": "push", "git_branch": "main", "repository": repository, "run_id": run_id,
+                     "run_attempt": attempt, "sha": sha, "ci_url": ci_url}
+                 and producer["sha"] == manifest.get("sha") == sha and merge_queue_run(manifest)
+                 and producer["url"] == manifest.get("ci_url") != ci_url
+                 and RUN_ATTEMPT_URL.fullmatch(producer["url"]) is not None)
+        rows = json.loads(control_file(directory, "ci-checks.json")) if valid else []
+        published = [{**row, "id": str(uuid.uuid5(uuid.NAMESPACE_URL, ci_url + "/" + row["signature"].split("::", 1)[1])),
+                      "message": f"{row['message']}; tested in {producer['url']}"} for row in rows]
+    except (ValueError, KeyError, TypeError, AttributeError, IndexError):
+        valid = False
+    if not valid:
+        raise ValueError("the publication record does not name this main push run and its merge queue evidence")
+    (directory / PUBLISHED_CHECKS).write_text(json.dumps(published, indent=2))
+    reports = [name for name in manifest["reports"] if name != "ci-checks.json"] + [PUBLISHED_CHECKS]
+    return {**manifest, "event": "push", "git_branch": "main", "tiden_branch": "", "pr_tiden_links": [],
+            "ci_url": ci_url, "tested_in": producer["url"], "reports": reports}
+
+
 def resolve_branch(manifest: dict, mapping: dict) -> str:
     branch = manifest.get("tiden_branch") or mapping.get(manifest["git_branch"])
     if not branch and manifest["git_branch"] == "main":
@@ -381,7 +421,8 @@ def publish(directory: Path, manifest: dict, branch: str | None, product: str, c
                 "--build-sha", manifest["sha"], "--environment", "github-actions-synthetic",
                 "--title", f"GitHub CI {manifest['sha'][:12]}", "--description", manifest["ci_url"],
                 "--client-meta", "git_branch=" + manifest["git_branch"],
-                "--client-meta", "ci_url=" + manifest["ci_url"]], "create")
+                "--client-meta", "ci_url=" + manifest["ci_url"],
+                *(["--client-meta", "tested_in=" + manifest["tested_in"]] if manifest.get("tested_in") else [])], "create")
     seq = str(run["seqNum"])
     completed = False
     try:
@@ -395,7 +436,7 @@ def publish(directory: Path, manifest: dict, branch: str | None, product: str, c
             if not (directory / filename).is_file() or (directory / filename).stat().st_size > MAX_BYTES:
                 raise ValueError("missing or oversized evidence")
             paths.append(str((directory / filename).resolve()))
-        if "ci-checks.json" not in manifest["reports"]:
+        if not {"ci-checks.json", PUBLISHED_CHECKS} & set(manifest["reports"]):
             raise ValueError("CI step evidence is required")
         call(["run", "report", seq, *paths], "report")
         result = call(["run", "complete", seq], "complete", allow_verdict=True)
@@ -553,7 +594,7 @@ def main() -> int:
         result = prepare(args.source_root.resolve(), directory, metadata)
         print(json.dumps({"test_counts": result["test_counts"], "check_counts": result["check_counts"]}))
         return 0
-    manifest = json.loads((directory / "manifest.json").read_text())
+    manifest = published_manifest(directory, json.loads((directory / "manifest.json").read_text()))
     if merge_queue_run(manifest):
         # publish() skips a queue run before any Tiden call: no credentials, map or route needed.
         result = publish(directory, manifest, None, "")
@@ -576,7 +617,7 @@ def release(args: argparse.Namespace, directory: Path) -> int:
         # Only this main push run's own published evidence names the commit and its build URL.
         if args.sha or args.url or args.released_at:
             raise ValueError("a CI release takes its commit, URL and time from the published run")
-        manifest = json.loads((directory / "manifest.json").read_text())
+        manifest = published_manifest(directory, json.loads((directory / "manifest.json").read_text()))
         if (manifest.get("event"), manifest.get("git_branch"), manifest.get("tiden_branch")) != ("push", "main", ""):
             raise ValueError("only a main push run records a CI release")
         sha, url = manifest["sha"], manifest["ci_url"]

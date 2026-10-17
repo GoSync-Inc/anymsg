@@ -1,0 +1,280 @@
+#!/usr/bin/env python3
+"""Reuse the merge queue's verification of a main commit in its push run instead of testing it again (ANYM-322).
+
+`decide` never fails the run: without a passed queue run of the exact commit and exactly one current evidence
+artifact of its latest attempt, or on any error, the push run verifies in full. `adopt` runs only after the
+choice: it downloads that pinned artifact as data, validates it and adds this run's publication record, and
+any problem fails the push run. Nothing from the artifact is ever executed.
+"""
+from __future__ import annotations
+
+import argparse
+from datetime import datetime
+import hashlib
+import io
+import json
+import os
+from pathlib import Path
+import re
+import stat
+import sys
+import time
+import urllib.error
+import urllib.parse
+import urllib.request
+import uuid
+import zipfile
+
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+import production  # noqa: E402  the queue rules promotion applies (ANYM-321)
+import tiden_ci  # noqa: E402
+
+ARTIFACT = "ci-evidence"
+WORKFLOW = ".github/workflows/ci.yml"
+# The queue run usually completes seconds before main moves; wait that long, then verify in full.
+QUEUE_WAIT_SECONDS, QUEUE_POLL_SECONDS = 300, 10
+MAX_ARCHIVE_BYTES, MAX_ENTRIES, MAX_TOTAL_BYTES = 64 * 1024**2, 64, 128 * 1024**2
+REPORT_CHECKS = (*tiden_ci.REPORTS, *tiden_ci.MODULE_REPORTS)
+# Exactly what the queue run's evidence job uploads: the assembled fragments and what `prepare` adds to them.
+EVIDENCE_FILES = frozenset({
+    "source-sha", "metadata.json", "manifest.json", "ci-checks.json",
+    *(name for _, files in tiden_ci.FRAGMENTS.values() for name in files if name not in tiden_ci.CONTROL_FILES),
+    *(f"normalized-{check}.xml" for check in REPORT_CHECKS)})
+SHA = re.compile(r"[0-9a-f]{40}")
+
+
+class Refused(RuntimeError):
+    pass
+
+
+def when(value: str) -> datetime:
+    return datetime.fromisoformat(value.replace("Z", "+00:00"))
+
+
+def run_url(repository: str, run_id: object, attempt: object) -> str:
+    return f"https://github.com/{repository}/actions/runs/{run_id}/attempts/{attempt}"
+
+
+def queue_run(sha: str, get, sleep=time.sleep, wait: int = QUEUE_WAIT_SECONDS) -> dict:
+    """The merge queue run that verified `sha` by promotion's rules, after waiting for it to complete."""
+    try:
+        for _ in range(wait // QUEUE_POLL_SECONDS):
+            latest = production.latest_run(sha, "merge_group", get)
+            if latest is None:
+                raise Refused("no merge queue run tested this commit")
+            if latest.get("status") == "completed":
+                break
+            sleep(QUEUE_POLL_SECONDS)
+        return production.queue_verification(sha, get)
+    except production.Refused as exc:
+        raise Refused(str(exc)) from None
+
+
+def decide(sha: str, repository: str, get=production.api, sleep=time.sleep) -> dict:
+    """Pin the queue run, its latest attempt and that attempt's one evidence artifact; Refused means verify in full."""
+    if repository != production.REPOSITORY or not SHA.fullmatch(sha):
+        raise Refused("only an exact commit of this repository's main reuses its queue verification")
+    queue = queue_run(sha, get, sleep)
+    attempt = queue["run_attempt"]
+    started = get(f"actions/runs/{queue['id']}/attempts/{attempt}")
+    if started.get("id") != queue["id"] or started.get("run_attempt") != attempt or not started.get("run_started_at"):
+        raise Refused("the queue run's latest attempt could not be read")
+    artifacts = production.complete_listing(lambda page: get(f"actions/runs/{queue['id']}/artifacts?" + urllib.parse.urlencode(
+        {"name": ARTIFACT, "per_page": 100, "page": page})), "artifacts")
+    # A rerun can leave an earlier attempt's evidence behind; only the one created during the pinned attempt counts.
+    current = [artifact for artifact in artifacts if artifact.get("name") == ARTIFACT and artifact.get("expired") is False
+               and when(artifact["created_at"]) >= when(started["run_started_at"])]
+    if len(current) != 1:
+        raise Refused(f"the queue run's latest attempt has {len(current)} current evidence artifacts, not exactly one")
+    artifact = current[0]
+    workflow_run = artifact.get("workflow_run") or {}
+    if (workflow_run.get("id"), workflow_run.get("head_sha")) != (queue["id"], sha) or not str(artifact.get("digest", "")).startswith("sha256:"):
+        raise Refused("the evidence artifact does not belong to the queue run or has no digest")
+    return {"run_id": str(queue["id"]), "run_attempt": str(attempt), "artifact_id": str(artifact["id"]),
+            "artifact_digest": artifact["digest"]}
+
+
+class NoRedirect(urllib.request.HTTPRedirectHandler):
+    def redirect_request(self, *args, **kwargs):
+        return None
+
+
+def bounded(response) -> bytes:
+    data = response.read(MAX_ARCHIVE_BYTES + 1)
+    if len(data) > MAX_ARCHIVE_BYTES:
+        raise Refused("the evidence archive exceeds its size limit")
+    return data
+
+
+def download(path: str) -> bytes:
+    """An artifact archive; the job token goes only to the GitHub API, never to the storage it redirects to."""
+    headers = {"Accept": "application/vnd.github+json", "User-Agent": "deedkit-ci-reuse"}
+    if token := os.environ.get("GH_TOKEN"):
+        headers["Authorization"] = "Bearer " + token
+    request = urllib.request.Request("https://api.github.com/repos/" + production.REPOSITORY + "/" + path, headers=headers)
+    try:
+        with urllib.request.build_opener(NoRedirect).open(request, timeout=60) as response:
+            return bounded(response)
+    except urllib.error.HTTPError as exc:
+        location = exc.headers.get("Location", "") if exc.code in {301, 302, 303, 307, 308} else ""
+        if not location.startswith("https://"):
+            raise
+    with urllib.request.urlopen(urllib.request.Request(location, headers={"User-Agent": "deedkit-ci-reuse"}),
+                                timeout=120) as response:
+        return bounded(response)
+
+
+def extract(data: bytes, directory: Path) -> None:
+    """Write the archive's flat evidence files into a new or empty data directory, within size limits."""
+    if directory.exists() and any(directory.iterdir()):
+        raise Refused("the evidence directory must be new or empty")
+    try:
+        archive = zipfile.ZipFile(io.BytesIO(data))
+        entries = archive.infolist()
+    except (zipfile.BadZipFile, ValueError):
+        raise Refused("the evidence archive is not a valid zip file") from None
+    names = [entry.filename for entry in entries]
+    if len(entries) > MAX_ENTRIES or len(set(names)) != len(names) or set(names) != EVIDENCE_FILES:
+        raise Refused("the evidence archive does not hold exactly the queue run's evidence files")
+    if sum(entry.file_size for entry in entries) > MAX_TOTAL_BYTES:
+        raise Refused("the evidence archive expands beyond its size limit")
+    directory.mkdir(parents=True, exist_ok=True)
+    for entry in entries:
+        mode = entry.external_attr >> 16
+        if entry.is_dir() or stat.S_IFMT(mode) not in {0, stat.S_IFREG} or entry.file_size > tiden_ci.MAX_BYTES:
+            raise Refused(f"the evidence file {entry.filename} is not a bounded regular file")
+        with archive.open(entry) as source:
+            content = source.read(tiden_ci.MAX_BYTES + 1)
+        if len(content) != entry.file_size:
+            raise Refused(f"the evidence file {entry.filename} does not match its recorded size")
+        (directory / entry.filename).write_bytes(content)
+
+
+def read_json(directory: Path, name: str):
+    try:
+        return json.loads((directory / name).read_text())
+    except (OSError, ValueError):
+        raise Refused(f"the evidence file {name} is not valid JSON") from None
+
+
+def validate(directory: Path, sha: str, producer_url: str, attempt: int) -> dict:
+    """Refuse evidence that is not the queue run's complete, passing verification of exactly `sha`."""
+    metadata, manifest, load = (read_json(directory, name) for name in ("metadata.json", "manifest.json", "load.json"))
+    if not all(isinstance(value, dict) for value in (metadata, manifest, load)):
+        raise Refused("the evidence metadata, manifest or load report is malformed")
+    if (directory / "source-sha").read_text().strip() != sha or metadata.get("sha") != sha or manifest.get("sha") != sha \
+            or load.get("sha") != sha:
+        raise Refused("an evidence SHA field names another commit")
+    if metadata.get("ci_url") != producer_url or any(manifest.get(key) != value for key, value in metadata.items()):
+        raise Refused("the evidence was not assembled by the pinned queue run attempt")
+    if (manifest.get("schema"), manifest.get("event"), manifest.get("tiden_branch")) != (1, "merge_group", "") \
+            or not str(manifest.get("git_branch", "")).startswith(production.QUEUE_BRANCH_PREFIX):
+        raise Refused("the evidence is not a merge queue run's evidence of main")
+    if manifest.get("checks") != dict.fromkeys(tiden_ci.CHECKS, "success") \
+            or manifest.get("module_checks") != dict.fromkeys(tiden_ci.MODULE_REPORTS, "success") \
+            or manifest.get("check_counts") != {"passed": len(tiden_ci.CHECKS) + len(tiden_ci.MODULE_REPORTS)} \
+            or load.get("status") != "passed":
+        raise Refused("not every check of the queue run passed")
+    producers = manifest.get("producers")
+    if manifest.get("fragments") != list(tiden_ci.FRAGMENTS) or not isinstance(producers, dict) \
+            or set(producers) != set(tiden_ci.FRAGMENTS) or any(
+                not isinstance(job, dict) or job.get("result") != "success" or job.get("sha") != sha
+                or not str(job.get("attempt")).isdigit() or int(job["attempt"]) > attempt for job in producers.values()):
+        raise Refused("a test job of the queue run did not produce passing evidence of this commit")
+    reports = [f"normalized-{check}.xml" for check in REPORT_CHECKS]
+    if sorted(manifest.get("reports") or []) != sorted([*reports, "ci-checks.json"]):
+        raise Refused("the evidence manifest does not list every required report")
+    totals = {}
+    for check, report in zip(REPORT_CHECKS, reports):
+        _, framework, _ = tiden_ci.MODULE_REPORTS.get(check, (None, check, None))
+        try:
+            _, counts = tiden_ci.normalize_junit(directory / report, directory, framework)
+        except (OSError, ValueError, SyntaxError) as exc:
+            raise Refused(f"the {check} report is unsafe or malformed: {exc}") from None
+        if counts["failed"] or not counts["passed"]:
+            raise Refused(f"the {check} report has no passing executions or a failure")
+        for status, count in counts.items():
+            totals[status] = totals.get(status, 0) + count
+    if manifest.get("test_counts") != totals:
+        raise Refused("the evidence test counts differ from its reports")
+    rows = read_json(directory, "ci-checks.json")
+    expected = [(("anymsg-ci::" if check in tiden_ci.CHECKS else "deedkit-ci::") + check,
+                 str(uuid.uuid5(uuid.NAMESPACE_URL, producer_url + "/" + check)))
+                for check in (*tiden_ci.CHECKS, *tiden_ci.MODULE_REPORTS)]
+    if not isinstance(rows, list) or [(row.get("signature"), row.get("id")) for row in rows if isinstance(row, dict)] != expected \
+            or any((row.get("execution") or {}).get("status") != "passed" for row in rows):
+        raise Refused("the evidence check rows are not the queue run's thirteen passed checks")
+    return manifest
+
+
+def adopt(pin: dict, sha: str, repository: str, run_id: str, run_attempt: str, directory: Path,
+          get=production.api, fetch=download) -> dict:
+    """Validate the pinned queue evidence of `sha` into `directory` and record this push run as its publisher."""
+    if repository != production.REPOSITORY or not SHA.fullmatch(sha) or not (run_id.isdigit() and run_attempt.isdigit()):
+        raise Refused("only this repository's main push run adopts queue evidence")
+    queue_id, attempt, artifact_id = pin["run_id"], int(pin["run_attempt"]), pin["artifact_id"]
+    producer_url = run_url(repository, queue_id, attempt)
+
+    def current() -> dict:
+        artifact = get(f"actions/artifacts/{artifact_id}")
+        workflow_run = artifact.get("workflow_run") or {}
+        if (artifact.get("name"), artifact.get("expired"), str(workflow_run.get("id")), workflow_run.get("head_sha"),
+                artifact.get("digest")) != (ARTIFACT, False, queue_id, sha, pin["artifact_digest"]) \
+                or workflow_run.get("repository_id") != workflow_run.get("head_repository_id") \
+                or not 0 < int(artifact.get("size_in_bytes", 0)) <= MAX_ARCHIVE_BYTES:
+            raise Refused("the pinned evidence artifact is gone, expired, replaced or not this queue run's")
+        return artifact
+
+    current()
+    data = fetch(f"actions/artifacts/{artifact_id}/zip")
+    if "sha256:" + hashlib.sha256(data).hexdigest() != pin["artifact_digest"]:
+        raise Refused("the downloaded evidence differs from the pinned artifact")
+    extract(data, directory)
+    validate(directory, sha, producer_url, attempt)
+    # A newer queue run, a rerun or a deleted artifact during validation leaves nothing to reuse.
+    current()
+    queue = queue_run(sha, get, wait=0)
+    if (str(queue["id"]), queue["run_attempt"]) != (queue_id, attempt):
+        raise Refused("a newer merge queue run or rerun of this commit appeared during validation")
+    record = {"schema": 1, "event": "push", "git_branch": "main", "repository": repository, "run_id": run_id,
+              "run_attempt": run_attempt, "sha": sha, "ci_url": run_url(repository, run_id, run_attempt),
+              "producer": {"repository": repository, "workflow": WORKFLOW, "run_id": queue_id, "run_attempt": str(attempt),
+                           "url": producer_url, "artifact_id": artifact_id, "artifact_digest": pin["artifact_digest"],
+                           "sha": sha}}
+    (directory / tiden_ci.PUBLICATION).write_text(json.dumps(record, indent=2))
+    return record
+
+
+def outputs(values: dict) -> None:
+    with open(os.environ["GITHUB_OUTPUT"], "a") as output:
+        output.writelines(f"{key}={value}\n" for key, value in values.items())
+
+
+def main() -> int:
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument("command", choices=["decide", "adopt"])
+    parser.add_argument("--directory", type=Path)
+    args = parser.parse_args()
+    sha, repository = os.environ.get("GITHUB_SHA", ""), os.environ.get("GITHUB_REPOSITORY", "")
+    if args.command == "decide":
+        try:
+            pin = decide(sha, repository)
+        except Exception as exc:  # any doubt before the choice means full verification, never a failed run
+            print(f"::notice title=Full verification::{type(exc).__name__}: {exc}")
+            outputs({"decision": "full"})
+            return 0
+        print(f"::notice title=Reusing the merge queue verification::{run_url(repository, pin['run_id'], pin['run_attempt'])}")
+        outputs({"decision": "reuse", **pin})
+        return 0
+    pin = {key: os.environ.get("QUEUE_" + key.upper(), "") for key in ("run_id", "run_attempt", "artifact_id", "artifact_digest")}
+    if not (pin["run_id"].isdigit() and pin["run_attempt"].isdigit() and pin["artifact_id"].isdigit() and args.directory):
+        raise Refused("the reuse decision did not pin a queue run, attempt and artifact")
+    record = adopt(pin, sha, repository, os.environ.get("GITHUB_RUN_ID", ""), os.environ.get("GITHUB_RUN_ATTEMPT", ""),
+                   args.directory.resolve())
+    print(json.dumps(record))
+    outputs({"validated_sha": sha})
+    return 0
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())
