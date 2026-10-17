@@ -52,17 +52,20 @@ def check_labels(config, target, sha, what):
 
 def archive_config(path):
     """The config blob of a single-image `docker save` archive: its sha256 digest and parsed content."""
-    with tarfile.open(path) as archive:
-        def member(name):
-            handle = archive.extractfile(name)
-            if handle is None:
-                raise Refused(f"exported archive has no file {name}")
-            return handle.read()
-        manifest = json.loads(member("manifest.json"))
-        if len(manifest) != 1:
-            raise Refused("an exported archive must hold exactly one image")
-        blob = member(manifest[0]["Config"])
-    return "sha256:" + hashlib.sha256(blob).hexdigest(), json.loads(blob)
+    try:
+        with tarfile.open(path) as archive:
+            def member(name):
+                handle = archive.extractfile(name)
+                if handle is None:
+                    raise Refused(f"exported archive has no file {name}")
+                return handle.read()
+            manifest = json.loads(member("manifest.json"))
+            if len(manifest) != 1:
+                raise Refused("an exported archive must hold exactly one image")
+            blob = member(manifest[0]["Config"])
+        return "sha256:" + hashlib.sha256(blob).hexdigest(), json.loads(blob)
+    except (OSError, tarfile.TarError, KeyError, TypeError, json.JSONDecodeError) as exc:
+        raise Refused(f"exported archive {path.name} is unreadable ({type(exc).__name__})") from exc
 
 
 def export(target, sha, directory):

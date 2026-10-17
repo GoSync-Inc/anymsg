@@ -173,7 +173,7 @@ def test_a_damaged_archive_does_not_block_reuse_of_an_attested_tag(tmp_path):
     (tmp_path / "image-calls" / "image.json").write_text("{}")
     (tmp_path / "image-calls" / "image.tar").write_bytes(b"truncated")
     assert pi.publish_one(registry, "calls", SHA, tmp_path, always_attested)["action"] == "reuse"
-    with pytest.raises(tarfile.ReadError):  # an unattested tag still needs an intact archive
+    with pytest.raises(pi.Refused, match="unreadable"):  # an unattested tag still needs an intact archive
         pi.publish_one(registry, "calls", SHA, tmp_path, never_attested)
 
 
@@ -340,26 +340,25 @@ def test_rerun_attaches_a_missing_registry_bundle_without_pushing(tmp_path):
     assert result["action"] == "attest" and result["attest"] and registry.pushes == []
 
 
-@pytest.mark.parametrize("api, registry_bundle, state", [
-    (1, 1, "none"), (0, 1, "github"), (0, 0, "complete"),
-], ids=["no-attestation", "registry-bundle-missing", "complete"])
-def test_attestation_check_pins_workflow_ref_commit_and_hosted_runners(monkeypatch, api, registry_bundle, state):
-    calls = []
+def test_attestation_check_pins_workflow_ref_commit_and_hosted_runners(monkeypatch):
+    # GitHub's API first, then the registry bundle: none, API only (attachment interrupted), both.
+    for api, registry_bundle, state in [(1, 1, "none"), (0, 1, "github"), (0, 0, "complete")]:
+        calls = []
 
-    def run(argv, check=True):
-        calls.append(argv)
-        return subprocess.CompletedProcess(argv, registry_bundle if "--bundle-from-oci" in argv else api)
-    monkeypatch.setattr(pi, "run", run)
-    assert pi.attested("ghcr.io/gosync-inc/deedkit-runtime", "sha256:" + "1" * 64, SHA) == state
-    assert len(calls) == (1 if state == "none" else 2) and "--bundle-from-oci" not in calls[0]
-    for argv in calls:
-        assert argv[:4] == ["gh", "attestation", "verify", "oci://ghcr.io/gosync-inc/deedkit-runtime@sha256:" + "1" * 64]
-        rest = [word for word in argv[4:] if word not in {"--bundle-from-oci", "--deny-self-hosted-runners"}]
-        flags = dict(zip(rest[::2], rest[1::2]))
-        assert flags["--repo"] == "GoSync-Inc/deedkit"
-        assert flags["--signer-workflow"] == "GoSync-Inc/deedkit/.github/workflows/ci.yml"
-        assert flags["--source-ref"] == "refs/heads/main" and flags["--source-digest"] == SHA
-        assert "--deny-self-hosted-runners" in argv
+        def run(argv, check=True, calls=calls, api=api, registry_bundle=registry_bundle):
+            calls.append(argv)
+            return subprocess.CompletedProcess(argv, registry_bundle if "--bundle-from-oci" in argv else api)
+        monkeypatch.setattr(pi, "run", run)
+        assert pi.attested("ghcr.io/gosync-inc/deedkit-runtime", "sha256:" + "1" * 64, SHA) == state
+        assert len(calls) == (1 if state == "none" else 2) and "--bundle-from-oci" not in calls[0]
+        for argv in calls:
+            assert argv[:4] == ["gh", "attestation", "verify", "oci://ghcr.io/gosync-inc/deedkit-runtime@sha256:" + "1" * 64]
+            rest = [word for word in argv[4:] if word not in {"--bundle-from-oci", "--deny-self-hosted-runners"}]
+            flags = dict(zip(rest[::2], rest[1::2]))
+            assert flags["--repo"] == "GoSync-Inc/deedkit"
+            assert flags["--signer-workflow"] == "GoSync-Inc/deedkit/.github/workflows/ci.yml"
+            assert flags["--source-ref"] == "refs/heads/main" and flags["--source-digest"] == SHA
+            assert "--deny-self-hosted-runners" in argv
 
 
 def test_export_saves_the_tested_tag_and_records_its_config(tmp_path, monkeypatch):

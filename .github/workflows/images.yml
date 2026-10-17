@@ -94,7 +94,7 @@ jobs:
       # The publish job in ci.yml pushes exactly this archive; it never rebuilds (scripts/publish_images.py).
       - name: Export the tested image and publish it to a local registry as a dry run
         # Pull requests prove the publication path before merge; a main push exports what it
-        # publishes. Merge queue runs and baselines of another revision (which may predate
+        # publishes. Merge queue runs and manual dispatches (whose baselines may predate
         # scripts/publish_images.py) publish nothing and skip it.
         if: ${{ github.event_name == 'pull_request' || (github.event_name == 'push' && github.ref == 'refs/heads/main' && inputs.source_ref == '') }}
         env:
