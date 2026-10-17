@@ -130,7 +130,7 @@ Priority: High | Medium | Low (Tiden's priority field)
 Commitment: committed | conditional | needs a triage decision
 Boundary: <what is already implemented; what remains>
 Evidence to close: <tests and checks; any separately authorized live action>
-Value: <1|2|3|5|8>   Effort: <1|2|3|5|8; 13 only before the split>   Score: <Value / Effort, two decimals>
+Value: <1|2|3|5|8>   Effort: <1|2|3|5|8; 13 and 21 only before the split>   Score: <Value / Effort, two decimals>
 History: <DK-* identity, related specs, source/PR links, as-of SHA>
 How others solve it: <concrete open-source projects or standards; adopt | adapt | build, and why>
 Research: <large items only, by the research rule in AGENTS.md>
@@ -146,14 +146,16 @@ investigation whose output is a decision or cards. An acceptance card takes the
 category of the work it accepts.
 
 Value is the benefit to the owner. Effort is in story points (Fibonacci 1, 2, 3,
-5, 8, 13): relative size from the amount of work, complexity and
+5, 8, 13, 21): relative size from the amount of work, complexity and
 uncertainty or risk, estimated by comparison with the reference stories below,
 not in hours and not from human-team experience. Reference stories (merged PRs):
 1 = #59 (one-line-scope release fix); 2 = #66 (small release fix with test);
 3 = #52 (expire unprocessed originals by policy); 5 = #68 (exact source SHA in
-images and release record); 8 = #40 (blue-green HTTP releases). 13 is too big:
-split it into cards of at most 8 before it enters the ready queue, and check
-every 8 for a split. Score stays Value / Effort. When a card's work merges,
+images and release record); 8 = #40 (blue-green HTTP releases). 13 and 21
+are size signals only (21 is much larger): such a card becomes a parent (Feature,
+or Epic for 21) that keeps the overall estimate, with child Stories of at most 8,
+each an independent increment and one PR. Steps inside a story are the worker's
+plan, not cards. Ready cards are at most 8, and every 8 is checked for a split. Score stays Value / Effort. When a card's work merges,
 record the actual time on the card; the weekly review computes points per day
 per worker from these pairs, uses it for wave planning and revises the reference
 stories. Tiden's priority field keeps its meaning (High,
