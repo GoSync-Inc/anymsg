@@ -588,3 +588,88 @@ def test_apply_still_accepts_prepared_images_built_before_the_source_revision(tm
         return original(argv, **kw)
     monkeypatch.setattr(p, "run", older)
     assert p.apply(settings, SHA)["status"] == "applied"
+
+
+class ImageStore:
+    """Synthetic Docker image store: a tag names one image; a rebuild moves the tag and drops the old image."""
+
+    def __init__(self, tags=None):
+        self.tags = dict(tags or {})
+        self.images = {value["Id"]: value for value in self.tags.values()}
+        self.calls = []
+
+    @staticmethod
+    def image(seed, *, revision=SHA, source=SHA):
+        return {"Id": "sha256:" + seed * 64, "Config": {"Labels": {"org.opencontainers.image.revision": revision},
+                                                       "Env": ["PATH=/usr/local/bin", "DEEDKIT_SOURCE_SHA=" + source]}}
+
+    def run(self, argv, **kwargs):
+        self.calls.append(argv)
+        if argv[:3] == ["docker", "image", "ls"]:
+            return self.tags[argv[-1]]["Id"] + "\n" if argv[-1] in self.tags else ""
+        if argv[:2] == ["docker", "build"]:
+            tag = argv[argv.index("--tag") + 1]
+            sha = argv[argv.index("--label") + 1].split("=", 1)[1]
+            fresh = self.image("f", revision=sha, source=sha)
+            fresh["Id"] = "sha256:" + format(len(self.calls), "x").rjust(64, "f")
+            self.images.pop(self.tags.get(tag, {}).get("Id"), None)
+            self.tags[tag] = self.images[fresh["Id"]] = fresh
+            return ""
+        if argv[:3] == ["docker", "image", "inspect"]:
+            reference = argv[-1]
+            value = self.tags.get(reference) or self.images[reference]
+            return value["Id"] if "--format" in argv else json.dumps([value])
+        return ""
+
+    def built(self):
+        return [call for call in self.calls if call[:2] == ["docker", "build"]]
+
+
+@pytest.mark.parametrize("target", sorted(p.BUILDS))
+def test_existing_tag_naming_the_revision_is_reused_without_a_rebuild(tmp_path, monkeypatch, target):
+    existing = ImageStore.image("e")
+    store = ImageStore({f"deedkit-production-{target}:{SHA}": existing})
+    monkeypatch.setattr(p, "run", store.run)
+    assert p.build_image(tmp_path, SHA, target) == existing["Id"]
+    assert store.built() == []
+    smoke = next(call for call in store.calls if call[:2] == ["docker", "run"])
+    assert existing["Id"] in smoke and smoke[smoke.index("--network") + 1] == "none"
+
+
+@pytest.mark.parametrize("target, existing", [
+    ("runtime", ImageStore.image("e", revision="c" * 40, source="c" * 40)),
+    ("gateway", ImageStore.image("e", revision="c" * 40)),
+    # An image of this revision built before DEEDKIT_SOURCE_SHA existed, or naming another source.
+    ("runtime", {"Id": "sha256:" + "e" * 64, "Config": {"Labels": {"org.opencontainers.image.revision": SHA}}}),
+    ("backup", ImageStore.image("e", source="c" * 40)),
+])
+def test_existing_tag_that_does_not_name_the_revision_is_refused_without_a_rebuild(tmp_path, monkeypatch, target,
+                                                                                    existing):
+    tag = f"deedkit-production-{target}:{SHA}"
+    store = ImageStore({tag: existing})
+    monkeypatch.setattr(p, "run", store.run)
+    with pytest.raises(p.Refused, match="does not name the candidate"):
+        p.build_image(tmp_path, SHA, target)
+    # The image keeps its tag, so a container that uses it still resolves it.
+    assert store.built() == [] and store.tags[tag] is existing and existing["Id"] in store.images
+    assert not any(call[:2] == ["docker", "run"] for call in store.calls)
+
+
+def test_ambiguous_existing_tag_is_refused_without_a_rebuild(tmp_path, monkeypatch):
+    store = ImageStore()
+    def listing(argv, **kwargs):
+        if argv[:3] == ["docker", "image", "ls"]:
+            return "sha256:" + "e" * 64 + "\nsha256:" + "d" * 64 + "\n"
+        return store.run(argv, **kwargs)
+    monkeypatch.setattr(p, "run", listing)
+    with pytest.raises(p.Refused, match="ambiguous"):
+        p.build_image(tmp_path, SHA, "runtime")
+    assert store.built() == []
+
+
+def test_second_preparation_of_a_revision_keeps_the_image_the_first_one_built(tmp_path, monkeypatch):
+    store = ImageStore()
+    monkeypatch.setattr(p, "run", store.run)
+    first = p.build_image(tmp_path, SHA, "runtime")
+    assert p.build_image(tmp_path, SHA, "runtime") == first
+    assert len(store.built()) == 1 and first in store.images

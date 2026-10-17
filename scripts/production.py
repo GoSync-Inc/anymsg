@@ -333,27 +333,42 @@ def check_space(directory):
         raise Refused("at least 15 GiB free is required before building production images")
 
 
+def names_revision(image, sha, dockerfile):
+    config = json.loads(run(["docker", "image", "inspect", image]))[0]["Config"]
+    return ((config.get("Labels") or {}).get("org.opencontainers.image.revision") == sha
+            and (dockerfile != "services/messaging/Dockerfile"
+                 or "DEEDKIT_SOURCE_SHA=" + sha in (config.get("Env") or [])))
+
+
 def build_image(source, sha, target):
     context, dockerfile, stage, smoke = BUILDS[target]
     tag = f"deedkit-production-{target}:{sha}"
-    command = ["docker", "build", "--label", "org.opencontainers.image.revision=" + sha,
-               "--label", "org.opencontainers.image.source=https://github.com/" + REPOSITORY,
-               "--build-arg", "DEEDKIT_SOURCE_SHA=" + sha, "--tag", tag, "--file", str(source / dockerfile)]
-    if stage:
-        command += ["--target", stage, "--build-arg", "ANYMSG_INSTALL_TELEMETRY=1"]
-    if target == "http-router":
-        command += ["--build-arg", "VERSION_REF=" + sha]
-    run(command + [str(source / context)])
-    image = run(["docker", "image", "inspect", "--format", "{{.Id}}", tag]).strip()
-    if not re.fullmatch(r"sha256:[0-9a-f]{64}", image):
-        raise Refused("build did not produce an immutable image ID")
-    if dockerfile == "services/messaging/Dockerfile":
+    # Builds are not reproducible, and retagging can drop the image running containers use
+    # (containerd image store), so an existing tag is reused, never rebuilt.
+    existing = run(["docker", "image", "ls", "--quiet", "--no-trunc", tag]).split()
+    if existing:
+        image = existing[0]
+        if len(set(existing)) != 1 or not re.fullmatch(r"sha256:[0-9a-f]{64}", image):
+            raise Refused("existing image tag is ambiguous; inspect it before preparing this revision")
+        if not names_revision(image, sha, dockerfile):
+            raise Refused("existing image tag does not name the candidate source revision; remove it only "
+                          "after checking that no container uses it")
+    else:
+        command = ["docker", "build", "--label", "org.opencontainers.image.revision=" + sha,
+                   "--label", "org.opencontainers.image.source=https://github.com/" + REPOSITORY,
+                   "--build-arg", "DEEDKIT_SOURCE_SHA=" + sha, "--tag", tag, "--file", str(source / dockerfile)]
+        if stage:
+            command += ["--target", stage, "--build-arg", "ANYMSG_INSTALL_TELEMETRY=1"]
+        if target == "http-router":
+            command += ["--build-arg", "VERSION_REF=" + sha]
+        run(command + [str(source / context)])
+        image = run(["docker", "image", "inspect", "--format", "{{.Id}}", tag]).strip()
+        if not re.fullmatch(r"sha256:[0-9a-f]{64}", image):
+            raise Refused("build did not produce an immutable image ID")
         # Only a fresh build is checked: earlier images keep their rollback path without this variable.
-        built = json.loads(run(["docker", "image", "inspect", image]))[0]["Config"]
-        if ((built.get("Labels") or {}).get("org.opencontainers.image.revision") != sha
-                or "DEEDKIT_SOURCE_SHA=" + sha not in (built.get("Env") or [])):
+        if dockerfile == "services/messaging/Dockerfile" and not names_revision(image, sha, dockerfile):
             raise Refused("built image does not name the candidate source revision")
-    name = f"deedkit-smoke-{target}-{uuid.uuid4().hex[:12]}"
+    name =f"deedkit-smoke-{target}-{uuid.uuid4().hex[:12]}"
     try:
         isolated = ["docker", "run", "--name", name, "--rm", "--network", "none", "--read-only", "--cap-drop", "ALL",
                     "--security-opt", "no-new-privileges", "--entrypoint"]

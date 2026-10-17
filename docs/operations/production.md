@@ -184,6 +184,18 @@ The previous snapshot pins each selected container's actual image ID, including
 when the old configuration used a mutable tag; it does not depend on the tag
 continuing to reference the previous image.
 
+Each target is tagged `deedkit-production-<target>:<sha>`, and a tag is never
+rebuilt. Builds are not reproducible, and with the containerd image store a
+rebuild that moves the tag can remove the image that running containers use. If
+the tag already exists and its revision label (and, for a messaging image, its
+`DEEDKIT_SOURCE_SHA`) names the candidate, preparation reuses that image and
+smoke-tests it again. So `seamless_release.py prepare` after `production.py
+prepare` of the same SHA gets the same image IDs. If the tag exists but names
+another revision, or an older tool built it without `DEEDKIT_SOURCE_SHA`,
+preparation refuses and changes no tag. Removing such a stale tag is a separate
+operator step, taken only after `docker ps --all` shows that no container uses
+its image.
+
 Before applying, follow [backup/migration and rollback](platform-cutover.md).
 This tool does not run migrations, prove data compatibility, authorize external
 actions, or perform provider readback. A schema change needs the module's explicit
