@@ -136,6 +136,23 @@ provider cooldown, file-size limits or storage admission. Outside-window jobs
 remain queued without consuming a provider attempt. Requests do not reset failed
 or exhausted jobs; originals may no longer be available from the provider.
 
+Such dormant jobs cost an idle collector nothing per poll. With an integer
+window, a claim reads one fresh database time after its lock waits and looks
+only at candidates that can be claimable then: unexpired requests through the
+`media_requested` index, and messages from the window (also bounded by
+`history_since` and the five-minute future limit) through `message_scope_date`,
+then their jobs through `media_message`. Its work grows with requests and
+recent messages, never with the dormant backlog. `null` keeps the full history
+scan by design. The retry-exhausted sweep, which marks an expired fifth lease
+`failed`, has no selective index: each collector runs it on its first claim for
+an account and then on the first claim at least 60 seconds after the previous
+sweep, so the stored row lags by at most 60 seconds plus one claim cycle (about
+one second on an idle collector). Attachment status and media requests report
+such a lease as `retry_exhausted`/`failed` meanwhile; the operator status media
+phase still counts it as a lease until the sweep. Expired storage reservations
+are still reclaimed on every claim. `tests/test_media_claim_performance.py`
+checks the plans with 30,000 and 60,000 dormant jobs.
+
 Message capture and original downloads have separate disk budgets. Collector
 `disk_reserve_bytes` retains the capture/spool floor (default 1 GiB).
 `media_disk_reserve_bytes` controls the original-file floor (default the larger
