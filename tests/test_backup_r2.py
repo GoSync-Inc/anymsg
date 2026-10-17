@@ -645,3 +645,34 @@ def test_backup_prune_ignores_cold_prefix(operator):
     assert r2.rotate(config,marker,proof,expected_protected_sha256=expected,client=cloud)['status']=='rotated'
     assert all(cloud.objects[key]==value for key,value in archived.items())
     assert len([k for k in cloud.objects if '/cold/' not in k])==2
+
+def test_interrupted_cold_multipart_attempt_is_neutralized_before_a_retry(config):
+    cloud=Cloud();data=r2.AGE_HEADER+b'n'*(6*1024**2);key=config['prefix']+'/cold/'+COLD+'.age'
+    journal=Path(config['state_directory'])/(COLD+'.cold.json')
+    # 1. A lost create response: the unknown upload can never complete.
+    cloud.fail['created_response']=True
+    with pytest.raises(RuntimeError,match='storage_unavailable'):cold(config,cloud,'put',data=data)
+    assert not journal.exists() and len(cloud.uploads)==1
+    orphan=next(iter(cloud.uploads))
+    # 2. A process dies mid-upload: the journal keeps its upload ID.
+    real=cloud.complete_multipart_upload
+    def died(**kw):raise KeyboardInterrupt('synthetic process death')
+    cloud.complete_multipart_upload=died
+    with pytest.raises(KeyboardInterrupt):cold(config,cloud,'put',data=data)
+    cloud.complete_multipart_upload=real
+    saved=json.loads(journal.read_text())
+    assert saved['phase']=='completing' and saved['upload_id'] in cloud.uploads
+    # 3. The retry first aborts that journaled upload, so it can never land later.
+    responses,_=cold(config,cloud,'put',data=data)
+    assert responses[-1]['status']=='stored' and cloud.objects[key]==data
+    assert saved['upload_id'] not in cloud.uploads and set(cloud.uploads)=={orphan} and not journal.exists()
+
+def test_failed_cold_abort_keeps_the_journal_for_reconciliation(config):
+    cloud=Cloud();data=r2.AGE_HEADER+b'n'*(6*1024**2)
+    journal=Path(config['state_directory'])/(COLD+'.cold.json')
+    cloud.fail['complete_multipart_upload']=CloudError(500);cloud.fail['abort_multipart_upload']=CloudError(500)
+    with pytest.raises(RuntimeError,match='completion_outcome_unknown'):cold(config,cloud,'put',data=data)
+    with pytest.raises(RuntimeError,match='storage_unavailable'):cold(config,cloud,'put',data=data)
+    assert json.loads(journal.read_text())['phase']=='completing' and cloud.objects=={}
+    # Backup admission ignores cold journals.
+    assert receive(config,cloud)['status']=='stored'

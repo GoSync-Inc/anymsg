@@ -144,7 +144,8 @@ FROM ${POSTGRES_IMAGE} AS backup
 USER root
 RUN apt-get update && apt-get install -y --no-install-recommends ca-certificates openssh-client \
     libsqlite3-0 libbz2-1.0 libffi8 liblzma5 libexpat1 libreadline8 libncursesw6 libgdbm6 \
-    && rm -rf /var/lib/apt/lists/*
+    && rm -rf /var/lib/apt/lists/* \
+    && groupadd -g 10001 probe && useradd -u 10001 -g probe -M -d /nonexistent -s /usr/sbin/nologin probe
 COPY --from=python-dependencies /usr/local /usr/local
 WORKDIR /app
 ENV PYTHONDONTWRITEBYTECODE=1 PYTHONUNBUFFERED=1

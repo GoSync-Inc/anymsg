@@ -336,3 +336,20 @@ def test_runtime_layout_changes_block_helper_before_ciphertext_input(tmp_path,at
     elif attack=='unbounded_tmpfs':value['HostConfig']['Tmpfs'][v.PG_DATA_PATH]='rw'
     with pytest.raises(ValueError,match='unexpected_restore_helper_layout'):
         v.validate_helper_layout(config,run,tmp_path,tmp_path,value)
+
+
+def test_cold_archive_state_and_objects_do_not_block_backup_verification(operator):
+    v,config,receiver,cloud,engine,_=operator
+    state=Path(receiver['state_directory'])
+    (state/'.cold.lock').write_bytes(b'');(state/'.cold.lock').chmod(0o600)
+    (state/('c'*64+'.cold.json')).write_text('{"v":1}');(state/('c'*64+'.cold.json')).chmod(0o600)
+    cloud.objects[receiver['prefix']+'/cold/'+'c'*64+'.age']=r2.AGE_HEADER+b'synthetic cold copy'
+    assert v.run(config,client=cloud,engine=engine)['status']=='verified'
+    assert receiver['prefix']+'/cold/'+'c'*64+'.age' in cloud.objects
+    # Any other unknown local state still fails closed.
+    (state/'unexpected.json').write_text('{}')
+    fd=os.open(state,os.O_RDONLY)
+    try:
+        with pytest.raises(ValueError,match='unresolved_upload_required'):
+            v.select_candidate(r2.load_config(config['receiver_config_file']),cloud,fd,None)
+    finally:os.close(fd)

@@ -132,12 +132,21 @@ once. The pass never deletes anything, here or in R2.
 - **Encryption.** Each object is age ciphertext to two recipients: the existing
   backup recovery recipient, so the offline backup key can always restore it,
   and a dedicated cold recipient. Only the cold identity is placed on the
-  producer, as a private (`0600`), single-link regular file owned by root or
-  the archiver's user, outside Git, images and logs. Plaintext is read from
-  the CAS and never staged; reports carry no paths, keys or contents.
-- **Budget.** `total_bytes` caps the bytes of verified and pending copies;
-  `pass_files`, `pass_bytes` and `max_object_bytes` bound each pass. A
-  candidate over any limit is reported `cold_budget` and is not uploaded.
+  producer, as a private (`0600`), single-link regular file owned by the
+  archiver's runtime user (UID 10001 in the overlay), outside Git, images and
+  logs. Plaintext is read from the CAS and never staged; reports carry no
+  paths, keys or contents.
+- **Existing objects.** An object is never replaced. One already in R2 counts
+  only when it is the ciphertext this archiver recorded, for the current
+  recipients, before the receiver could commit it; decrypting with the cold
+  key alone cannot show that the backup recovery key also opens it. Otherwise
+  the copy is `failed` with `cold_object_unattested` and the original stays
+  resident until an operator reconciles it.
+- **Budget.** `total_bytes` caps the bytes of every copy that may exist in R2:
+  verified and pending copies, and failed ones whose ciphertext was already
+  offered for commit. `pass_files`, `pass_bytes` and `max_object_bytes` bound
+  each pass; failed copies are retried after new candidates. A candidate over
+  any limit is reported `cold_budget` and is not uploaded.
 - **Failure modes.** A receiver, network or R2 error is `cold_unavailable` and
   ends the pass; a read-back that does not prove the original is
   `cold_verify_failed`. In every case the original stays resident, and the
@@ -145,6 +154,11 @@ once. The pass never deletes anything, here or in R2.
   result of a stopped archive, never data loss. A dry run uploads nothing.
 - **Status.** `--status` prints copy counts and bytes by state, failure codes
   and the number of due originals without a verified copy.
+- **Manual retrieval.** Until part 2 automates it, an operator can send the
+  line `{"v":1,"op":"get","digest":"<sha256>"}` over the cold SSH key. The reply
+  is one JSON line with `bytes`, followed by exactly that many ciphertext
+  bytes. Decrypt them with the cold or the backup recovery identity, and check
+  the SHA-256 against the digest before using the original.
 - **Cost.** As checked on 2026-10-16, Cloudflare R2 Standard lists
   $0.015/GB-month, and the 10 GB account allowance is already used by backups:
   about 16 GB of eviction candidates cost about $0.24/month. Each original

@@ -354,4 +354,57 @@ def test_compose_runs_cold_archive_in_dry_run_without_r2_credentials():
     assert data==[{'type':'volume','source':'files','target':'/data','read_only':True}]
     assert all(v['read_only'] for v in service['volumes'])
     assert not any('credential' in v['source'] or 'r2' in v['source'] for v in service['volumes'])
-    assert 'openssh-client' in (root/'services/messaging/Dockerfile').read_text().split('AS backup',1)[1].split('\nCOPY',1)[0]
+    backup=(root/'services/messaging/Dockerfile').read_text().split('AS backup',1)[1].split('\nCOPY',1)[0]
+    # ssh refuses to start for a UID without a passwd entry; compose runs as 10001.
+    assert 'openssh-client' in backup and 'useradd -u 10001' in backup and service['user']=='10001:10001'
+
+
+def place(cloud,digest,data):
+    key='synthetic-owner/v1/cold/'+digest+'.age'
+    (cloud/('obj-'+hashlib.sha256(key.encode()).hexdigest())).write_bytes(data)
+
+
+def encrypt(payload,*recipients):
+    args=['age']
+    for recipient in recipients:args+=['-r',recipient]
+    return subprocess.run(args,input=payload,capture_output=True,check=True).stdout
+
+
+@pytest.mark.parametrize('history',['no_catalog_row','other_recipients'])
+def test_existing_object_without_recorded_provenance_is_never_verified(env,archive,keys,history):
+    s,cloud,archiver,_=env;payload=b'Synthetic original stored by someone else'
+    blob=idle(archive,payload=payload)
+    # Decrypts with the cold key, but the backup recovery key cannot open it.
+    data=encrypt(payload,keys['cold'][1]);place(cloud,blob.digest,data)
+    if history=='other_recipients':
+        # The recorded ciphertext matches, but it was sent for other recipients.
+        with s.pool.connection() as c:
+            c.execute('''INSERT INTO attachment_cold_copies(digest,bytes,state,object_key,ciphertext_bytes,ciphertext_sha256,recipient_fingerprints)
+                VALUES(%s,%s,'failed',%s,%s,%s,%s)''',(blob.digest,blob.bytes,'synthetic-owner/v1/cold/'+blob.digest+'.age',
+                len(data),hashlib.sha256(data).hexdigest(),['0'*64,'1'*64]))
+    report=archiver().run_once(apply=True)
+    assert report['archived']==0 and report['reasons']=={'cold_verify_failed':1}
+    row=copy(s,blob.digest)
+    assert row['state']=='failed' and row['error_code']=='cold_object_unattested' and row['verified_at'] is None
+    assert 'put_object' not in calls(cloud)
+
+
+def test_failed_read_back_keeps_the_stored_object_in_budget(env,archive):
+    s,cloud,archiver,_=env
+    one=idle(archive,mid='cold-1',payload=b'Synthetic first original')
+    (cloud/'tamper').write_text('different')
+    assert archiver().run_once(apply=True)['reasons']=={'cold_verify_failed':1}
+    (cloud/'tamper').unlink()
+    with s.pool.connection() as c:
+        c.execute("UPDATE attachment_residency SET last_accessed_at=clock_timestamp() WHERE digest=%s",(one.digest,))
+    two=idle(archive,mid='cold-2',payload=b'Synthetic second original')
+    report=archiver(total_bytes=one.bytes+two.bytes-1).run_once(apply=True)
+    # The failed object may still exist in R2, so it keeps its share of the budget.
+    assert report['budget']['used_bytes']==one.bytes and report['reasons']=={'cold_budget':1}
+    assert copy(s,two.digest) is None and len(objects(cloud))==1
+
+
+def test_oversized_plaintext_fails_verification_without_stalling(env,archive,keys):
+    s,cloud,archiver,_=env;blob=idle(archive,payload=b'Synthetic small original')
+    place(cloud,blob.digest,encrypt(os.urandom(3*1024**2),keys['backup'][1],keys['cold'][1]))
+    with pytest.raises(cold().ColdVerifyFailed):archiver().verify(blob.digest,blob.bytes,{})

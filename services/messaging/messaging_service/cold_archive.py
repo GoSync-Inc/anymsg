@@ -90,7 +90,7 @@ def identity_descriptor(path):
     try:
         info=os.fstat(fd)
         if (not stat.S_ISREG(info.st_mode) or info.st_nlink!=1 or info.st_mode&0o077 or
-                info.st_uid not in {0,os.geteuid()} or not 0<info.st_size<=65536):
+                info.st_uid!=os.geteuid() or not 0<info.st_size<=65536):
             raise ValueError('private_cold_identity_required')
         yield fd
     finally:
@@ -194,16 +194,18 @@ class ColdArchiver:
 
     def _candidates(self,limit):
         with self.store.pool.connection() as c:
-            return c.execute('''SELECT r.digest,r.bytes,cc.state AS cold_state,cc.ciphertext_bytes,cc.ciphertext_sha256
+            return c.execute('''SELECT r.digest,r.bytes,cc.state AS cold_state,cc.ciphertext_bytes,cc.ciphertext_sha256,cc.recipient_fingerprints
                 FROM attachment_residency r LEFT JOIN attachment_cold_copies cc ON cc.digest=r.digest
                 WHERE r.state='resident' AND NOT r.pinned
                   AND r.last_accessed_at<=clock_timestamp()-make_interval(days=>%s)
                   AND (cc.digest IS NULL OR cc.state<>'verified' OR cc.bytes<>r.bytes)
-                ORDER BY r.last_accessed_at,r.digest LIMIT %s''',(self.config['archive_after_days'],limit)).fetchall()
+                ORDER BY cc.state='failed',r.last_accessed_at,r.digest LIMIT %s''',(self.config['archive_after_days'],limit)).fetchall()
 
     def used_bytes(self,c):
-        # Pending copies may already exist in R2; budget them conservatively.
-        return c.execute("SELECT coalesce(sum(bytes),0)::bigint AS used FROM attachment_cold_copies WHERE state IN ('verified','pending')").fetchone()['used']
+        # Any copy whose ciphertext was offered for commit may exist in R2, even
+        # after a failed read-back; it stays budgeted until it is reconciled.
+        return c.execute("""SELECT coalesce(sum(bytes),0)::bigint AS used FROM attachment_cold_copies
+            WHERE state IN ('verified','pending') OR ciphertext_sha256 IS NOT NULL""").fetchone()['used']
 
     def _open_original(self,digest,size):
         root=os.open(self.store.files,os.O_RDONLY|os.O_DIRECTORY|os.O_NOFOLLOW)
@@ -296,8 +298,11 @@ class ColdArchiver:
                 plain=hashlib.sha256();count=0
                 while chunk:=process.stdout.read(MIB):
                     count+=len(chunk);plain.update(chunk)
-                    if count>size:break
-                failed=process.wait(timeout=60)
+                    if count>size:
+                        # Too much plaintext already disproves the copy; never block on it.
+                        process.kill();break
+                try:failed=process.wait(timeout=60)
+                except subprocess.TimeoutExpired:raise ColdUnavailable(UNAVAILABLE) from None
                 thread.join(timeout=60)
             finally:
                 if process.poll() is None:process.kill();process.wait(timeout=10)
@@ -318,14 +323,16 @@ class ColdArchiver:
             if resident is None or resident['bytes']!=size:return False
             row=c.execute('SELECT state FROM attachment_cold_copies WHERE digest=%s FOR UPDATE',(digest,)).fetchone()
             if row is None:
-                if state=='failed':return True  # Nothing was ever committed for this digest.
+                # A failure before any object was seen leaves nothing to record;
+                # an existing object found in R2 is kept visible to the operator.
+                if state=='failed' and not fields.get('object_key'):return True
                 c.execute("INSERT INTO attachment_cold_copies(digest,bytes,state,object_key) VALUES(%s,%s,'pending',%s)",
                           (digest,size,fields['object_key']))
             if state=='pending':
                 c.execute('''UPDATE attachment_cold_copies SET bytes=%s,state='pending',object_key=%s,
                     ciphertext_bytes=%s,ciphertext_sha256=%s,attempts=attempts+1,error_code=NULL,verified_at=NULL,
-                    recipient_fingerprints='{}',updated_at=clock_timestamp() WHERE digest=%s''',
-                    (size,fields['object_key'],fields['ciphertext_bytes'],fields['ciphertext_sha256'],digest))
+                    recipient_fingerprints=%s,updated_at=clock_timestamp() WHERE digest=%s''',
+                    (size,fields['object_key'],fields['ciphertext_bytes'],fields['ciphertext_sha256'],self.fingerprints,digest))
             elif state=='verified':
                 c.execute('''UPDATE attachment_cold_copies SET bytes=%s,state='verified',object_key=%s,ciphertext_bytes=%s,
                     ciphertext_sha256=%s,recipient_fingerprints=%s,error_code=NULL,verified_at=clock_timestamp(),
@@ -345,17 +352,23 @@ class ColdArchiver:
             # The expected ciphertext is durable before the receiver may commit it.
             if not self._record(digest,size,state='pending',object_key=key,ciphertext_bytes=cipher_bytes,ciphertext_sha256=cipher_sha):
                 raise ValueError('state_changed')
+        stored={}
         try:
             stored=self.transport.put(digest,self._encrypt(digest,size),before_commit)
             if stored['status']=='exists':
-                # Never overwritten. An existing object is checked against the
-                # ciphertext recorded before its commit, and always by decryption.
-                if known['sha256'] and known['bytes']!=stored['bytes']:raise ColdVerifyFailed('cold_ciphertext_mismatch')
+                # Never overwritten. Decrypting with the cold key cannot show that
+                # the backup recovery key also opens the object, so an existing
+                # object counts only when it is the ciphertext this archiver recorded,
+                # for the current recipients, before the receiver could commit it.
+                if (not known['sha256'] or known['bytes']!=stored['bytes'] or
+                        sorted(row['recipient_fingerprints'] or [])!=self.fingerprints):
+                    raise ColdVerifyFailed('cold_object_unattested')
                 expected={'bytes':stored['bytes'],'sha256':known['sha256']}
             else:expected={'bytes':stored['bytes'],'sha256':stored['sha256']}
             observed=self.verify(digest,size,expected)
         except ColdVerifyFailed as error:
-            self._record(digest,size,state='failed',error_code=str(error) if re.fullmatch('[a-z_]{1,64}',str(error)) else VERIFY_FAILED)
+            self._record(digest,size,state='failed',object_key=stored.get('key'),
+                         error_code=str(error) if re.fullmatch('[a-z_]{1,64}',str(error)) else VERIFY_FAILED)
             return VERIFY_FAILED
         except ColdUnavailable:
             self._record(digest,size,state='failed',error_code=UNAVAILABLE)
@@ -380,10 +393,10 @@ class ColdArchiver:
             result['blocked']+=1;result['reasons'][reason]=result['reasons'].get(reason,0)+1
         rows=self._candidates(limit)
         with self.store.pool.connection() as c:used=self.used_bytes(c)
-        # Rows already pending are budgeted in `used`; count only new bytes.
+        # Rows already budgeted in `used` add no new bytes.
         files=0;spent=0;stopped=False
         for row in rows:
-            new=0 if row['cold_state']=='pending' else row['bytes']
+            new=0 if row['cold_state']=='pending' or row['ciphertext_sha256'] else row['bytes']
             if stopped:blocked(UNAVAILABLE);continue
             if (files>=self.config['pass_files'] or spent+row['bytes']>self.config['pass_bytes'] or
                     used+new>self.config['total_bytes'] or row['bytes']>self.config['max_object_bytes']):

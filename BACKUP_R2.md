@@ -427,7 +427,11 @@ The `cold` mode reads one request line and accepts only `put` or `get` of a
 or other verb. It never lists, deletes or overwrites: a `put` for an existing
 key reports `exists` without reading the new ciphertext, and a single-request
 write is conditional (`If-None-Match: *`). Writes are serialized by a separate
-`.cold.lock` in upload state, so a long backup upload does not block them.
+`.cold.lock` in upload state, so a long backup upload does not block them. A
+multipart write keeps a `<digest>.cold.json` journal there; the next attempt
+for that key first aborts the journaled upload, so an interrupted earlier
+completion can never replace a later object. The verifier ignores the cold
+lock and journals.
 Objects must be age ciphertext; the optional `cold_max_bytes` (default 5 GiB)
 bounds each one and must exceed the archiver's `max_object_bytes` plus age
 overhead. Larger objects use the configured multipart part size.
@@ -448,8 +452,9 @@ Retention of `cold/` after message deletion is a separate, future decision.
 recipient (the root-only verifier key and its offline copy can always restore
 it) and a dedicated cold recipient created for the producer. Generate the cold
 identity with `age-keygen` on the producer host, keep it outside Git, images
-and logs as a private (`0600`), single-link regular file owned by root or the
-archiver's runtime user, and keep an offline copy with the backup recovery key.
+and logs as a private (`0600`), single-link regular file owned by the
+archiver's runtime user (UID 10001), and keep an offline copy with the backup
+recovery key.
 Losing the cold identity does not lose data; the backup recovery key still
 decrypts every object.
 

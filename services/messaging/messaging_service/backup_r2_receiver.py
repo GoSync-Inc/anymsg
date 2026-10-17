@@ -809,9 +809,39 @@ def cold_lock(config):
                 fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
             except BlockingIOError:
                 raise RuntimeError('receiver_busy') from None
-            yield
+            yield state_fd
         finally:
             os.close(fd)
+
+
+def cold_attempt_name(key):
+    # Not `.attempt.json`: backup admission treats those names as backup IDs.
+    return key.rsplit('/', 1)[1][:-len('.age')] + '.cold.json'
+
+
+def cold_reconcile(config, client, key, state_fd):
+    """Neutralize an earlier interrupted multipart attempt for this key.
+
+    Aborting the journaled upload makes any delayed completion fail, so a new
+    attempt can never be replaced by an older one. A create whose response was
+    lost left an upload ID nobody holds; it can never complete.
+    """
+    name = cold_attempt_name(key)
+    attempt = state_read(state_fd, name)
+    if attempt is None:
+        return
+    if (not isinstance(attempt, dict) or set(attempt) != {'v', 'key', 'phase', 'upload_id'} or
+            attempt['v'] != 1 or attempt['key'] != key or attempt['phase'] not in {'creating', 'uploading', 'completing'} or
+            (attempt['phase'] != 'creating' and
+             (not isinstance(attempt['upload_id'], str) or not 1 <= len(attempt['upload_id']) <= 1024))):
+        raise ValueError('invalid_attempt_journal')
+    if attempt['phase'] != 'creating':
+        try:
+            client.abort_multipart_upload(Bucket=config['bucket'], Key=key, UploadId=attempt['upload_id'])
+        except Exception as exc:
+            if code(exc) != 'NoSuchUpload':
+                raise RuntimeError('storage_unavailable') from None
+    os.unlink(name, dir_fd=state_fd); local.fsync_dir(state_fd)
 
 
 def cold_head(config, client, key):
@@ -827,8 +857,12 @@ def cold_head(config, client, key):
     return size
 
 
-def cold_put(config, client, key, source, respond):
+def cold_put(config, client, key, source, respond, state_fd):
     """Write once under <prefix>/cold/: an existing key is reported, never replaced."""
+    cold_reconcile(config, client, key, state_fd)
+    journal = cold_attempt_name(key)
+    def phase(name, upload):
+        state_write(state_fd, journal, {'v': 1, 'key': key, 'phase': name, 'upload_id': upload})
     existing = cold_head(config, client, key)
     if existing is not None:
         respond({'v': 1, 'status': 'exists', 'key': key, 'bytes': existing})
@@ -857,11 +891,13 @@ def cold_put(config, client, key, source, respond):
             buffer.extend(data)
             if len(buffer) >= config['part_bytes']:
                 if upload_id is None:
+                    phase('creating', None)
                     created = cloud_call(client.create_multipart_upload, Bucket=config['bucket'], Key=key,
                                          ContentType='application/octet-stream')
-                    upload_id = created.get('UploadId')
-                    if not isinstance(upload_id, str) or not 1 <= len(upload_id) <= 1024:
+                    created_id = created.get('UploadId')
+                    if not isinstance(created_id, str) or not 1 <= len(created_id) <= 1024:
                         raise ValueError('invalid_upload_id')
+                    phase('uploading', created_id); upload_id = created_id
                 part(bytes(buffer[:config['part_bytes']])); del buffer[:config['part_bytes']]
         raw = source.readline(4097)
         if len(raw) > 4096 or not raw.endswith(b'\n'):
@@ -879,8 +915,14 @@ def cold_put(config, client, key, source, respond):
         if upload_id is not None and buffer:
             part(bytes(buffer))
     except BaseException:
+        # Before completion only. A failed abort keeps the journal for the next
+        # attempt's reconciliation; a successful one clears it.
         if upload_id is not None:
             cloud_call(client.abort_multipart_upload, Bucket=config['bucket'], Key=key, UploadId=upload_id)
+        try:
+            os.unlink(journal, dir_fd=state_fd); local.fsync_dir(state_fd)
+        except FileNotFoundError:
+            pass
         raise
     if upload_id is None:
         try:
@@ -892,12 +934,14 @@ def cold_put(config, client, key, source, respond):
             respond({'v': 1, 'status': 'exists', 'key': key, 'bytes': cold_head(config, client, key)})
             return
     else:
+        phase('completing', upload_id)
         try:
             client.complete_multipart_upload(Bucket=config['bucket'], Key=key, UploadId=upload_id,
                                              MultipartUpload={'Parts': parts})
         except Exception:
-            # The producer reads the key back; an absent object is a retryable failure.
+            # The journal stays: the next attempt aborts this upload, then re-checks the key.
             raise RuntimeError('completion_outcome_unknown') from None
+        os.unlink(journal, dir_fd=state_fd); local.fsync_dir(state_fd)
     respond({'v': 1, 'status': 'stored', 'key': key, 'bytes': size, 'sha256': digest.hexdigest()})
 
 
@@ -945,8 +989,8 @@ def cold_serve(config, source, sink, *, client=None):
     if header['op'] == 'get':
         cold_get(config, client, key, respond, sink)
         return
-    with cold_lock(config):
-        cold_put(config, client, key, source, respond)
+    with cold_lock(config) as state_fd:
+        cold_put(config, client, key, source, respond, state_fd)
 
 
 def main(argv=None):
